@@ -1,13 +1,12 @@
 replicaCount: 1
 
-# -- Image pull secrets for private registries
-imagePullSecrets:
-  - name: nexus-registry
+# -- Image pull secrets (Zot allows anonymous read; only needed if anonymous read is disabled)
+imagePullSecrets: []
 
 # Image configuration
 image:
   # -- Container registry
-  registry: ats-dev.nexus.switchnet.nv
+  registry: registry.switchcraft.pd.internal
   # -- Image repository
   repository: chapterhouse/ch-web
   # -- Image tag (defaults to Chart appVersion)

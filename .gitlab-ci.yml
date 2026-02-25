@@ -12,7 +12,7 @@ stages:
 
 variables:
   GO_VERSION: "1.24"
-  REGISTRY: ats-dev.nexus.switchnet.nv/chapterhouse
+  REGISTRY: registry.switchcraft.pd.internal/chapterhouse
   IMAGE_PREFIX: ${REGISTRY}
   KUBE_NAMESPACE: ch-system
 
@@ -22,6 +22,8 @@ variables:
 test:
   stage: test
   image: golang:${GO_VERSION}-alpine
+  tags:
+    - runcell
   before_script:
     # Inject CA bundle before apk — MITM proxy intercepts Alpine mirror TLS
     - cp ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
@@ -43,20 +45,16 @@ test:
     - if: $CI_COMMIT_TAG
 
 # =============================================================================
-# Build Stage - Docker (DIND)
-# =============================================================================
-# Requires a runner with Docker-in-Docker support (e.g. runcell runner 39)
-# Tag jobs with 'docker' + 'amd64' to match the DIND-capable runner
+# Build Stage - Docker (BuildKit with docker-container driver)
 # =============================================================================
 .docker-build:
   stage: build
   image: docker:27
   tags:
-    - docker
-    - amd64
+    - runcell
   services:
     - name: docker:27-dind
-      command: ["--insecure-registry=ats-dev.nexus.switchnet.nv"]
+      command: ["--insecure-registry=registry.switchcraft.pd.internal"]
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -64,14 +62,14 @@ test:
   before_script:
     # Verify credentials are set
     - |
-      if [ -z "${NEXUS_USER}" ]; then
-        echo "ERROR: NEXUS_USER CI variable not set"
-        echo "Go to Settings > CI/CD > Variables and add NEXUS_USER"
+      if [ -z "${ZOT_USER}" ]; then
+        echo "ERROR: ZOT_USER CI variable not set"
+        echo "Go to Settings > CI/CD > Variables and add ZOT_USER"
         exit 1
       fi
-      if [ -z "${NEXUS_PASSWORD}" ]; then
-        echo "ERROR: NEXUS_PASSWORD CI variable not set"
-        echo "Go to Settings > CI/CD > Variables and add NEXUS_PASSWORD"
+      if [ -z "${ZOT_PASSWORD}" ]; then
+        echo "ERROR: ZOT_PASSWORD CI variable not set"
+        echo "Go to Settings > CI/CD > Variables and add ZOT_PASSWORD"
         exit 1
       fi
     # Inject corporate CA bundle for MITM proxy
@@ -92,8 +90,19 @@ test:
         echo "ERROR: Docker daemon not available after 60s"
         exit 1
       fi
-    # Login to Nexus Docker registry
-    - echo "${NEXUS_PASSWORD}" | docker login ats-dev.nexus.switchnet.nv -u "${NEXUS_USER}" --password-stdin
+    # Login to Zot registry
+    - echo "${ZOT_PASSWORD}" | docker login -u "${ZOT_USER}" --password-stdin registry.switchcraft.pd.internal
+    # Create buildx builder with docker-container driver.
+    # The docker driver delegates push to the DinD daemon which drops auth headers.
+    # The docker-container driver runs BuildKit in its own container and receives
+    # auth directly from the client session, bypassing DinD's broken push auth.
+    # BuildKit needs insecure=true because the container doesn't have the corporate CA.
+    - |
+      cat > /tmp/buildkitd.toml <<'TOML'
+      [registry."registry.switchcraft.pd.internal"]
+        insecure = true
+      TOML
+    - docker buildx create --use --driver docker-container --name ci-builder --buildkitd-config /tmp/buildkitd.toml
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
@@ -114,14 +123,12 @@ build-server:
         VERSION="${CI_COMMIT_SHORT_SHA}"
       fi
       echo "Building ch-server:${VERSION}"
-      docker build \
+      docker buildx build --push \
         --platform linux/amd64 \
         -t ${IMAGE_PREFIX}/ch-server:${VERSION} \
         -t ${IMAGE_PREFIX}/ch-server:latest \
         -f ch-server/Dockerfile \
         ch-server/
-      docker push ${IMAGE_PREFIX}/ch-server:${VERSION}
-      docker push ${IMAGE_PREFIX}/ch-server:latest
 
 build-web:
   extends: .docker-build
@@ -139,14 +146,12 @@ build-web:
         VERSION="${CI_COMMIT_SHORT_SHA}"
       fi
       echo "Building ch-web:${VERSION}"
-      docker build \
+      docker buildx build --push \
         --platform linux/amd64 \
         -t ${IMAGE_PREFIX}/ch-web:${VERSION} \
         -t ${IMAGE_PREFIX}/ch-web:latest \
         -f ch-web/Dockerfile \
         ch-web/
-      docker push ${IMAGE_PREFIX}/ch-web:${VERSION}
-      docker push ${IMAGE_PREFIX}/ch-web:latest
 
 # =============================================================================
 # Publish Stage - Helm Charts
@@ -154,6 +159,8 @@ build-web:
 publish-helm-charts:
   stage: publish
   image: alpine:3.21
+  tags:
+    - runcell
   before_script:
     # Alpine: append CA to trust store before apk can fetch through MITM proxy
     - mkdir -p /usr/local/share/ca-certificates
@@ -170,6 +177,9 @@ publish-helm-charts:
       fi
       echo "Chart version: ${VERSION}"
 
+      # Login to Zot OCI registry for helm push
+      echo "${ZOT_PASSWORD}" | helm registry login registry.switchcraft.pd.internal -u "${ZOT_USER}" --password-stdin
+
       mkdir -p dist
       for chart in ch-server/charts/ch-server ch-web/charts/ch-web; do
         if [ ! -f "${chart}/Chart.yaml" ]; then
@@ -179,6 +189,9 @@ publish-helm-charts:
         chart_name=$(basename "$chart")
         echo "Packaging ${chart_name}..."
         helm package "$chart" --version "${VERSION}" --app-version "${VERSION}" -d dist/
+
+        echo "Pushing ${chart_name}:${VERSION} to OCI registry..."
+        helm push "dist/${chart_name}-${VERSION}.tgz" oci://registry.switchcraft.pd.internal/charts
       done
   artifacts:
     paths:
@@ -194,13 +207,15 @@ publish-helm-charts:
 # =============================================================================
 # Deploy Stage
 # =============================================================================
-# Requires CI variable: KUBE_CONFIG (base64-encoded kubeconfig)
-# Generate with: base64 -i ~/.kube/your-cluster.yaml | tr -d '\n'
+# Requires CI variable: KUBE_CONFIG_OVAS (base64-encoded kubeconfig for ovas-ai-prod)
+# Generate with: base64 -i ~/.kube/ovas-ai-prod.yaml | tr -d '\n'
 # =============================================================================
 
 .deploy-base:
   stage: deploy
   image: alpine/helm:3.16.3
+  tags:
+    - runcell
   allow_failure: true
   variables:
     KUBECONFIG: /tmp/kubeconfig
@@ -210,18 +225,17 @@ publish-helm-charts:
     - cp ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
     - cat /usr/local/share/ca-certificates/switch-ca.crt >> /etc/ssl/certs/ca-certificates.crt
     - |
-      if [ -z "${KUBE_CONFIG}" ]; then
-        echo "ERROR: KUBE_CONFIG CI variable not set"
-        echo "Generate with: base64 -i ~/.kube/your-cluster.yaml | tr -d '\\n'"
+      if [ -z "${KUBE_CONFIG_OVAS}" ]; then
+        echo "ERROR: KUBE_CONFIG_OVAS CI variable not set"
+        echo "Generate with: base64 -i ~/.kube/ovas-ai-prod.yaml | tr -d '\\n'"
         echo "Add to CI/CD > Variables"
         exit 1
       fi
-    - echo "${KUBE_CONFIG}" | base64 -d > /tmp/kubeconfig
+    - echo "${KUBE_CONFIG_OVAS}" | base64 -d > /tmp/kubeconfig
     - chmod 600 /tmp/kubeconfig
 
 deploy-server:
   extends: .deploy-base
-  when: manual
   script:
     - |
       if [ -n "${CI_COMMIT_TAG}" ]; then
@@ -243,12 +257,12 @@ deploy-server:
     - if: $CI_COMMIT_BRANCH == "main"
       changes:
         - ch-server/**/*
+        - ch-server/charts/**/*
   needs:
     - job: build-server
 
 deploy-web:
   extends: .deploy-base
-  when: manual
   script:
     - |
       if [ -n "${CI_COMMIT_TAG}" ]; then
@@ -267,5 +281,6 @@ deploy-web:
     - if: $CI_COMMIT_BRANCH == "main"
       changes:
         - ch-web/**/*
+        - ch-web/charts/**/*
   needs:
     - job: build-web

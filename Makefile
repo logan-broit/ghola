@@ -3,7 +3,7 @@
 
 .PHONY: build test lint clean help server web images charts deploy-server deploy-web reindex release release-dry-run release-check
 
-REGISTRY   ?= ats-dev.nexus.switchnet.nv/chapterhouse
+REGISTRY   ?= registry.switchcraft.pd.internal/chapterhouse
 VERSION     = $(shell cat VERSION 2>/dev/null || echo "0.1.0")
 NAMESPACE  ?= ch-system
 

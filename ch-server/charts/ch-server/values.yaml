@@ -7,7 +7,7 @@ replicaCount: 2
 # Image configuration
 image:
   # -- Container registry
-  registry: ats-dev.nexus.switchnet.nv
+  registry: registry.switchcraft.pd.internal
   # -- Image repository
   repository: chapterhouse/ch-server
   # -- Image tag (defaults to Chart appVersion)
@@ -15,9 +15,8 @@ image:
   # -- Image pull policy
   pullPolicy: Always
 
-# -- Image pull secrets for private registries
-imagePullSecrets:
-  - name: nexus-registry
+# -- Image pull secrets (Zot allows anonymous read; only needed if anonymous read is disabled)
+imagePullSecrets: []
 
 # -- Override the name of the chart
 nameOverride: ""
