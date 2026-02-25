@@ -43,37 +43,63 @@ test:
     - if: $CI_COMMIT_TAG
 
 # =============================================================================
-# Build Stage - Kaniko (no DIND required, works on K8s runners)
+# Build Stage - Docker (DIND)
 # =============================================================================
-.kaniko-build:
+# Requires a runner with Docker-in-Docker support (e.g. runcell runner 39)
+# Tag jobs with 'docker' + 'amd64' to match the DIND-capable runner
+# =============================================================================
+.docker-build:
   stage: build
-  image:
-    name: gcr.io/kaniko-project/executor:v1.23.2-debug
-    entrypoint: [""]
+  image: docker:27
+  tags:
+    - docker
+    - amd64
+  services:
+    - name: docker:27-dind
+      command: ["--insecure-registry=ats-dev.nexus.switchnet.nv"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
   before_script:
     # Verify credentials are set
     - |
       if [ -z "${NEXUS_USER}" ]; then
         echo "ERROR: NEXUS_USER CI variable not set"
+        echo "Go to Settings > CI/CD > Variables and add NEXUS_USER"
         exit 1
       fi
       if [ -z "${NEXUS_PASSWORD}" ]; then
         echo "ERROR: NEXUS_PASSWORD CI variable not set"
+        echo "Go to Settings > CI/CD > Variables and add NEXUS_PASSWORD"
         exit 1
       fi
-    # Inject corporate CA bundle for MITM proxy (Kaniko uses /kaniko/ssl/certs)
-    - mkdir -p /kaniko/ssl/certs
-    - cat ca-bundle.pem >> /kaniko/ssl/certs/additional-ca-cert-bundle.crt
-    # Create Kaniko Docker config for registry auth
-    - mkdir -p /kaniko/.docker
+    # Inject corporate CA bundle for MITM proxy
+    - cp ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
+    - update-ca-certificates
+    # Wait for Docker daemon to be ready (DIND takes time to start)
     - |
-      echo "{\"auths\":{\"ats-dev.nexus.switchnet.nv\":{\"auth\":\"$(echo -n ${NEXUS_USER}:${NEXUS_PASSWORD} | base64)\"}}}" > /kaniko/.docker/config.json
+      echo "Waiting for Docker daemon..."
+      for i in $(seq 1 30); do
+        if docker info >/dev/null 2>&1; then
+          echo "Docker is ready!"
+          break
+        fi
+        echo "  attempt $i/30..."
+        sleep 2
+      done
+      if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: Docker daemon not available after 60s"
+        exit 1
+      fi
+    # Login to Nexus Docker registry
+    - echo "${NEXUS_PASSWORD}" | docker login ats-dev.nexus.switchnet.nv -u "${NEXUS_USER}" --password-stdin
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
 
 build-server:
-  extends: .kaniko-build
+  extends: .docker-build
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
@@ -87,18 +113,18 @@ build-server:
       else
         VERSION="${CI_COMMIT_SHORT_SHA}"
       fi
-      echo "Building ch-server:${VERSION} with Kaniko"
-    - /kaniko/executor
-      --context=${CI_PROJECT_DIR}/ch-server
-      --dockerfile=${CI_PROJECT_DIR}/ch-server/Dockerfile
-      --destination=${IMAGE_PREFIX}/ch-server:${VERSION}
-      --destination=${IMAGE_PREFIX}/ch-server:latest
-      --cache=true
-      --custom-platform=linux/amd64
-      --insecure-registry=ats-dev.nexus.switchnet.nv
+      echo "Building ch-server:${VERSION}"
+      docker build \
+        --platform linux/amd64 \
+        -t ${IMAGE_PREFIX}/ch-server:${VERSION} \
+        -t ${IMAGE_PREFIX}/ch-server:latest \
+        -f ch-server/Dockerfile \
+        ch-server/
+      docker push ${IMAGE_PREFIX}/ch-server:${VERSION}
+      docker push ${IMAGE_PREFIX}/ch-server:latest
 
 build-web:
-  extends: .kaniko-build
+  extends: .docker-build
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
@@ -112,15 +138,15 @@ build-web:
       else
         VERSION="${CI_COMMIT_SHORT_SHA}"
       fi
-      echo "Building ch-web:${VERSION} with Kaniko"
-    - /kaniko/executor
-      --context=${CI_PROJECT_DIR}/ch-web
-      --dockerfile=${CI_PROJECT_DIR}/ch-web/Dockerfile
-      --destination=${IMAGE_PREFIX}/ch-web:${VERSION}
-      --destination=${IMAGE_PREFIX}/ch-web:latest
-      --cache=true
-      --custom-platform=linux/amd64
-      --insecure-registry=ats-dev.nexus.switchnet.nv
+      echo "Building ch-web:${VERSION}"
+      docker build \
+        --platform linux/amd64 \
+        -t ${IMAGE_PREFIX}/ch-web:${VERSION} \
+        -t ${IMAGE_PREFIX}/ch-web:latest \
+        -f ch-web/Dockerfile \
+        ch-web/
+      docker push ${IMAGE_PREFIX}/ch-web:${VERSION}
+      docker push ${IMAGE_PREFIX}/ch-web:latest
 
 # =============================================================================
 # Publish Stage - Helm Charts
