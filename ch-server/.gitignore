@@ -1,0 +1,5 @@
+# Server binary
+/ch-server
+
+# Dependencies vendored from web (if any)
+web/

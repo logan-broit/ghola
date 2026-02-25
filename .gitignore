@@ -1,0 +1,38 @@
+# Reference architecture (not part of this project)
+runcell/
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Output
+bin/
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# MCP config (may contain API keys)
+.mcp.json
+
+# Local planning notes (untracked)
+planning/
+
+# Coverage
+coverage.out
+coverage.html

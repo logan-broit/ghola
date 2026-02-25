@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Users - Chapterhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/admin.css">
+    <script>window.CH_API_BASE = ''; window.CH_MOCK_MODE = false;</script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-logo">Chapterhouse</div>
+            <div class="sidebar-subtitle">Agentic Memory</div>
+            <nav>
+                <div class="nav-section">
+                    <div class="nav-section-title">Overview</div>
+                    <a class="nav-item" href="admin.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Dashboard</a>
+                </div>
+                <div class="nav-section" data-admin-only>
+                    <div class="nav-section-title">Admin</div>
+                    <a class="nav-item" href="users.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Users</a>
+                    <a class="nav-item" href="keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API Keys</a>
+                    <a class="nav-item" href="audit.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Audit Log</a>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">Personal</div>
+                    <a class="nav-item" href="my-keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>My API Keys</a>
+                    <a class="nav-item" href="my-activity.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>My Activity</a>
+                    <a class="nav-item" href="settings.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</a>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="user-avatar">--</div>
+                    <div class="user-details"><div class="user-name" id="user-name">Loading...</div><div class="user-role" id="user-role">-</div></div>
+                </div>
+                <button class="btn btn-secondary" style="width:100%;margin-top:12px" onclick="logout()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Sign Out</button>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <div class="page-header">
+                <div class="page-header-content">
+                    <h1 class="page-title">Users</h1>
+                    <p class="page-subtitle">Manage user accounts and permissions</p>
+                </div>
+                <div class="page-actions">
+                    <button class="btn btn-primary" onclick="showCreateUser()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        Create User
+                    </button>
+                </div>
+            </div>
+
+            <div class="search-bar">
+                <label class="form-checkbox"><input type="checkbox" id="show-deactivated" onchange="loadUsers()"> Show deactivated</label>
+            </div>
+
+            <div class="card">
+                <div id="users-table"></div>
+                <div id="users-pagination"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/ui.js"></script>
+    <script>
+        const ch = window.chapterhouse;
+        let currentOffset = 0;
+        const LIMIT = 25;
+
+        async function loadUsers() {
+            const showDeactivated = document.getElementById('show-deactivated').checked;
+            try {
+                const result = await ch.users.list({ limit: LIMIT, offset: currentOffset, active: !showDeactivated ? true : undefined });
+                const data = result.data || [];
+                const total = result.pagination?.total || data.length;
+
+                renderTable('users-table', [
+                    { label: 'User', render: u => `<div class="flex items-center gap-1"><div class="user-avatar" style="width:28px;height:28px;font-size:11px">${ch.getInitials(u.display_name || u.username)}</div><div><div class="text-cyan" style="font-size:13px">${u.username}</div>${u.display_name ? `<div class="text-muted" style="font-size:12px">${u.display_name}</div>` : ''}</div></div>` },
+                    { label: 'Role', render: u => roleBadge(u.is_admin) },
+                    { label: 'Status', render: u => statusBadge(u.deactivated_at ? 'deactivated' : 'active') },
+                    { label: 'Created', render: u => ch.formatRelativeTime(u.created_at) },
+                    { label: 'Actions', render: u => renderUserActions(u) },
+                ], data, { emptyTitle: 'No users', emptyText: 'No user accounts found.' });
+
+                renderPagination('users-pagination', total, currentOffset, LIMIT, (offset) => {
+                    currentOffset = offset;
+                    loadUsers();
+                });
+            } catch (err) {
+                toast.error('Failed to load users');
+            }
+        }
+
+        function renderUserActions(u) {
+            const btns = [];
+            btns.push(`<button class="btn btn-xs btn-secondary" onclick="showEditUser('${u.id}')">Edit</button>`);
+            if (u.deactivated_at) {
+                btns.push(`<button class="btn btn-xs btn-primary" onclick="reactivateUser('${u.id}', '${u.username}')">Reactivate</button>`);
+            } else {
+                btns.push(`<button class="btn btn-xs btn-danger" onclick="deactivateUser('${u.id}', '${u.username}')">Deactivate</button>`);
+            }
+            return `<div class="table-actions">${btns.join('')}</div>`;
+        }
+
+        function showCreateUser() {
+            const content = `
+                <form id="create-user-form">
+                    <div class="form-group">
+                        <label class="form-label required">Username</label>
+                        <input type="text" name="username" class="form-input" required>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Email</label>
+                            <input type="email" name="email" class="form-input">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Display Name</label>
+                            <input type="text" name="display_name" class="form-input">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" name="password" class="form-input" minlength="8">
+                        <div class="form-hint">Optional. Leave empty for API-key-only access.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-checkbox"><input type="checkbox" name="is_admin"> Administrator</label>
+                    </div>
+                </form>
+            `;
+            const footer = document.createElement('div');
+            footer.innerHTML = '<button class="btn btn-secondary" onclick="modal.close()">Cancel</button><button class="btn btn-primary" id="create-btn">Create</button>';
+            modal.open({ title: 'Create User', content, footer });
+
+            footer.querySelector('#create-btn').onclick = async () => {
+                const data = getFormData(document.getElementById('create-user-form'));
+                if (!data.username) { toast.error('Username is required'); return; }
+                try {
+                    await ch.users.create(data);
+                    modal.close();
+                    toast.success('User created');
+                    loadUsers();
+                } catch (err) {
+                    toast.error(err.message || 'Failed to create user');
+                }
+            };
+        }
+
+        async function showEditUser(id) {
+            try {
+                const u = await ch.users.get(id);
+                const content = `
+                    <form id="edit-user-form">
+                        <div class="form-group">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-input" value="${u.username}" disabled>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">Email</label>
+                                <input type="email" name="email" class="form-input" value="${u.email || ''}">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Display Name</label>
+                                <input type="text" name="display_name" class="form-input" value="${u.display_name || ''}">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">New Password</label>
+                            <input type="password" name="password" class="form-input" minlength="8">
+                            <div class="form-hint">Leave empty to keep current password</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-checkbox"><input type="checkbox" name="is_admin" ${u.is_admin ? 'checked' : ''}> Administrator</label>
+                        </div>
+                    </form>
+                `;
+                const footer = document.createElement('div');
+                footer.innerHTML = '<button class="btn btn-secondary" onclick="modal.close()">Cancel</button><button class="btn btn-primary" id="save-btn">Save</button>';
+                modal.open({ title: 'Edit User', content, footer });
+
+                footer.querySelector('#save-btn').onclick = async () => {
+                    const data = getFormData(document.getElementById('edit-user-form'));
+                    const payload = { is_admin: data.is_admin };
+                    if (data.email) payload.email = data.email;
+                    if (data.display_name) payload.display_name = data.display_name;
+                    if (data.password) payload.password = data.password;
+                    try {
+                        await ch.users.update(id, payload);
+                        modal.close();
+                        toast.success('User updated');
+                        loadUsers();
+                    } catch (err) {
+                        toast.error(err.message || 'Failed to update user');
+                    }
+                };
+            } catch (err) {
+                toast.error('Failed to load user details');
+            }
+        }
+
+        async function deactivateUser(id, username) {
+            const confirmed = await modal.confirm(`Deactivate user "${username}"? They will lose access immediately.`, 'Deactivate User');
+            if (!confirmed) return;
+            try {
+                await ch.users.deactivate(id);
+                toast.success('User deactivated');
+                loadUsers();
+            } catch (err) {
+                toast.error(err.message || 'Failed to deactivate user');
+            }
+        }
+
+        async function reactivateUser(id, username) {
+            try {
+                await ch.users.reactivate(id);
+                toast.success(`User "${username}" reactivated`);
+                loadUsers();
+            } catch (err) {
+                toast.error(err.message || 'Failed to reactivate user');
+            }
+        }
+
+        loadUsers();
+    </script>
+</body>
+</html>

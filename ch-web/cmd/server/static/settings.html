@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Chapterhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/admin.css">
+    <script>window.CH_API_BASE = ''; window.CH_MOCK_MODE = false;</script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-logo">Chapterhouse</div>
+            <div class="sidebar-subtitle">Agentic Memory</div>
+            <nav>
+                <div class="nav-section">
+                    <div class="nav-section-title">Overview</div>
+                    <a class="nav-item" href="admin.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Dashboard</a>
+                </div>
+                <div class="nav-section" data-admin-only>
+                    <div class="nav-section-title">Admin</div>
+                    <a class="nav-item" href="users.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Users</a>
+                    <a class="nav-item" href="keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API Keys</a>
+                    <a class="nav-item" href="audit.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Audit Log</a>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">Personal</div>
+                    <a class="nav-item" href="my-keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>My API Keys</a>
+                    <a class="nav-item" href="my-activity.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>My Activity</a>
+                    <a class="nav-item" href="settings.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</a>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="user-avatar">--</div>
+                    <div class="user-details"><div class="user-name" id="user-name">Loading...</div><div class="user-role" id="user-role">-</div></div>
+                </div>
+                <button class="btn btn-secondary" style="width:100%;margin-top:12px" onclick="logout()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Sign Out</button>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <div class="page-header">
+                <div class="page-header-content">
+                    <h1 class="page-title">Settings</h1>
+                    <p class="page-subtitle">Account preferences and MCP setup</p>
+                </div>
+            </div>
+
+            <!-- Connect Claude Code -->
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h3 class="card-title">Connect Claude Code</h3>
+                </div>
+                <div class="card-body">
+                    <p class="text-secondary mb-2">Set up Chapterhouse memory in under 2 minutes</p>
+                    <p class="text-muted mb-2" style="font-size:13px">Prerequisites:</p>
+                    <ul style="margin-left:20px;margin-bottom:16px;font-size:13px;color:var(--text-secondary)">
+                        <li>Claude Code CLI installed</li>
+                        <li>Your Chapterhouse API key (format: <code>ch_k1_...</code>)</li>
+                    </ul>
+                    <p class="text-muted mb-1" style="font-size:13px">Run this command:</p>
+                    <div class="code-block" id="mcp-command">claude mcp add -s user -t http chapterhouse-memory \
+  https://YOUR_SERVER/mcp/stateless \
+  --header "Authorization: Bearer ch_k1_YOUR_API_KEY_HERE"<button class="copy-btn" onclick="copyToClipboard(document.getElementById('mcp-command').textContent.replace('copy', '').trim(), 'Command copied!')" title="Copy">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        </button></div>
+                    <p class="text-muted mt-2" style="font-size:12px">Replace YOUR_SERVER with your Chapterhouse server address and ch_k1_YOUR_API_KEY_HERE with your actual API key. Create one from <a href="my-keys.html" style="color:var(--accent-blue)">My API Keys</a>.</p>
+                </div>
+            </div>
+
+            <!-- Account Info -->
+            <div class="card mb-3">
+                <div class="card-header"><h3 class="card-title">Account Information</h3></div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-input" id="info-username" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Display Name</label>
+                        <input type="text" class="form-input" id="info-display-name" disabled>
+                    </div>
+                    <div class="form-group mb-0">
+                        <label class="form-label">Email</label>
+                        <input type="text" class="form-input" id="info-email" disabled>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Change Password -->
+            <div class="card mb-3">
+                <div class="card-header"><h3 class="card-title">Change Password</h3></div>
+                <div class="card-body">
+                    <form id="password-form">
+                        <div class="form-group">
+                            <label class="form-label required">Current Password</label>
+                            <input type="password" name="current_password" class="form-input" required>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label required">New Password</label>
+                                <input type="password" name="new_password" class="form-input" required minlength="8">
+                                <div class="form-hint">Minimum 8 characters</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label required">Confirm Password</label>
+                                <input type="password" name="confirm_password" class="form-input" required>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Change Password</button>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/ui.js"></script>
+    <script>
+        const ch = window.chapterhouse;
+
+        // Fill account info after auth loads
+        const origInit = window.initUserDisplay;
+        window.initUserDisplay = async function() {
+            try {
+                const user = await ch.auth.me();
+                updateUserDisplay(user);
+                initSidebar();
+                document.getElementById('info-username').value = user.username || '';
+                document.getElementById('info-display-name').value = user.display_name || '';
+                document.getElementById('info-email').value = user.email || '';
+            } catch (err) {
+                window.location.href = 'login.html';
+            }
+        };
+
+        document.getElementById('password-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const data = getFormData(e.target);
+            if (data.new_password !== data.confirm_password) {
+                toast.error('Passwords do not match');
+                return;
+            }
+            if (data.new_password.length < 8) {
+                toast.error('Password must be at least 8 characters');
+                return;
+            }
+            try {
+                await ch.userAccount.changePassword(data.current_password, data.new_password);
+                toast.success('Password changed successfully');
+                e.target.reset();
+            } catch (err) {
+                toast.error(err.message || 'Failed to change password');
+            }
+        });
+    </script>
+</body>
+</html>

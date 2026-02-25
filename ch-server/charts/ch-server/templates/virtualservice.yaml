@@ -1,0 +1,63 @@
+{{- if .Values.virtualService.enabled -}}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "ch-server.fullname" . }}
+  labels:
+    {{- include "ch-server.labels" . | nindent 4 }}
+spec:
+  gateways:
+    - {{ .Values.virtualService.gateway }}
+  hosts:
+    - {{ .Values.virtualService.host }}
+  http:
+    # API, health, metrics, MCP routes → ch-server
+    - match:
+        - uri:
+            prefix: /api/
+      route:
+        - destination:
+            host: {{ include "ch-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+      timeout: 30s
+    - match:
+        - uri:
+            prefix: /mcp
+      route:
+        - destination:
+            host: {{ include "ch-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+      timeout: 30s
+    - match:
+        - uri:
+            exact: /health
+      route:
+        - destination:
+            host: {{ include "ch-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+    - match:
+        - uri:
+            exact: /ready
+      route:
+        - destination:
+            host: {{ include "ch-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+    - match:
+        - uri:
+            exact: /metrics
+      route:
+        - destination:
+            host: {{ include "ch-server.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+    # Everything else → ch-web
+    - route:
+        - destination:
+            host: ch-web.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: 80
+{{- end }}

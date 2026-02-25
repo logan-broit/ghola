@@ -1,0 +1,9 @@
+Chapterhouse Admin Console has been deployed.
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ .Release.Namespace }}
+  Image:     {{ include "ch-web.image" . }}
+
+Access the admin console:
+  kubectl port-forward svc/{{ include "ch-web.fullname" . }} -n {{ .Release.Namespace }} 8080:{{ .Values.service.port }}
+  Open http://localhost:8080/admin/

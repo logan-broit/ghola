@@ -1,0 +1,10 @@
+Search memory for relevant facts using semantic search. Use this BEFORE answering questions about the user's environment, infrastructure, or past context.
+
+WHEN TO USE: Proactively search memory when:
+- Starting work on a project (check for architecture/setup notes)
+- Asked about infrastructure, deployment, or configuration
+- Debugging issues (check for past solutions)
+- Making technical decisions (check for established patterns)
+- Unsure about project conventions or preferences
+
+The search understands meaning, not just keywords - ask natural questions.

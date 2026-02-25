@@ -1,0 +1,32 @@
+# Example: PostgreSQL via CloudNativePG (CNPG) operator
+# Requires: CNPG operator installed (https://cloudnative-pg.io)
+#
+# This creates a PostgreSQL cluster with:
+# - 1 primary instance
+# - Persistent storage
+# - Automatic backups (if configured)
+#
+# The operator creates secrets automatically:
+# - <name>-app: contains username, password, dbname, host, port
+# - <name>-superuser: contains superuser credentials
+#
+# Usage: kubectl apply -f postgres-cnpg.yaml -n <namespace>
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: memory-db
+spec:
+  instances: 1
+  postgresql:
+    parameters:
+      shared_buffers: "256MB"
+      max_connections: "100"
+  bootstrap:
+    initdb:
+      database: memories
+      owner: memory_api
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS pg_trgm;
+  storage:
+    storageClass: ceph-rbd
+    size: 5Gi

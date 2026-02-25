@@ -1,0 +1,27 @@
+Store a fact or piece of information in persistent memory. Use this PROACTIVELY when you learn something important about the user's environment, infrastructure, codebases, or preferences that should be remembered across sessions.
+
+TRIGGER PATTERNS - Use remember when the user says:
+- "Never..." (e.g., "Never use tabs", "Never commit to main directly")
+- "Always..." (e.g., "Always run tests before committing")
+- "I prefer..." or "We prefer..." (e.g., "I prefer functional components")
+- "Don't ever..." or "Stop doing..." (corrections to your behavior)
+- "Remember that..." or "Keep in mind..." (explicit memory requests)
+- "Our standard is..." or "Our convention is..." (team practices)
+
+WHEN TO USE: Automatically store facts when you discover:
+- Project architecture decisions or patterns
+- Infrastructure details (databases, services, deployment targets)
+- User preferences for coding style, frameworks, or tools
+- Important file locations or project structure
+- Debugging insights or solutions that worked
+- Configuration details or environment setup
+- Development philosophy or quality standards (e.g., "tests should be meaningful, not just for coverage")
+- Working style preferences (e.g., "prefer planning before implementation", "keep solutions simple")
+- Team conventions or practices the user mentions
+
+IMPORTANT: Classify each memory with the appropriate memory_type:
+- 'factual' (default): Infrastructure standards, configurations, architectural decisions
+- 'experiential': Solutions to problems, debugging insights, lessons learned from mistakes
+- 'working': Temporary session context (auto-expires in 7 days)
+
+Be specific and self-contained so facts are useful without additional context.
