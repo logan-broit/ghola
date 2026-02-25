@@ -43,54 +43,37 @@ test:
     - if: $CI_COMMIT_TAG
 
 # =============================================================================
-# Build Stage - Docker Images
+# Build Stage - Kaniko (no DIND required, works on K8s runners)
 # =============================================================================
-.docker-build:
+.kaniko-build:
   stage: build
-  image: docker:27
-  services:
-    - name: docker:27-dind
-      command: ["--insecure-registry=ats-dev.nexus.switchnet.nv"]
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-    DOCKER_DRIVER: overlay2
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
   before_script:
     # Verify credentials are set
     - |
       if [ -z "${NEXUS_USER}" ]; then
         echo "ERROR: NEXUS_USER CI variable not set"
-        echo "Go to Settings > CI/CD > Variables and add NEXUS_USER"
         exit 1
       fi
       if [ -z "${NEXUS_PASSWORD}" ]; then
         echo "ERROR: NEXUS_PASSWORD CI variable not set"
-        echo "Go to Settings > CI/CD > Variables and add NEXUS_PASSWORD"
         exit 1
       fi
-    # Inject corporate CA bundle for MITM proxy
-    - cp ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
-    - update-ca-certificates
-    # Wait for Docker daemon to be ready
+    # Inject corporate CA bundle for MITM proxy (Kaniko uses /kaniko/ssl/certs)
+    - mkdir -p /kaniko/ssl/certs
+    - cat ca-bundle.pem >> /kaniko/ssl/certs/additional-ca-cert-bundle.crt
+    # Create Kaniko Docker config for registry auth
+    - mkdir -p /kaniko/.docker
     - |
-      echo "Waiting for Docker daemon..."
-      for i in $(seq 1 30); do
-        if docker info >/dev/null 2>&1; then
-          echo "Docker is ready!"
-          break
-        fi
-        echo "Waiting... ($i/30)"
-        sleep 2
-      done
-      docker info || exit 1
-    # Login to Nexus registry
-    - echo "${NEXUS_PASSWORD}" | docker login -u "${NEXUS_USER}" --password-stdin ats-dev.nexus.switchnet.nv
+      echo "{\"auths\":{\"ats-dev.nexus.switchnet.nv\":{\"auth\":\"$(echo -n ${NEXUS_USER}:${NEXUS_PASSWORD} | base64)\"}}}" > /kaniko/.docker/config.json
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
 
 build-server:
-  extends: .docker-build
+  extends: .kaniko-build
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
@@ -104,17 +87,18 @@ build-server:
       else
         VERSION="${CI_COMMIT_SHORT_SHA}"
       fi
-      echo "Building ch-server:${VERSION}"
-      docker build --platform linux/amd64 \
-        -f ch-server/Dockerfile \
-        -t ${IMAGE_PREFIX}/ch-server:${VERSION} \
-        -t ${IMAGE_PREFIX}/ch-server:latest \
-        ch-server/
-      docker push ${IMAGE_PREFIX}/ch-server:${VERSION}
-      docker push ${IMAGE_PREFIX}/ch-server:latest
+      echo "Building ch-server:${VERSION} with Kaniko"
+    - /kaniko/executor
+      --context=${CI_PROJECT_DIR}/ch-server
+      --dockerfile=${CI_PROJECT_DIR}/ch-server/Dockerfile
+      --destination=${IMAGE_PREFIX}/ch-server:${VERSION}
+      --destination=${IMAGE_PREFIX}/ch-server:latest
+      --cache=true
+      --custom-platform=linux/amd64
+      --insecure-registry=ats-dev.nexus.switchnet.nv
 
 build-web:
-  extends: .docker-build
+  extends: .kaniko-build
   rules:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == "main"
@@ -128,14 +112,15 @@ build-web:
       else
         VERSION="${CI_COMMIT_SHORT_SHA}"
       fi
-      echo "Building ch-web:${VERSION}"
-      docker build --platform linux/amd64 \
-        -f ch-web/Dockerfile \
-        -t ${IMAGE_PREFIX}/ch-web:${VERSION} \
-        -t ${IMAGE_PREFIX}/ch-web:latest \
-        ch-web/
-      docker push ${IMAGE_PREFIX}/ch-web:${VERSION}
-      docker push ${IMAGE_PREFIX}/ch-web:latest
+      echo "Building ch-web:${VERSION} with Kaniko"
+    - /kaniko/executor
+      --context=${CI_PROJECT_DIR}/ch-web
+      --dockerfile=${CI_PROJECT_DIR}/ch-web/Dockerfile
+      --destination=${IMAGE_PREFIX}/ch-web:${VERSION}
+      --destination=${IMAGE_PREFIX}/ch-web:latest
+      --cache=true
+      --custom-platform=linux/amd64
+      --insecure-registry=ats-dev.nexus.switchnet.nv
 
 # =============================================================================
 # Publish Stage - Helm Charts
