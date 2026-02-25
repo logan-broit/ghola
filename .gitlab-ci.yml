@@ -22,8 +22,6 @@ variables:
 test:
   stage: test
   image: golang:${GO_VERSION}-alpine
-  tags:
-    - chapterhouse
   before_script:
     # Inject CA bundle before apk — MITM proxy intercepts Alpine mirror TLS
     - cp ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
@@ -50,8 +48,6 @@ test:
 .docker-build:
   stage: build
   image: docker:27
-  tags:
-    - chapterhouse
   services:
     - name: docker:27-dind
       command: ["--insecure-registry=ats-dev.nexus.switchnet.nv"]
@@ -147,8 +143,6 @@ build-web:
 publish-helm-charts:
   stage: publish
   image: alpine:3.21
-  tags:
-    - chapterhouse
   before_script:
     # Alpine: append CA to trust store before apk can fetch through MITM proxy
     - mkdir -p /usr/local/share/ca-certificates
@@ -196,8 +190,6 @@ publish-helm-charts:
 .deploy-base:
   stage: deploy
   image: alpine/helm:3.16.3
-  tags:
-    - chapterhouse
   allow_failure: true
   variables:
     KUBECONFIG: /tmp/kubeconfig
