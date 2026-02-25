@@ -1371,8 +1371,8 @@
                 <div class="setup-step">
                     <div class="step-label">Add Chapterhouse to Claude Code</div>
                     <div class="code-block">
-                        <code>claude mcp add -t http ch-memory \
-  https://your-server/mcp/stateless \
+                        <code>claude mcp add -s user -t http ch-memory \
+  https://chapterhouse.switchcraft.pd.internal/mcp/stateless \
   --header "Authorization: Bearer ch_k1_your_api_key"</code>
                         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                     </div>
@@ -1387,7 +1387,7 @@
   "mcpServers": {
     "chapterhouse": {
       "type": "streamable-http",
-      "url": "https://your-server/mcp/stateless",
+      "url": "https://chapterhouse.switchcraft.pd.internal/mcp/stateless",
       "headers": {
         "Authorization": "Bearer ch_k1_your_api_key"
       }
