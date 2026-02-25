@@ -2,7 +2,7 @@
 # ====================================
 
 # -- Number of replicas
-replicaCount: 2
+replicaCount: 1
 
 # Image configuration
 image:
