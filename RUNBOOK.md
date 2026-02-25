@@ -57,7 +57,7 @@ kubectl create namespace ch-system
 **Database bootstrap** (for CNPG):
 
 ```bash
-kubectl create secret generic memory-db-credentials \
+kubectl create secret generic chapterhouse-db-credentials \
   -n ch-system \
   --from-literal=username=memory_api \
   --from-literal=password="$(openssl rand -base64 24)"
@@ -104,14 +104,14 @@ See `deploy/examples/postgres-cnpg.yaml` for the CNPG Cluster manifest.
 
 Key points:
 - StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
-- Bootstrap references the `memory-db-credentials` secret
+- Bootstrap references the `chapterhouse-db-credentials` secret
 - Database name: `memories`, owner: `memory_api`
-- CNPG auto-creates a `memory-db-app` secret with credentials
+- CNPG auto-creates a `chapterhouse-db-app` secret with credentials
 
 ```bash
 kubectl apply -f deploy/examples/postgres-cnpg.yaml
 kubectl wait --for=condition=Ready \
-  clusters.postgresql.cnpg.io/memory-db \
+  clusters.postgresql.cnpg.io/chapterhouse-db \
   -n ch-system --timeout=300s
 ```
 
@@ -141,7 +141,7 @@ Migrations must be applied manually after the CNPG cluster is ready. Run them as
 for f in 001_initial_schema.sql 002_admin_auth.sql 003_add_memory_type.sql \
          004_add_scope_and_org.sql 005_is_current_and_search.sql 006_add_tags_column.sql; do
   echo "--- Applying $f ---"
-  kubectl exec -i memory-db-1 -n ch-system -- \
+  kubectl exec -i chapterhouse-db-1 -n ch-system -- \
     psql -U postgres -d memories < ch-server/db/migrations/$f
 done
 ```
@@ -149,7 +149,7 @@ done
 ### Grant Privileges
 
 ```bash
-kubectl exec -i memory-db-1 -n ch-system -- psql -U postgres -d memories -c "
+kubectl exec -i chapterhouse-db-1 -n ch-system -- psql -U postgres -d memories -c "
   GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO memory_api;
   GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO memory_api;
   GRANT USAGE ON SCHEMA public TO memory_api;
@@ -161,7 +161,7 @@ kubectl exec -i memory-db-1 -n ch-system -- psql -U postgres -d memories -c "
 ### Verify
 
 ```bash
-kubectl exec memory-db-1 -n ch-system -- psql -U memory_api -d memories -c '\dt'
+kubectl exec chapterhouse-db-1 -n ch-system -- psql -U memory_api -d memories -c '\dt'
 ```
 
 Expected tables: `users`, `memory_blocks`, `journal`, `git_commits`, `audit_log`, `api_keys`, `admin_sessions`
@@ -270,7 +270,7 @@ ADMIN_PASS=$(kubectl get secret ch-admin-bootstrap -n ch-system \
 Insert the admin user with a bcrypt-hashed password:
 
 ```bash
-kubectl exec -i memory-db-1 -n ch-system -- psql -U postgres -d memories -c "
+kubectl exec -i chapterhouse-db-1 -n ch-system -- psql -U postgres -d memories -c "
   INSERT INTO users (id, username, email, display_name, password_hash, is_admin)
   VALUES (
     '00000000-0000-0000-0000-000000000001',
@@ -369,7 +369,7 @@ kubectl rollout undo deployment/ch-web -n ch-system
 Always backup before schema changes:
 
 ```bash
-kubectl exec memory-db-1 -n ch-system -- \
+kubectl exec chapterhouse-db-1 -n ch-system -- \
   pg_dump -U postgres memories > backup-$(date +%Y%m%d-%H%M%S).sql
 ```
 
@@ -419,7 +419,7 @@ kubectl get storageclass
 
 **Cause**: When you provide your own bootstrap secret to CNPG, it uses that secret directly instead of creating a separate `-app` secret.
 
-**Fix**: Set `database.existingSecret` in your values file to match the bootstrap secret name (e.g., `memory-db-credentials`), not `memory-db-app`.
+**Fix**: Set `database.existingSecret` in your values file to match the bootstrap secret name (e.g., `chapterhouse-db-credentials`), not `chapterhouse-db-app`.
 
 ### Partial Index Migration Error
 
@@ -434,8 +434,8 @@ kubectl get storageclass
 ```bash
 kubectl logs -l app.kubernetes.io/name=ch-server -n ch-system --tail=50
 kubectl logs -l app.kubernetes.io/name=ch-web -n ch-system --tail=50
-kubectl logs -l cnpg.io/cluster=memory-db -n ch-system --tail=50
-kubectl logs -l app.kubernetes.io/name=qdrant -n ch-system --tail=50
+kubectl logs -l cnpg.io/cluster=chapterhouse-db -n ch-system --tail=50
+kubectl logs -l app=chapterhouse-qdrant -n ch-system --tail=50
 ```
 
 ---

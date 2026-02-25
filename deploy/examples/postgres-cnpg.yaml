@@ -14,7 +14,7 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: memory-db
+  name: chapterhouse-db
 spec:
   instances: 1
   postgresql:

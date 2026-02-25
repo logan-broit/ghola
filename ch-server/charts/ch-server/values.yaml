@@ -125,7 +125,7 @@ server:
 # Database configuration
 database:
   # -- Database host (CNPG service name)
-  host: memory-db-rw.ch-system.svc
+  host: chapterhouse-db-rw.ch-system.svc
   # -- Database port
   port: 5432
   # -- Database name
@@ -135,7 +135,7 @@ database:
   # -- Minimum connections
   minConns: 5
   # -- Name of the secret containing database credentials (created by CNPG)
-  existingSecret: memory-db-app
+  existingSecret: chapterhouse-db-app
   # -- Key in secret for username
   usernameKey: username
   # -- Key in secret for password
@@ -144,7 +144,7 @@ database:
 # Qdrant vector database configuration
 qdrant:
   # -- Qdrant host
-  host: qdrant.ch-system.svc
+  host: chapterhouse-qdrant.ch-system.svc
   # -- Qdrant gRPC port
   grpcPort: 6334
   # -- Qdrant HTTP port
@@ -165,7 +165,7 @@ embedding:
   # -- API key for the embedding provider
   apiKey: ""
   # -- Name of existing secret containing the API key (alternative to apiKey)
-  existingSecret: ""
+  existingSecret: chapterhouse-embedding
   # -- Key in the existing secret
   secretKey: EMBEDDING_API_KEY
 

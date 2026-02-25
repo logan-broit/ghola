@@ -32,19 +32,19 @@ check_prereqs() {
     fi
 
     # Check if PostgreSQL is ready
-    if ! kubectl get pod -n "$NAMESPACE" -l cnpg.io/cluster=memory-db -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; then
+    if ! kubectl get pod -n "$NAMESPACE" -l cnpg.io/cluster=chapterhouse-db -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; then
         log_error "PostgreSQL is not running"
         exit 1
     fi
 
     # Check if Qdrant is ready
-    if ! kubectl get pod -n "$NAMESPACE" -l app=qdrant -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; then
+    if ! kubectl get pod -n "$NAMESPACE" -l app=chapterhouse-qdrant -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; then
         log_error "Qdrant is not running"
         exit 1
     fi
 
     # Verify NodePort services exist
-    if ! kubectl get svc -n "$NAMESPACE" memory-db-nodeport &> /dev/null; then
+    if ! kubectl get svc -n "$NAMESPACE" chapterhouse-db-nodeport &> /dev/null; then
         log_warn "NodePort services not found, creating..."
         kubectl apply -f "$PROJECT_DIR/deploy/k8s/local/services.yaml"
     fi
@@ -80,7 +80,7 @@ verify_services() {
 }
 
 get_db_password() {
-    kubectl get secret -n "$NAMESPACE" memory-db-app -o jsonpath='{.data.password}' | base64 -d
+    kubectl get secret -n "$NAMESPACE" chapterhouse-db-app -o jsonpath='{.data.password}' | base64 -d
 }
 
 run_api() {
@@ -155,10 +155,10 @@ deploy_infra() {
     kubectl apply -f "$PROJECT_DIR/deploy/k8s/local/ingress.yaml"
 
     log_info "Waiting for PostgreSQL to be ready..."
-    kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l cnpg.io/cluster=memory-db --timeout=120s || true
+    kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l cnpg.io/cluster=chapterhouse-db --timeout=120s || true
 
     log_info "Waiting for Qdrant to be ready..."
-    kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l app=qdrant --timeout=60s || true
+    kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l app=chapterhouse-qdrant --timeout=60s || true
 
     log_info "Infrastructure deployed!"
 }

@@ -46,12 +46,12 @@ spec:
             - name: DATABASE_USER
               valueFrom:
                 secretKeyRef:
-                  name: memory-db-app
+                  name: chapterhouse-db-app
                   key: username
             - name: DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: memory-db-app
+                  name: chapterhouse-db-app
                   key: password
             # Admin bootstrap credentials
             - name: ADMIN_USERNAME

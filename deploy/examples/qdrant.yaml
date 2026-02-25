@@ -8,20 +8,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: qdrant
+  name: chapterhouse-qdrant
   labels:
-    app: qdrant
+    app: chapterhouse-qdrant
 spec:
   replicas: 1
   strategy:
     type: Recreate  # Required for RWO PVCs
   selector:
     matchLabels:
-      app: qdrant
+      app: chapterhouse-qdrant
   template:
     metadata:
       labels:
-        app: qdrant
+        app: chapterhouse-qdrant
     spec:
       containers:
         - name: qdrant
@@ -44,12 +44,12 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: qdrant-data
+            claimName: chapterhouse-qdrant-data
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: qdrant-data
+  name: chapterhouse-qdrant-data
 spec:
   storageClassName: ceph-rbd
   accessModes:
@@ -61,10 +61,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: qdrant
+  name: chapterhouse-qdrant
 spec:
   selector:
-    app: qdrant
+    app: chapterhouse-qdrant
   ports:
     - name: http
       port: 6333
