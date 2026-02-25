@@ -47,17 +47,24 @@ Create `VERSION` containing `0.1.0`. Copy `ca-bundle.pem` from `../runcell/ca-bu
 
 ### 2. Dockerfile — ch-server (`ch-server/Dockerfile`)
 **Current state:** Has optional `ARG CUSTOM_CA_BUNDLE` pattern with conditional copy.
-**Change:** Replace with mandatory `COPY ca-bundle.pem` before `go mod download`, matching runcell pattern. Remove `ARG CUSTOM_CA_BUNDLE` and conditional logic. Keep existing multi-stage build, `CGO_ENABLED=0`, distroless runtime, non-root user.
+**Change:** Replace with mandatory `COPY ca-bundle.pem` before any network operations, matching runcell pattern. Remove `ARG CUSTOM_CA_BUNDLE` and conditional logic. Keep existing multi-stage build, `CGO_ENABLED=0`, alpine runtime, non-root user.
+
+**Critical: CA bundle must be injected before `apk add` in EVERY stage.** The MITM proxy intercepts Alpine package mirror TLS, so even `apk add ca-certificates` will fail without the bundle already appended to the trust store. The pattern is:
 
 ```dockerfile
-# In builder stage, before go mod download:
 COPY ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
-RUN update-ca-certificates
+RUN cat /usr/local/share/ca-certificates/switch-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+    && apk add --no-cache git ca-certificates \
+    && update-ca-certificates
 ```
+
+This applies to both the builder stage (golang-alpine) and the runtime stage (alpine). Distroless images (ch-web runtime) don't use apk and are unaffected.
+
+**Build context:** `ca-bundle.pem` must be present in each component's build context directory (`ch-server/`, `ch-web/`), not just the repo root. The Makefile `server` and `web` targets pass the component directory as context.
 
 ### 3. Dockerfile — ch-web (`ch-web/Dockerfile`)
 **Current state:** No CA bundle handling. Uses `golang:1.22-alpine`.
-**Change:** Bump to `golang:1.24-alpine`. Add CA bundle injection before `go mod download`. Keep distroless runtime.
+**Change:** Bump to `golang:1.24-alpine`. Add CA bundle injection before `apk add` in builder stage (same `cat >> /etc/ssl/certs` pattern). Keep distroless runtime (no apk needed there).
 
 ### 4. Makefile Overhaul (`Makefile`)
 **Current state:** `REGISTRY = ghcr.io/thinkwright/chapterhouse`, no VERSION integration, missing ch-web push target.
@@ -174,4 +181,89 @@ Steps 1-5 are largely parallelizable. Step 6 depends on 1-3. Step 7 is last.
 
 ---
 
-*Generated with Claude Code — 2026-02-24*
+## Deployment Status (ovas-ai-prod)
+
+Deployed 2026-02-24 to the `ovas-ai-prod` cluster.
+
+### Cluster Details
+
+| Property | Value |
+|----------|-------|
+| Kubeconfig | `~/.kube/ovas-ai-prod.yaml` |
+| Namespace | `ch-system` |
+| Hostname | `chapterhouse.switchcraft.pd.internal` |
+| Gateway | `istio-ingress/switch-wildcard-ingress` |
+| StorageClass | `ceph-rbd` (default) |
+| Image version | `0.1.0` |
+
+### Components
+
+| Component | Image | Status |
+|-----------|-------|--------|
+| ch-server | `ats-dev.nexus.switchnet.nv/chapterhouse/ch-server:0.1.0` | Running |
+| ch-web | `ats-dev.nexus.switchnet.nv/chapterhouse/ch-web:0.1.0` | Running |
+| PostgreSQL (CNPG) | `memory-db` cluster, 1 instance | Healthy |
+| Qdrant | Single instance, `ceph-rbd` PVC | Running |
+
+### Verified Endpoints
+
+| Endpoint | Result |
+|----------|--------|
+| `/health` | `{"status":"ok"}` |
+| `/ready` | `{"status":"ok","checks":{"database":"healthy","qdrant":"healthy"}}` |
+| `/` (landing page) | Serving HTML |
+| `/admin/login` | Serving HTML |
+| `/mcp/stateless` | Auth enforced (401 without key) |
+| Admin login | Session cookie working |
+
+### Deployment Commands Used
+
+```bash
+export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
+
+# Namespace + pull secret
+kubectl create namespace ch-system
+# nexus-registry secret copied from runcell-system
+
+# Infrastructure
+kubectl apply -f deploy/examples/postgres-cnpg.yaml
+kubectl apply -f deploy/examples/qdrant.yaml
+
+# Secrets
+kubectl create secret generic ch-admin-bootstrap -n ch-system \
+  --from-literal=ADMIN_USERNAME=admin \
+  --from-literal=ADMIN_PASSWORD="$(openssl rand -base64 16)"
+
+# Migrations (all 6 files + privilege grants)
+
+# Build + push images
+docker login ats-dev.nexus.switchnet.nv
+make server
+make web
+
+# Helm deploys
+helm upgrade --install ch-server ch-server/charts/ch-server \
+  --namespace ch-system \
+  --set image.tag=0.1.0 \
+  --set virtualService.enabled=true \
+  --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
+  --set virtualService.host=chapterhouse.switchcraft.pd.internal
+
+helm upgrade --install ch-web ch-web/charts/ch-web \
+  --namespace ch-system \
+  --set image.tag=0.1.0
+```
+
+### Lessons Learned
+
+1. **CA bundle before `apk add`**: The MITM proxy intercepts Alpine mirror TLS. `cat ca-bundle.pem >> /etc/ssl/certs/ca-certificates.crt` must happen before any `apk add`, including `apk add ca-certificates` itself. This affects every Dockerfile stage that uses Alpine.
+
+2. **Build context copies**: `ca-bundle.pem` must exist in each component's build context directory (`ch-server/`, `ch-web/`), not just the repo root. The Makefile passes component directories as Docker build context.
+
+3. **CNPG auto-creates `-app` secret**: CNPG creates `memory-db-app` secret automatically from the bootstrap credentials. The ch-server chart references this via `database.existingSecret: memory-db-app`.
+
+4. **Istio gateway discovery**: The wildcard gateway at `istio-ingress/switch-wildcard-ingress` accepts `*.switchcraft.pd.internal` and `*.aidt.pd.internal`. This was discovered by inspecting the existing runcell deployment.
+
+---
+
+*Generated with [Claude Code](https://claude.com/claude-code) — 2026-02-24*

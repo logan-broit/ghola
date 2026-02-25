@@ -3,12 +3,11 @@ FROM --platform=linux/amd64 golang:1.24-alpine AS builder
 
 WORKDIR /build
 
-# Install git for go mod download and CA certificates
-RUN apk add --no-cache git ca-certificates
-
-# Inject corporate CA bundle (required for air-gapped environments with MITM proxy)
+# Inject corporate CA bundle before any network operations (MITM proxy)
 COPY ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
-RUN update-ca-certificates
+RUN cat /usr/local/share/ca-certificates/switch-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+    && apk add --no-cache git ca-certificates \
+    && update-ca-certificates
 
 # Copy go mod files first for better layer caching
 COPY go.mod go.sum ./
@@ -25,7 +24,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ch-init .
 # Runtime stage
 FROM --platform=linux/amd64 alpine:3.21
 
-RUN apk --no-cache add ca-certificates tzdata
+# Inject CA bundle before any network operations (apk needs it for MITM proxy)
+COPY ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
+RUN cat /usr/local/share/ca-certificates/switch-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+    && apk --no-cache add ca-certificates tzdata \
+    && update-ca-certificates
 
 WORKDIR /app
 

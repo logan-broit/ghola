@@ -27,19 +27,20 @@ Operational guide for deploying Chapterhouse to a Kubernetes cluster.
 |------|---------|---------|
 | kubectl | 1.28+ | Kubernetes CLI |
 | helm | 3.12+ | Helm chart deployment |
-| podman | 4+ | Container image building |
+| podman | 4+ | Container image building (preferred locally) |
 | Go | 1.24+ | Building from source |
+| glab | latest | GitLab CLI |
 
 ### Cluster Requirements
 
-- Kubernetes cluster (K3s, K8s, etc.)
-- [CloudNativePG](https://cloudnative-pg.io/) operator installed
-- StorageClass available (e.g., `local-path` for K3s)
-- Ingress controller (e.g., HAProxy, nginx, Traefik)
+- Kubernetes cluster with [CloudNativePG](https://cloudnative-pg.io/) operator installed
+- Istio service mesh (for VirtualService routing)
+- Prometheus Operator (for ServiceMonitor)
+- StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
 
 ### Container Registry
 
-Images must be published to a container registry accessible by the cluster. The default open-source path is `ghcr.io`, but any OCI-compliant registry works.
+Images are stored at `ats-dev.nexus.switchnet.nv/chapterhouse`. Both Helm charts default to this registry with `nexus-registry` as the imagePullSecret. See `BUILD_AND_RELEASE.md` for build instructions.
 
 ---
 
@@ -71,14 +72,22 @@ kubectl create secret generic ch-admin-bootstrap \
   --from-literal=ADMIN_PASSWORD="$(openssl rand -base64 16)"
 ```
 
-**Container registry pull secret** (if using a private registry):
+**Container registry pull secret** (Nexus):
 
 ```bash
-kubectl create secret docker-registry ghcr-pull-secret \
+kubectl create secret docker-registry nexus-registry \
   -n ch-system \
-  --docker-server=ghcr.io \
-  --docker-username=YOUR_USERNAME \
-  --docker-password=YOUR_TOKEN
+  --docker-server=ats-dev.nexus.switchnet.nv \
+  --docker-username=YOUR_NEXUS_USER \
+  --docker-password=YOUR_NEXUS_PASSWORD
+```
+
+Or copy from an existing namespace (e.g., `runcell-system`):
+
+```bash
+kubectl get secret nexus-registry -n runcell-system -o json \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); d['metadata']={'name':'nexus-registry','namespace':'ch-system'}; print(json.dumps(d))" \
+  | kubectl apply -f -
 ```
 
 **Embedding API key** (if using a hosted provider like Together.ai):
@@ -91,15 +100,16 @@ kubectl create secret generic together-api-key \
 
 ### 3. Deploy PostgreSQL (CNPG)
 
-Create a CNPG Cluster manifest. See `deploy/homelab/infra/postgres-cluster.yaml` for a reference.
+See `deploy/examples/postgres-cnpg.yaml` for the CNPG Cluster manifest.
 
 Key points:
-- Set `storageClass` to match your cluster (e.g., `local-path` for K3s)
+- StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
 - Bootstrap references the `memory-db-credentials` secret
 - Database name: `memories`, owner: `memory_api`
+- CNPG auto-creates a `memory-db-app` secret with credentials
 
 ```bash
-kubectl apply -f deploy/homelab/infra/postgres-cluster.yaml
+kubectl apply -f deploy/examples/postgres-cnpg.yaml
 kubectl wait --for=condition=Ready \
   clusters.postgresql.cnpg.io/memory-db \
   -n ch-system --timeout=300s
@@ -107,14 +117,14 @@ kubectl wait --for=condition=Ready \
 
 ### 4. Deploy Qdrant
 
-See `deploy/homelab/infra/qdrant.yaml` for a reference.
+See `deploy/examples/qdrant.yaml` for the manifest.
 
 Key points:
 - Use `strategy: Recreate` for single-replica deployments with RWO PVCs
-- Set `storageClassName` to match your cluster
+- StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
 
 ```bash
-kubectl apply -f deploy/homelab/infra/qdrant.yaml
+kubectl apply -f deploy/examples/qdrant.yaml
 kubectl rollout status deployment/qdrant -n ch-system --timeout=120s
 ```
 
@@ -128,7 +138,8 @@ Migrations must be applied manually after the CNPG cluster is ready. Run them as
 
 ```bash
 # Run each migration in order
-for f in 001_initial_schema.sql 002_admin_auth.sql 003_add_memory_type.sql 004_add_scope_and_org.sql; do
+for f in 001_initial_schema.sql 002_admin_auth.sql 003_add_memory_type.sql \
+         004_add_scope_and_org.sql 005_is_current_and_search.sql 006_add_tags_column.sql; do
   echo "--- Applying $f ---"
   kubectl exec -i memory-db-1 -n ch-system -- \
     psql -U postgres -d memories < ch-server/db/migrations/$f
@@ -159,95 +170,83 @@ Expected tables: `users`, `memory_blocks`, `journal`, `git_commits`, `audit_log`
 
 ## Building Container Images
 
-Both components are built with podman. Use `--platform linux/amd64` when building on ARM Macs for x86 clusters.
-
-### ch-server
+Production builds are driven through **GitLab CI** — see `BUILD_AND_RELEASE.md` for the full workflow. For local builds, use podman:
 
 ```bash
-podman build --platform linux/amd64 \
-  -t your-registry/ch-server:latest \
-  ch-server/
-```
-
-### ch-web
-
-```bash
-podman build --platform linux/amd64 \
-  -t your-registry/ch-web:latest \
-  ch-web/
-```
-
-### Push
-
-```bash
-podman login your-registry
-podman push your-registry/ch-server:latest
-podman push your-registry/ch-web:latest
+podman login ats-dev.nexus.switchnet.nv
+make server   # Build + push ch-server
+make web      # Build + push ch-web
+make images   # Build + push both
 ```
 
 ---
 
 ## Deploying with Helm
 
-Each component has a Helm chart under its `charts/` directory. Use environment-specific values files for overrides.
+Each component has a Helm chart under its `charts/` directory. Both charts default to the Nexus registry and `nexus-registry` pull secret.
 
-### ch-server
+### ch-server (ovas-ai-prod)
 
 ```bash
+export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
+
 helm upgrade --install ch-server ch-server/charts/ch-server \
   --namespace ch-system \
-  -f deploy/your-env/ch-server-values.yaml
+  --set image.tag=0.1.0 \
+  --set virtualService.enabled=true \
+  --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
+  --set virtualService.host=chapterhouse.switchcraft.pd.internal
 ```
 
-### ch-web
+### ch-web (ovas-ai-prod)
 
 ```bash
 helm upgrade --install ch-web ch-web/charts/ch-web \
   --namespace ch-system \
-  -f deploy/your-env/ch-web-values.yaml
+  --set image.tag=0.1.0
 ```
 
-### Values Override Pattern
+### Homelab Overrides
 
-The generic `values.yaml` in each chart uses `registry.example.com` placeholders. Environment-specific values files override these:
+For local K3s development, use the homelab values files which disable Istio, imagePullSecrets, and use local registry:
 
-```yaml
-# deploy/your-env/ch-server-values.yaml
-image:
-  registry: ghcr.io
-  repository: your-org/chapterhouse/ch-server
-  tag: latest
-  pullPolicy: Always
+```bash
+helm upgrade --install ch-server ch-server/charts/ch-server \
+  --namespace ch-system \
+  -f ch-server/charts/ch-server/values-homelab.yaml
 
-imagePullSecrets:
-  - name: ghcr-pull-secret
-
-config:
-  environment: your-env
-  logLevel: info
-
-database:
-  host: memory-db-rw.ch-system.svc
-  existingSecret: memory-db-credentials
-
-embedding:
-  provider: openai
-  url: "https://api.together.xyz"
-  model: BAAI/bge-base-en-v1.5
-  dimensions: 768
-  existingSecret: together-api-key
-  secretKey: TOGETHER_API_KEY
+helm upgrade --install ch-web ch-web/charts/ch-web \
+  --namespace ch-system \
+  -f ch-web/charts/ch-web/values-homelab.yaml
 ```
 
 ---
 
 ## Ingress Configuration
 
-Use `spec.ingressClassName` (not the deprecated `kubernetes.io/ingress.class` annotation).
+### Istio VirtualService (ovas-ai-prod)
 
-See `deploy/homelab/infra/ingress.yaml` for a reference with path-based routing:
-- `/api/*`, `/mcp/*`, `/health`, `/ready` -> ch-server:8080
-- `/*` -> ch-web:80
+The ch-server Helm chart includes a VirtualService template. When enabled, it routes traffic by path:
+
+| Path | Destination |
+|------|-------------|
+| `/api/*` | ch-server:8080 |
+| `/mcp`, `/mcp/*` | ch-server:8080 |
+| `/health`, `/ready`, `/metrics` | ch-server:8080 |
+| `/*` (everything else) | ch-web:80 |
+
+Production settings for ovas-ai-prod:
+
+```yaml
+virtualService:
+  enabled: true
+  gateway: istio-ingress/switch-wildcard-ingress
+  host: chapterhouse.switchcraft.pd.internal
+```
+
+### Kubernetes Ingress (homelab)
+
+For clusters without Istio, use a standard Ingress resource. Set `ingress.enabled: true` in ch-server values and configure `className`, `hosts`, and `tls` as needed.
 
 ### TLS Considerations
 
@@ -298,17 +297,17 @@ API keys use the format `ch_k1_<64 hex characters>`.
 
 ### 2. Add to Claude Code
 
+Always install globally with `-s user` so the MCP server is available across all projects:
+
 ```bash
 claude mcp add -s user --transport http \
-  chapterhouse https://your-host/mcp/stateless \
+  chapterhouse https://chapterhouse.switchcraft.pd.internal/mcp/stateless \
   --header "Authorization: Bearer ch_k1_YOUR_KEY"
 ```
 
 Use the `/mcp/stateless` endpoint — it authenticates per-request and survives server restarts. The session-based `/mcp` endpoint loses state on restart.
 
 Flags before the name, URL as the second positional argument, `--header` after.
-
-Scope options: `-s user` (all projects), `-s local` (current project only), `-s project` (shared via `.mcp.json`).
 
 ### 3. Verify
 
@@ -321,17 +320,17 @@ Start a new Claude Code session. The Chapterhouse tools should appear: `remember
 ### Health and Readiness
 
 ```bash
-curl -sk https://your-host/health
+curl -sk https://chapterhouse.switchcraft.pd.internal/health
 # {"status":"ok","timestamp":"..."}
 
-curl -sk https://your-host/ready
+curl -sk https://chapterhouse.switchcraft.pd.internal/ready
 # {"status":"ok","checks":{"database":"healthy","qdrant":"healthy"}}
 ```
 
 ### Admin Login
 
 ```bash
-curl -sk -X POST https://your-host/api/v1/admin/login \
+curl -sk -X POST https://chapterhouse.switchcraft.pd.internal/api/v1/admin/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"YOUR_PASSWORD"}' \
   -c /tmp/ch-cookies.txt
@@ -340,7 +339,7 @@ curl -sk -X POST https://your-host/api/v1/admin/login \
 ### MCP Tools
 
 ```bash
-curl -sk -X POST https://your-host/mcp/stateless \
+curl -sk -X POST https://chapterhouse.switchcraft.pd.internal/mcp/stateless \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer ch_k1_YOUR_KEY' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -482,7 +481,7 @@ Both Helm charts default to `imagePullSecrets: [{name: nexus-registry}]`.
 #### Manual Push
 
 ```bash
-docker login ats-dev.nexus.switchnet.nv
+podman login ats-dev.nexus.switchnet.nv
 make server   # builds + pushes ch-server
 make web      # builds + pushes ch-web
 ```
@@ -498,13 +497,13 @@ When Istio is enabled (`virtualService.enabled: true` in ch-server values), traf
 | `/health`, `/ready`, `/metrics` | ch-server:8080 |
 | `/*` (everything else) | ch-web:80 |
 
-Configure the hostname and gateway in `values.yaml`:
+Configure the hostname and gateway in `values.yaml` or via `--set`:
 
 ```yaml
 virtualService:
   enabled: true
-  gateway: istio-ingress/default-gateway
-  host: chapterhouse.switchnet.nv
+  gateway: istio-ingress/switch-wildcard-ingress
+  host: chapterhouse.switchcraft.pd.internal
 ```
 
 ### GitLab CI Pipeline

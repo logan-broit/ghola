@@ -2,12 +2,11 @@ FROM --platform=linux/amd64 golang:1.24-alpine AS builder
 
 WORKDIR /build
 
-# Install CA certificates for go mod download
-RUN apk add --no-cache ca-certificates
-
-# Inject corporate CA bundle (required for air-gapped environments with MITM proxy)
+# Inject corporate CA bundle before any network operations (MITM proxy)
 COPY ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
-RUN update-ca-certificates
+RUN cat /usr/local/share/ca-certificates/switch-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+    && apk add --no-cache ca-certificates \
+    && update-ca-certificates
 
 COPY go.mod ./
 RUN go mod download

@@ -1,16 +1,18 @@
 # Build and Release Guide
 
-How to build, package, and release Chapterhouse.
+How to build, package, and release Chapterhouse in the corporate air-gapped environment.
 
 ## Table of Contents
 
 1. [Repository Structure](#repository-structure)
-2. [Local Development](#local-development)
-3. [Building Container Images](#building-container-images)
-4. [Helm Charts](#helm-charts)
-5. [Deploy Script](#deploy-script)
-6. [Branch Strategy](#branch-strategy)
-7. [Release Checklist](#release-checklist)
+2. [Prerequisites](#prerequisites)
+3. [Local Development](#local-development)
+4. [Building Container Images](#building-container-images)
+5. [Helm Charts](#helm-charts)
+6. [Deploying to ovas-ai-prod](#deploying-to-ovas-ai-prod)
+7. [Release Workflow](#release-workflow)
+8. [GitLab CI Pipeline](#gitlab-ci-pipeline)
+9. [Makefile Reference](#makefile-reference)
 
 ---
 
@@ -18,11 +20,19 @@ How to build, package, and release Chapterhouse.
 
 ```
 chapterhouse/
+├── VERSION                     # Single source of truth for version (semver)
+├── ca-bundle.pem               # Corporate CA certificates (ATL-Palo, LAS-Palo)
+├── Makefile                    # Build, push, release targets
+├── .gitlab-ci.yml              # CI/CD pipeline
+├── conversion-recipe.md        # Air-gap conversion plan and status
 ├── ch-server/                  # Go API + MCP server
 │   ├── cmd/api/                # Server entrypoint
+│   ├── cmd/reindex/            # Reindex tool
+│   ├── cmd/init/               # Init container
 │   ├── internal/               # Auth, handlers, MCP, config, embedding, vector
-│   ├── db/migrations/          # SQL schema migrations (4 files)
+│   ├── db/migrations/          # SQL schema migrations (6 files)
 │   ├── charts/ch-server/       # Helm chart
+│   ├── ca-bundle.pem           # CA bundle (build context copy)
 │   ├── scripts/                # Dev and test scripts
 │   └── Dockerfile
 ├── ch-web/                     # Admin console (vanilla JS + Go server)
@@ -30,16 +40,55 @@ chapterhouse/
 │   │   ├── main.go             # Go HTTP server (embed.FS + API proxy)
 │   │   └── static/             # HTML, CSS, JS (zero build tools)
 │   ├── charts/ch-web/          # Helm chart
+│   ├── ca-bundle.pem           # CA bundle (build context copy)
 │   └── Dockerfile
-├── deploy/                     # Environment-specific deployment configs
-│   └── homelab/                # Homelab overlay (values + infra manifests)
-├── README.md                   # Project overview
+├── deploy/
+│   └── examples/               # CNPG and Qdrant manifests
+├── README.md
 ├── RUNBOOK.md                  # Deployment operations guide
-├── BUILD_AND_RELEASE.md        # This file
-└── LICENSE                     # Apache 2.0
+└── BUILD_AND_RELEASE.md        # This file
 ```
 
 Each component (ch-server, ch-web) is independently buildable with its own `go.mod`, `Dockerfile`, and Helm chart.
+
+---
+
+## Prerequisites
+
+### Required Tools
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| kubectl | 1.28+ | Kubernetes CLI |
+| helm | 3.12+ | Helm chart deployment |
+| podman | 4+ | Container image building (preferred locally) |
+| Go | 1.24+ | Building from source |
+| glab | latest | GitLab CLI |
+
+### Registry Access
+
+Images are stored in the Nexus registry at `ats-dev.nexus.switchnet.nv/chapterhouse`. Log in before building:
+
+```bash
+podman login ats-dev.nexus.switchnet.nv
+```
+
+### Cluster Access
+
+The production cluster kubeconfig is at `~/.kube/ovas-ai-prod.yaml`:
+
+```bash
+export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
+```
+
+### CA Bundle
+
+The `ca-bundle.pem` at the repo root contains the corporate MITM proxy certificates. Copies must exist in each component's build context:
+
+- `ch-server/ca-bundle.pem`
+- `ch-web/ca-bundle.pem`
+
+These are tracked in git. If certificates rotate, replace the root copy and update the component copies.
 
 ---
 
@@ -88,44 +137,36 @@ sqlc generate
 
 ## Building Container Images
 
-Use podman for container builds. When building on ARM Macs for x86 clusters, use `--platform linux/amd64`.
+**Production builds are driven through GitLab CI** — push to `main` or tag a release and the pipeline handles build, push, and deploy automatically. See [GitLab CI Pipeline](#gitlab-ci-pipeline).
 
-### ch-server
+For local builds, use `podman` (preferred) or `docker` with `--platform linux/amd64`:
+
+### Using Make Targets
 
 ```bash
+make server   # Build + push ch-server
+make web      # Build + push ch-web
+make images   # Build + push both
+```
+
+The Makefile uses `docker buildx` by default. To use podman locally, set the build command:
+
+```bash
+# podman manual build
 podman build --platform linux/amd64 \
-  -t ghcr.io/thinkwright/chapterhouse/ch-server:latest \
+  -t ats-dev.nexus.switchnet.nv/chapterhouse/ch-server:0.1.0 \
   ch-server/
+podman push ats-dev.nexus.switchnet.nv/chapterhouse/ch-server:0.1.0
 ```
 
-Multi-stage build: `golang:1.24-alpine` -> `alpine:3.21` (non-root, uid 1000).
+### Build Architecture
 
-### ch-web
+Both Dockerfiles use multi-stage builds with the corporate CA bundle injected before any network operations:
 
-```bash
-podman build --platform linux/amd64 \
-  -t ghcr.io/thinkwright/chapterhouse/ch-web:latest \
-  ch-web/
-```
+**ch-server:** `golang:1.24-alpine` (builder) → `alpine:3.21` (runtime, non-root uid 1000)
+**ch-web:** `golang:1.24-alpine` (builder) → `gcr.io/distroless/static-debian12:nonroot-amd64` (runtime)
 
-Multi-stage build: `golang:1.22-alpine` -> `gcr.io/distroless/static-debian12:nonroot-amd64`.
-
-### Pushing
-
-```bash
-podman login ghcr.io
-podman push ghcr.io/thinkwright/chapterhouse/ch-server:latest
-podman push ghcr.io/thinkwright/chapterhouse/ch-web:latest
-```
-
-### Tagging Releases
-
-```bash
-VERSION=v0.2.0
-podman tag ghcr.io/thinkwright/chapterhouse/ch-server:latest \
-  ghcr.io/thinkwright/chapterhouse/ch-server:${VERSION}
-podman push ghcr.io/thinkwright/chapterhouse/ch-server:${VERSION}
-```
+**Critical:** The CA bundle must be appended to `/etc/ssl/certs/ca-certificates.crt` before any `apk add` command. The MITM proxy intercepts Alpine package mirror TLS, so even `apk add ca-certificates` fails without the bundle pre-loaded. See `conversion-recipe.md` work item 2 for the full pattern.
 
 ---
 
@@ -141,113 +182,204 @@ helm lint ch-web/charts/ch-web
 ### Packaging
 
 ```bash
-helm package ch-server/charts/ch-server
-helm package ch-web/charts/ch-web
+make charts   # Packages both to dist/
 ```
 
-### Versioning
+### Chart Defaults
 
-Chart versions are in each chart's `Chart.yaml`:
+Both charts default to the Nexus registry and `nexus-registry` pull secret:
 
 ```yaml
-# ch-server/charts/ch-server/Chart.yaml
-version: 0.1.0      # Chart version — bump on chart changes
-appVersion: "0.1.0"  # App version — bump on application changes
+image:
+  registry: ats-dev.nexus.switchnet.nv
+  repository: chapterhouse/ch-server  # or ch-web
+  tag: ""  # defaults to Chart appVersion
+imagePullSecrets:
+  - name: nexus-registry
 ```
 
-### Installing
+### Version Alignment
+
+The `VERSION` file is the single source of truth. Running `make release` stamps it into both `Chart.yaml` files (`version` and `appVersion`).
+
+---
+
+## Deploying to ovas-ai-prod
+
+### Cluster Details
+
+| Property | Value |
+|----------|-------|
+| Kubeconfig | `~/.kube/ovas-ai-prod.yaml` |
+| Namespace | `ch-system` |
+| Hostname | `chapterhouse.switchcraft.pd.internal` |
+| Gateway | `istio-ingress/switch-wildcard-ingress` |
+| StorageClass | `ceph-rbd` (default) |
+| Pull Secret | `nexus-registry` |
+
+### Deploy ch-server
+
+```bash
+export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
+
+helm upgrade --install ch-server ch-server/charts/ch-server \
+  --namespace ch-system \
+  --set image.tag=0.1.0 \
+  --set virtualService.enabled=true \
+  --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
+  --set virtualService.host=chapterhouse.switchcraft.pd.internal
+```
+
+The VirtualService routes:
+- `/api/*`, `/mcp*`, `/health`, `/ready`, `/metrics` → ch-server
+- Everything else → ch-web
+
+### Deploy ch-web
+
+```bash
+helm upgrade --install ch-web ch-web/charts/ch-web \
+  --namespace ch-system \
+  --set image.tag=0.1.0
+```
+
+### Homelab Overrides
+
+For local K3s development, use the homelab values files:
 
 ```bash
 helm upgrade --install ch-server ch-server/charts/ch-server \
   --namespace ch-system \
-  -f deploy/your-env/ch-server-values.yaml
+  -f ch-server/charts/ch-server/values-homelab.yaml
 
 helm upgrade --install ch-web ch-web/charts/ch-web \
   --namespace ch-system \
-  -f deploy/your-env/ch-web-values.yaml
+  -f ch-web/charts/ch-web/values-homelab.yaml
 ```
 
 ---
 
-## Deploy Script
+## Release Workflow
 
-The homelab includes a convenience script at `deploy/homelab/deploy.sh`:
+Releases are driven through **GitLab CI**. The workflow:
+
+1. **Cut the release** locally with `make release` — this stamps version metadata, commits, tags, and pushes
+2. **GitLab CI picks up the tag** and runs the full pipeline: test → build → publish → deploy
+
+### Cut a Release
 
 ```bash
-# Full deploy: build, push, helm install
-./deploy/homelab/deploy.sh
+# Preview what would change
+make release-dry-run VERSION=0.2.0
 
-# Skip build, just redeploy
-./deploy/homelab/deploy.sh --no-build --no-push
-
-# Only deploy ch-server
-./deploy/homelab/deploy.sh --only ch-server
-
-# Use a specific tag
-./deploy/homelab/deploy.sh --tag v0.2.0
+# Execute the release
+make release VERSION=0.2.0
 ```
 
-Flags:
+This updates:
+- `VERSION` — single source of truth
+- `ch-server/charts/ch-server/Chart.yaml` — `version` and `appVersion`
+- `ch-web/charts/ch-web/Chart.yaml` — `version` and `appVersion`
 
-| Flag | Effect |
-|------|--------|
-| `--no-build` | Skip building images |
-| `--no-push` | Skip pushing to registry |
-| `--no-deploy` | Skip Helm deploy |
-| `--only NAME` | Build/deploy only `ch-server` or `ch-web` |
-| `--tag TAG` | Image tag (default: `latest`) |
+Then commits as `release: v0.2.0`, tags as `v0.2.0`, and pushes both the commit and tag to origin. GitLab CI handles the rest.
 
----
+### Safety Checks
 
-## Branch Strategy
+`make release` enforces:
+- Working tree must be clean (no uncommitted changes)
+- Must be on `main` branch
+- Local `main` must be in sync with `origin/main`
+- Version must be valid semver (X.Y.Z)
+- Tag must not already exist
 
-### `main` branch
+### Manual Deploy (Emergency)
 
-The open-source, generic branch. All code uses `registry.example.com` and `example.com` as placeholders. No environment-specific values, no secrets, no internal hostnames.
-
-Changes that affect application behavior (bug fixes, features, API changes) go to `main` first.
-
-### Environment branches (e.g., `homelab`)
-
-Extend `main` with environment-specific deployment configs under `deploy/<env>/`:
-
-```
-deploy/homelab/
-├── deploy.sh               # Build + deploy script
-├── ch-server-values.yaml   # Helm value overrides
-├── ch-web-values.yaml      # Helm value overrides
-└── infra/
-    ├── postgres-cluster.yaml
-    ├── qdrant.yaml
-    └── ingress.yaml
-```
-
-Environment branches are periodically rebased onto `main`:
+If CI is unavailable, deploy manually:
 
 ```bash
-git checkout homelab
-git rebase main
-git push --force-with-lease origin homelab
+podman login ats-dev.nexus.switchnet.nv
+make images   # or: make server && make web
+
+export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
+helm upgrade --install ch-server ch-server/charts/ch-server \
+  --namespace ch-system \
+  --set image.tag=0.2.0 \
+  --set virtualService.enabled=true \
+  --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
+  --set virtualService.host=chapterhouse.switchcraft.pd.internal
+
+helm upgrade --install ch-web ch-web/charts/ch-web \
+  --namespace ch-system \
+  --set image.tag=0.2.0
 ```
-
-### Workflow
-
-1. Make code changes on `main`
-2. Commit, push `main`
-3. Switch to environment branch, rebase onto `main`
-4. Force-push environment branch
-5. Build, push, deploy from environment branch
 
 ---
 
-## Release Checklist
+## GitLab CI Pipeline
 
-- [ ] All changes committed to `main`
-- [ ] Tests pass: `cd ch-server && go test ./internal/...`
-- [ ] Both images build: `podman build` for ch-server and ch-web
-- [ ] Helm charts lint: `helm lint` for both charts
-- [ ] Update `version` and `appVersion` in both `Chart.yaml` files
-- [ ] Tag the release: `git tag v0.X.0`
-- [ ] Build and push images with version tag
-- [ ] Push tag: `git push origin v0.X.0`
-- [ ] Rebase environment branches and deploy
+The `.gitlab-ci.yml` pipeline automates the build-test-publish-deploy cycle.
+
+### Stages
+
+| Stage | Purpose |
+|-------|---------|
+| `test` | `go vet`, `go test` |
+| `build` | Build both Docker images with buildx |
+| `publish` | Push images to Nexus, package + push Helm charts |
+| `deploy` | `helm upgrade --install` to target cluster |
+
+### Required CI Variables
+
+Configure under **Settings > CI/CD > Variables** (masked, protected):
+
+| Variable | Description |
+|----------|-------------|
+| `NEXUS_USER` | Nexus registry username |
+| `NEXUS_PASSWORD` | Nexus registry password |
+| `KUBE_CONFIG` | Base64-encoded kubeconfig for ovas-ai-prod |
+
+Generate the kubeconfig variable:
+
+```bash
+base64 -i ~/.kube/ovas-ai-prod.yaml | tr -d '\n'
+```
+
+### Runner Requirements
+
+All jobs use the `chapterhouse` runner tag. The runner must have Docker-in-Docker capability and network access to `ats-dev.nexus.switchnet.nv`.
+
+### Version Strategy
+
+- **Tagged commits** (`v*`): Uses the tag as the image version
+- **Non-tagged commits**: Uses the short commit SHA
+- **Deploy stage**: Manual gate for production
+
+---
+
+## Makefile Reference
+
+| Target | Description |
+|--------|-------------|
+| `make help` | Show all targets and current version |
+| `make test` | Run Go tests (`ch-server`) |
+| `make lint` | Run Go vet (`ch-server`) |
+| `make server` | Build + push ch-server image |
+| `make web` | Build + push ch-web image |
+| `make images` | Build + push both images |
+| `make charts` | Package both Helm charts to `dist/` |
+| `make deploy-server` | Deploy ch-server via Helm |
+| `make deploy-web` | Deploy ch-web via Helm |
+| `make reindex` | Run reindex via kubectl exec |
+| `make clean` | Remove local built images |
+| `make release VERSION=X.Y.Z` | Stamp, commit, tag, push |
+| `make release-dry-run VERSION=X.Y.Z` | Preview release changes |
+
+Environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REGISTRY` | `ats-dev.nexus.switchnet.nv/chapterhouse` | Container registry prefix |
+| `NAMESPACE` | `ch-system` | Kubernetes namespace |
+
+---
+
+*Generated with [Claude Code](https://claude.com/claude-code) — 2026-02-24*
