@@ -168,10 +168,10 @@ func run() error {
 	mcpHTTPHandler := mcp.NewStreamableHTTPHandler(mcpServer, apiKeyProvider, logger)
 	mcpStatelessHandler := mcp.NewStatelessHTTPHandler(mcpServer, apiKeyProvider, logger)
 
-	// Rate limiters: login (5 req/min per IP), MCP (60 req/min per user)
+	// Rate limiters: login (5 req/min per IP), MCP (10 req/sec, burst 50 per user)
 	loginLimiter := middleware.NewRateLimiter(5.0/60.0, 5)
 	defer loginLimiter.Close()
-	mcpLimiter := middleware.NewRateLimiter(1, 10)
+	mcpLimiter := middleware.NewRateLimiter(10, 50)
 	defer mcpLimiter.Close()
 
 	router := buildRouter(cfg, logger, apiAuthProvider, sessionProvider, healthHandler, memoryHandler, journalHandler, adminHandler, systemStatsHandler, mcpHTTPHandler, mcpStatelessHandler, loginLimiter, mcpLimiter)
