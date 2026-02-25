@@ -178,7 +178,8 @@ endif
 	$(call stamp-version,$(VERSION))
 	@echo ""
 	@git add VERSION ch-server/charts/ch-server/Chart.yaml ch-web/charts/ch-web/Chart.yaml
-	@git commit -m "release: v$(VERSION)"
+	@git diff --cached --quiet && echo "Version files already at $(VERSION), tagging only" \
+		|| git commit -m "release: v$(VERSION)"
 	@git tag -a v$(VERSION) -m "Release v$(VERSION)"
 	@git push origin main && git push origin v$(VERSION)
 	@echo ""
