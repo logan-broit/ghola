@@ -21,16 +21,16 @@ Claude Code / AI Assistant
     │
     │  MCP (HTTP + Bearer token)
     ▼
-┌─────────────┐     ┌──────────────┐     ┌─────────┐
+┌──────────────┐     ┌───────────────┐     ┌──────────┐
 │  ch-server   │────▶│  PostgreSQL   │     │  Ollama  │
-│  (Go API)    │────▶│  (Qdrant)    │     │ (embed)  │
-└─────────────┘     └──────────────┘     └─────────┘
+│  (Go API)    │────▶│  (Qdrant)     │     │ (embed)  │
+└──────────────┘     └───────────────┘     └──────────┘
     ▲
     │  HTTP proxy
-┌─────────────┐
+┌──────────────┐
 │   ch-web     │
 │ (admin UI)   │
-└─────────────┘
+└──────────────┘
 ```
 
 **ch-server** — Go API and MCP server. Handles memory storage, semantic search, user management, API keys, and audit logging.
