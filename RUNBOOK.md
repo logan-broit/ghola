@@ -17,6 +17,8 @@ Operational guide for deploying Chapterhouse to a Kubernetes cluster.
 11. [Troubleshooting](#troubleshooting)
 12. [Corporate Air-Gapped Environment](#corporate-air-gapped-environment)
 
+**Related docs**: [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md) | [SECURITY_STATEMENT.md](SECURITY_STATEMENT.md)
+
 ---
 
 ## Prerequisites
@@ -27,7 +29,7 @@ Operational guide for deploying Chapterhouse to a Kubernetes cluster.
 |------|---------|---------|
 | kubectl | 1.28+ | Kubernetes CLI |
 | helm | 3.12+ | Helm chart deployment |
-| podman | 4+ | Container image building (preferred locally) |
+| docker | 27+ | Container image building (buildx required) |
 | Go | 1.24+ | Building from source |
 | glab | latest | GitLab CLI |
 
@@ -40,7 +42,7 @@ Operational guide for deploying Chapterhouse to a Kubernetes cluster.
 
 ### Container Registry
 
-Images are stored at `ats-dev.nexus.switchnet.nv/chapterhouse`. Both Helm charts default to this registry with `nexus-registry` as the imagePullSecret. See `BUILD_AND_RELEASE.md` for build instructions.
+Images and Helm charts are stored in the Zot OCI registry at `registry.switchcraft.pd.internal/chapterhouse`. Zot allows anonymous read, so no imagePullSecret is needed. See `BUILD_AND_RELEASE.md` for build instructions.
 
 ---
 
@@ -70,24 +72,6 @@ kubectl create secret generic ch-admin-bootstrap \
   -n ch-system \
   --from-literal=ADMIN_USERNAME=admin \
   --from-literal=ADMIN_PASSWORD="$(openssl rand -base64 16)"
-```
-
-**Container registry pull secret** (Nexus):
-
-```bash
-kubectl create secret docker-registry nexus-registry \
-  -n ch-system \
-  --docker-server=ats-dev.nexus.switchnet.nv \
-  --docker-username=YOUR_NEXUS_USER \
-  --docker-password=YOUR_NEXUS_PASSWORD
-```
-
-Or copy from an existing namespace (e.g., `runcell-system`):
-
-```bash
-kubectl get secret nexus-registry -n runcell-system -o json \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); d['metadata']={'name':'nexus-registry','namespace':'ch-system'}; print(json.dumps(d))" \
-  | kubectl apply -f -
 ```
 
 **Embedding API key** (if using a hosted provider like Together.ai):
@@ -170,10 +154,10 @@ Expected tables: `users`, `memory_blocks`, `journal`, `git_commits`, `audit_log`
 
 ## Building Container Images
 
-Production builds are driven through **GitLab CI** — see `BUILD_AND_RELEASE.md` for the full workflow. For local builds, use podman:
+Production builds are driven through **GitLab CI** — see `BUILD_AND_RELEASE.md` for the full workflow. For local builds:
 
 ```bash
-podman login ats-dev.nexus.switchnet.nv
+docker login registry.switchcraft.pd.internal
 make server   # Build + push ch-server
 make web      # Build + push ch-web
 make images   # Build + push both
@@ -183,7 +167,7 @@ make images   # Build + push both
 
 ## Deploying with Helm
 
-Each component has a Helm chart under its `charts/` directory. Both charts default to the Nexus registry and `nexus-registry` pull secret.
+Each component has a Helm chart under its `charts/` directory. Both charts default to the Zot registry at `registry.switchcraft.pd.internal`.
 
 ### ch-server (ovas-ai-prod)
 
@@ -192,7 +176,7 @@ export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
 
 helm upgrade --install ch-server ch-server/charts/ch-server \
   --namespace ch-system \
-  --set image.tag=0.1.0 \
+  --set image.tag=0.3.0 \
   --set virtualService.enabled=true \
   --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
   --set virtualService.host=chapterhouse.switchcraft.pd.internal
@@ -203,7 +187,7 @@ helm upgrade --install ch-server ch-server/charts/ch-server \
 ```bash
 helm upgrade --install ch-web ch-web/charts/ch-web \
   --namespace ch-system \
-  --set image.tag=0.1.0
+  --set image.tag=0.3.0
 ```
 
 ### Homelab Overrides
@@ -429,6 +413,21 @@ kubectl get storageclass
 
 **Fix**: Ensure you're using the current migration files where indexes use `WHERE revoked_at IS NULL` without time predicates.
 
+### Helm Release Stuck in pending-upgrade
+
+**Symptom**: `helm upgrade` fails with `another operation (install/upgrade/rollback) is in progress`.
+
+**Cause**: A previous deploy was interrupted (e.g., CI timeout, network issue), leaving a Helm release in `pending-upgrade` or `pending-install` state.
+
+**Fix**: Roll back to the last successful revision:
+
+```bash
+helm history ch-server -n ch-system   # find the last "deployed" revision
+helm rollback ch-server <REVISION> -n ch-system
+```
+
+Then retry the deploy.
+
 ### Pod Logs
 
 ```bash
@@ -455,33 +454,23 @@ The `ca-bundle.pem` file at the repository root contains the required certificat
 
 **Updating the CA bundle**: If certificates rotate, replace `ca-bundle.pem` at the repo root. The Dockerfiles and CI pipeline reference it by path.
 
-### Nexus Registry
+### Zot OCI Registry
 
-Images are stored at:
+Images and Helm charts are stored in the Zot OCI registry:
 
-| Image | Full Path |
-|-------|-----------|
-| ch-server | `ats-dev.nexus.switchnet.nv/chapterhouse/ch-server` |
-| ch-web | `ats-dev.nexus.switchnet.nv/chapterhouse/ch-web` |
+| Artifact | Full Path |
+|----------|-----------|
+| ch-server image | `registry.switchcraft.pd.internal/chapterhouse/ch-server` |
+| ch-web image | `registry.switchcraft.pd.internal/chapterhouse/ch-web` |
+| ch-server chart | `oci://registry.switchcraft.pd.internal/charts/ch-server` |
+| ch-web chart | `oci://registry.switchcraft.pd.internal/charts/ch-web` |
 
-#### Image Pull Secret
-
-Create the `nexus-registry` pull secret in the target namespace:
-
-```bash
-kubectl create secret docker-registry nexus-registry \
-  -n ch-system \
-  --docker-server=ats-dev.nexus.switchnet.nv \
-  --docker-username=YOUR_NEXUS_USER \
-  --docker-password=YOUR_NEXUS_PASSWORD
-```
-
-Both Helm charts default to `imagePullSecrets: [{name: nexus-registry}]`.
+Zot allows anonymous read — no imagePullSecret is needed for pulling images. Push access requires credentials (`ZOT_USER` / `ZOT_PASSWORD`).
 
 #### Manual Push
 
 ```bash
-podman login ats-dev.nexus.switchnet.nv
+docker login registry.switchcraft.pd.internal
 make server   # builds + pushes ch-server
 make web      # builds + pushes ch-web
 ```
@@ -514,21 +503,21 @@ The `.gitlab-ci.yml` pipeline has four stages: `test` → `build` → `publish` 
 
 | Variable | Description |
 |----------|-------------|
-| `NEXUS_USER` | Nexus registry username |
-| `NEXUS_PASSWORD` | Nexus registry password |
-| `KUBE_CONFIG` | Base64-encoded kubeconfig for the target cluster |
+| `ZOT_USER` | Zot registry username |
+| `ZOT_PASSWORD` | Zot registry password |
+| `KUBE_CONFIG_OVAS` | Base64-encoded kubeconfig for ovas-ai-prod |
 
 Generate the kubeconfig variable:
 
 ```bash
-base64 -i ~/.kube/your-cluster.yaml | tr -d '\n'
+base64 -i ~/.kube/ovas-ai-prod.yaml | tr -d '\n'
 ```
 
 Add all three as CI/CD variables under **Settings > CI/CD > Variables** (masked, protected).
 
-#### Runner Tag
+#### Runner Tags
 
-All jobs use the `chapterhouse` runner tag. Ensure a GitLab runner with this tag is registered and has Docker-in-Docker capability.
+Build jobs use the `docker` and `amd64` runner tags. The runner must have Docker-in-Docker capability and network access to `registry.switchcraft.pd.internal`.
 
 ### Storage Class
 
@@ -548,8 +537,8 @@ The `VERSION` file at the repo root is the single source of truth. It is consume
 Release workflow:
 
 ```bash
-make release-dry-run VERSION=0.2.0   # preview changes
-make release VERSION=0.2.0           # stamp, commit, tag, push
+make release-dry-run VERSION=0.3.0   # preview changes
+make release VERSION=0.3.0           # stamp, commit, tag, push
 ```
 
 The CI pipeline builds and deploys automatically from tags.

@@ -46,6 +46,7 @@ chapterhouse/
 │   └── examples/               # CNPG and Qdrant manifests
 ├── README.md
 ├── RUNBOOK.md                  # Deployment operations guide
+├── SECURITY_STATEMENT.md       # Security posture and design decisions
 └── BUILD_AND_RELEASE.md        # This file
 ```
 
@@ -61,16 +62,16 @@ Each component (ch-server, ch-web) is independently buildable with its own `go.m
 |------|---------|---------|
 | kubectl | 1.28+ | Kubernetes CLI |
 | helm | 3.12+ | Helm chart deployment |
-| podman | 4+ | Container image building (preferred locally) |
+| docker | 27+ | Container image building (buildx required) |
 | Go | 1.24+ | Building from source |
 | glab | latest | GitLab CLI |
 
 ### Registry Access
 
-Images are stored in the Nexus registry at `ats-dev.nexus.switchnet.nv/chapterhouse`. Log in before building:
+Images and Helm charts are stored in the Zot OCI registry at `registry.switchcraft.pd.internal/chapterhouse`. Zot allows anonymous read; push requires credentials. Log in before building:
 
 ```bash
-podman login ats-dev.nexus.switchnet.nv
+docker login registry.switchcraft.pd.internal
 ```
 
 ### Cluster Access
@@ -139,7 +140,7 @@ sqlc generate
 
 **Production builds are driven through GitLab CI** — push to `main` or tag a release and the pipeline handles build, push, and deploy automatically. See [GitLab CI Pipeline](#gitlab-ci-pipeline).
 
-For local builds, use `podman` (preferred) or `docker` with `--platform linux/amd64`:
+For local builds, use `docker buildx` with `--platform linux/amd64`:
 
 ### Using Make Targets
 
@@ -149,15 +150,7 @@ make web      # Build + push ch-web
 make images   # Build + push both
 ```
 
-The Makefile uses `docker buildx` by default. To use podman locally, set the build command:
-
-```bash
-# podman manual build
-podman build --platform linux/amd64 \
-  -t ats-dev.nexus.switchnet.nv/chapterhouse/ch-server:0.1.0 \
-  ch-server/
-podman push ats-dev.nexus.switchnet.nv/chapterhouse/ch-server:0.1.0
-```
+The Makefile uses `docker buildx` with `--push` to build and push in one step.
 
 ### Build Architecture
 
@@ -187,15 +180,14 @@ make charts   # Packages both to dist/
 
 ### Chart Defaults
 
-Both charts default to the Nexus registry and `nexus-registry` pull secret:
+Both charts default to the Zot registry with no pull secret (anonymous read):
 
 ```yaml
 image:
-  registry: ats-dev.nexus.switchnet.nv
+  registry: registry.switchcraft.pd.internal
   repository: chapterhouse/ch-server  # or ch-web
   tag: ""  # defaults to Chart appVersion
-imagePullSecrets:
-  - name: nexus-registry
+imagePullSecrets: []  # Zot allows anonymous read
 ```
 
 ### Version Alignment
@@ -215,7 +207,7 @@ The `VERSION` file is the single source of truth. Running `make release` stamps 
 | Hostname | `chapterhouse.switchcraft.pd.internal` |
 | Gateway | `istio-ingress/switch-wildcard-ingress` |
 | StorageClass | `ceph-rbd` (default) |
-| Pull Secret | `nexus-registry` |
+| Registry | `registry.switchcraft.pd.internal/chapterhouse` |
 
 ### Deploy ch-server
 
@@ -224,7 +216,7 @@ export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
 
 helm upgrade --install ch-server ch-server/charts/ch-server \
   --namespace ch-system \
-  --set image.tag=0.1.0 \
+  --set image.tag=0.3.0 \
   --set virtualService.enabled=true \
   --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
   --set virtualService.host=chapterhouse.switchcraft.pd.internal
@@ -239,7 +231,7 @@ The VirtualService routes:
 ```bash
 helm upgrade --install ch-web ch-web/charts/ch-web \
   --namespace ch-system \
-  --set image.tag=0.1.0
+  --set image.tag=0.3.0
 ```
 
 ### Homelab Overrides
@@ -269,10 +261,10 @@ Releases are driven through **GitLab CI**. The workflow:
 
 ```bash
 # Preview what would change
-make release-dry-run VERSION=0.2.0
+make release-dry-run VERSION=0.4.0
 
 # Execute the release
-make release VERSION=0.2.0
+make release VERSION=0.4.0
 ```
 
 This updates:
@@ -280,7 +272,7 @@ This updates:
 - `ch-server/charts/ch-server/Chart.yaml` — `version` and `appVersion`
 - `ch-web/charts/ch-web/Chart.yaml` — `version` and `appVersion`
 
-Then commits as `release: v0.2.0`, tags as `v0.2.0`, and pushes both the commit and tag to origin. GitLab CI handles the rest.
+Then commits as `release: vX.Y.Z`, tags as `vX.Y.Z`, and pushes both the commit and tag to origin. GitLab CI handles the rest.
 
 ### Safety Checks
 
@@ -296,20 +288,20 @@ Then commits as `release: v0.2.0`, tags as `v0.2.0`, and pushes both the commit 
 If CI is unavailable, deploy manually:
 
 ```bash
-podman login ats-dev.nexus.switchnet.nv
+docker login registry.switchcraft.pd.internal
 make images   # or: make server && make web
 
 export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
 helm upgrade --install ch-server ch-server/charts/ch-server \
   --namespace ch-system \
-  --set image.tag=0.2.0 \
+  --set image.tag=0.3.0 \
   --set virtualService.enabled=true \
   --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
   --set virtualService.host=chapterhouse.switchcraft.pd.internal
 
 helm upgrade --install ch-web ch-web/charts/ch-web \
   --namespace ch-system \
-  --set image.tag=0.2.0
+  --set image.tag=0.3.0
 ```
 
 ---
@@ -323,9 +315,9 @@ The `.gitlab-ci.yml` pipeline automates the build-test-publish-deploy cycle.
 | Stage | Purpose |
 |-------|---------|
 | `test` | `go vet`, `go test` |
-| `build` | Build both Docker images with buildx |
-| `publish` | Push images to Nexus, package + push Helm charts |
-| `deploy` | `helm upgrade --install` to target cluster |
+| `build` | Build + push Docker images to Zot via buildx |
+| `publish` | Package + push Helm charts to Zot OCI registry |
+| `deploy` | `helm upgrade --install` to target cluster (`allow_failure: true`) |
 
 ### Required CI Variables
 
@@ -333,9 +325,9 @@ Configure under **Settings > CI/CD > Variables** (masked, protected):
 
 | Variable | Description |
 |----------|-------------|
-| `NEXUS_USER` | Nexus registry username |
-| `NEXUS_PASSWORD` | Nexus registry password |
-| `KUBE_CONFIG` | Base64-encoded kubeconfig for ovas-ai-prod |
+| `ZOT_USER` | Zot registry username |
+| `ZOT_PASSWORD` | Zot registry password |
+| `KUBE_CONFIG_OVAS` | Base64-encoded kubeconfig for ovas-ai-prod |
 
 Generate the kubeconfig variable:
 
@@ -345,13 +337,13 @@ base64 -i ~/.kube/ovas-ai-prod.yaml | tr -d '\n'
 
 ### Runner Requirements
 
-All jobs use the `chapterhouse` runner tag. The runner must have Docker-in-Docker capability and network access to `ats-dev.nexus.switchnet.nv`.
+Build jobs use the `docker` and `amd64` runner tags. The runner must have Docker-in-Docker capability and network access to `registry.switchcraft.pd.internal`.
 
 ### Version Strategy
 
 - **Tagged commits** (`v*`): Uses the tag as the image version
 - **Non-tagged commits**: Uses the short commit SHA
-- **Deploy stage**: Manual gate for production
+- **Deploy stage**: Automatic with `allow_failure: true` (non-blocking)
 
 ---
 
@@ -377,7 +369,7 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REGISTRY` | `ats-dev.nexus.switchnet.nv/chapterhouse` | Container registry prefix |
+| `REGISTRY` | `registry.switchcraft.pd.internal/chapterhouse` | Container registry prefix |
 | `NAMESPACE` | `ch-system` | Kubernetes namespace |
 
 ---
