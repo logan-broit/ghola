@@ -899,6 +899,58 @@ func (q *Queries) GetNextMemoryBlockVersion(ctx context.Context, arg GetNextMemo
 	return next_version, err
 }
 
+const getSessionMemories = `-- name: GetSessionMemories :many
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
+WHERE user_id = $1
+  AND session_id = $2
+ORDER BY created_at
+`
+
+type GetSessionMemoriesParams struct {
+	UserID    uuid.UUID   `json:"user_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+}
+
+// Get all current memories for a specific session.
+// Security: filtered by user_id — users can only see their own memories.
+func (q *Queries) GetSessionMemories(ctx context.Context, arg GetSessionMemoriesParams) ([]CurrentMemoryBlock, error) {
+	rows, err := q.db.Query(ctx, getSessionMemories, arg.UserID, arg.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CurrentMemoryBlock{}
+	for rows.Next() {
+		var i CurrentMemoryBlock
+		if err := rows.Scan(
+			&i.ID,
+			&i.Guid,
+			&i.UserID,
+			&i.Name,
+			&i.Tier,
+			&i.Value,
+			&i.Tags,
+			&i.Version,
+			&i.SortOrder,
+			&i.MemoryType,
+			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTopTags = `-- name: GetTopTags :many
 SELECT
     tag,
@@ -964,6 +1016,60 @@ type IncrementRecallCountParams struct {
 func (q *Queries) IncrementRecallCount(ctx context.Context, arg IncrementRecallCountParams) error {
 	_, err := q.db.Exec(ctx, incrementRecallCount, arg.BlockIds, arg.UserID)
 	return err
+}
+
+const listUserSessions = `-- name: ListUserSessions :many
+SELECT
+    session_id,
+    COUNT(DISTINCT name)::int AS memory_count,
+    MIN(created_at)::timestamptz AS first_activity,
+    MAX(created_at)::timestamptz AS last_activity
+FROM current_memory_blocks
+WHERE user_id = $1
+  AND session_id IS NOT NULL
+GROUP BY session_id
+ORDER BY last_activity DESC
+LIMIT $2
+`
+
+type ListUserSessionsParams struct {
+	UserID      uuid.UUID `json:"user_id"`
+	ResultLimit int32     `json:"result_limit"`
+}
+
+type ListUserSessionsRow struct {
+	SessionID     pgtype.UUID `json:"session_id"`
+	MemoryCount   int32       `json:"memory_count"`
+	FirstActivity time.Time   `json:"first_activity"`
+	LastActivity  time.Time   `json:"last_activity"`
+}
+
+// List sessions that created memories, aggregated from memory_blocks.
+// Returns session_id, memory count, and time range for each session.
+// Security: filtered by user_id — users can only see their own sessions.
+func (q *Queries) ListUserSessions(ctx context.Context, arg ListUserSessionsParams) ([]ListUserSessionsRow, error) {
+	rows, err := q.db.Query(ctx, listUserSessions, arg.UserID, arg.ResultLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUserSessionsRow{}
+	for rows.Next() {
+		var i ListUserSessionsRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.MemoryCount,
+			&i.FirstActivity,
+			&i.LastActivity,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const pruneOldVersions = `-- name: PruneOldVersions :exec

@@ -96,6 +96,19 @@ WHERE (user_id = $1 AND scope = 'personal')
 This pattern is applied consistently in `SearchAccessibleMemoryBlocks`,
 `GetAccessibleMemoryBlocks`, `ExportMemories`, and all related queries.
 
+### Session-Scoped Queries
+
+Session lifecycle tools (`list_sessions`, `session_summary`, `session_context`)
+use a simpler ownership filter since sessions are strictly per-user:
+
+```sql
+WHERE user_id = @user_id AND session_id IS NOT NULL
+```
+
+There is no org-scope access for session data -- a user can only see sessions
+where they created memories. `ListUserSessions` aggregates session metadata;
+`GetSessionMemories` returns full memory content for a single session.
+
 ### Vector Search Isolation
 
 Qdrant payload indexes include `user_id`, `org_id`, and `scope` fields.
@@ -135,6 +148,10 @@ IP; the MCP limiter keys on authenticated user ID.
 - All JSON requests are parsed with `DisallowUnknownFields()` to reject
   unexpected fields (mass assignment prevention)
 - Pagination is bounded: 1--100 items per request
+- Session tool `limit` parameter is bounded to 1--100 (consistent with
+  pagination bounds)
+- `session_id` arguments are validated as UUID format before any database query
+  (reuses `parseSessionIDArg`)
 - Memory type and scope values are validated at the handler level
 - Request timeout: 30 seconds (configurable)
 
@@ -211,11 +228,15 @@ name), ensuring idempotent upserts.
 
 ### What Is Captured
 
-Admin operations are logged to the `audit_logs` table:
+Admin and MCP operations are logged to the `audit_logs` table:
 
 - **Authentication events**: login, logout (with IP address, user agent)
 - **User management**: create, update, deactivate, reactivate
 - **API key lifecycle**: create, revoke
+- **MCP tool calls**: remember, recall, forget, list_memories, share_memory,
+  export_memories, list_sessions, session_summary, session_context (with
+  tool-specific details such as query text, memory type, and bounded session
+  IDs)
 - **Resource details**: JSONB `details` column for additional context
 
 ### Request Logging
@@ -230,6 +251,12 @@ All HTTP requests are logged via structured JSON middleware:
 
 MCP session IDs are treated as bearer tokens and are only logged in truncated
 form (first 8 characters) to prevent session hijacking via log access.
+
+Memory session IDs (`session_id` arguments to `session_summary` and
+`session_context`) are similarly truncated to 8 characters in audit log
+`details` entries. The `list_sessions` tool returns full session IDs to the
+calling user, but these are the user's own session IDs filtered by ownership --
+not a log exposure risk.
 
 **Source**: `ch-server/db/migrations/001_initial_schema.sql`,
 `ch-server/internal/middleware/middleware.go`

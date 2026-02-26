@@ -93,7 +93,7 @@ deploy-web: ## Deploy ch-web via Helm
 		--set image.tag=$(VERSION)
 
 reindex: ## Run reindex via kubectl
-	kubectl exec -n $(NAMESPACE) deploy/ch-server -- /app/reindex
+	kubectl exec -n $(NAMESPACE) deploy/ch-server -- /app/ch-reindex
 
 # =============================================================================
 # Release Target

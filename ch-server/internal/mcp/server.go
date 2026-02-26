@@ -25,6 +25,15 @@ var rememberDescription string
 //go:embed descriptions/recall.txt
 var recallDescription string
 
+//go:embed descriptions/list_sessions.txt
+var listSessionsDescription string
+
+//go:embed descriptions/session_summary.txt
+var sessionSummaryDescription string
+
+//go:embed descriptions/session_context.txt
+var sessionContextDescription string
+
 // MemoryQuerier defines the database operations needed by the MCP server.
 type MemoryQuerier interface {
 	GetNextMemoryBlockVersion(ctx context.Context, arg sqlc.GetNextMemoryBlockVersionParams) (int32, error)
@@ -44,6 +53,8 @@ type MemoryQuerier interface {
 	SearchAccessibleMemoryBlocksByTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTagsParams) ([]sqlc.CurrentMemoryBlock, error)
 	SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]sqlc.CurrentMemoryBlock, error)
 	IncrementRecallCount(ctx context.Context, arg sqlc.IncrementRecallCountParams) error
+	ListUserSessions(ctx context.Context, arg sqlc.ListUserSessionsParams) ([]sqlc.ListUserSessionsRow, error)
+	GetSessionMemories(ctx context.Context, arg sqlc.GetSessionMemoriesParams) ([]sqlc.CurrentMemoryBlock, error)
 }
 
 // VectorDB defines the vector database operations needed by the MCP server.
@@ -248,6 +259,47 @@ func (s *Server) Tools() []Tool {
 				},
 			},
 		},
+		{
+			Name:        "list_sessions",
+			Description: listSessionsDescription,
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"limit": {
+						Type:        "integer",
+						Description: "Maximum number of sessions to return (default: 10).",
+					},
+				},
+			},
+		},
+		{
+			Name:        "session_summary",
+			Description: sessionSummaryDescription,
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"session_id": {
+						Type:        "string",
+						Description: "Session UUID to summarize.",
+					},
+				},
+				Required: []string{"session_id"},
+			},
+		},
+		{
+			Name:        "session_context",
+			Description: sessionContextDescription,
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"session_id": {
+						Type:        "string",
+						Description: "Session UUID to load context from.",
+					},
+				},
+				Required: []string{"session_id"},
+			},
+		},
 	}
 }
 
@@ -334,6 +386,12 @@ func (s *Server) callTool(authCtx *auth.Context, params CallToolParams) CallTool
 		result = s.handleShareMemory(authCtx, params.Arguments)
 	case "export_memories":
 		result = s.handleExportMemories(authCtx, params.Arguments)
+	case "list_sessions":
+		result = s.handleListSessions(authCtx, params.Arguments)
+	case "session_summary":
+		result = s.handleSessionSummary(authCtx, params.Arguments)
+	case "session_context":
+		result = s.handleSessionContext(authCtx, params.Arguments)
 	default:
 		result = toolError(fmt.Sprintf("Unknown tool: %s", params.Name))
 	}
@@ -394,6 +452,14 @@ func (s *Server) createAuditLog(authCtx *auth.Context, params CallToolParams, re
 	case "list_memories":
 		if tags, ok := params.Arguments["tags"].([]any); ok {
 			details["tags_filter"] = tags
+		}
+	case "list_sessions":
+		if limit, ok := params.Arguments["limit"].(float64); ok {
+			details["limit"] = int(limit)
+		}
+	case "session_summary", "session_context":
+		if sid, ok := params.Arguments["session_id"].(string); ok && len(sid) >= 8 {
+			details["target_session"] = sid[:8] + "..."
 		}
 	}
 

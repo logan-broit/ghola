@@ -294,6 +294,30 @@ ORDER BY
     cmb.tier, cmb.sort_order, cmb.name
 LIMIT @search_limit;
 
+-- name: ListUserSessions :many
+-- List sessions that created memories, aggregated from memory_blocks.
+-- Returns session_id, memory count, and time range for each session.
+-- Security: filtered by user_id — users can only see their own sessions.
+SELECT
+    session_id,
+    COUNT(DISTINCT name)::int AS memory_count,
+    MIN(created_at)::timestamptz AS first_activity,
+    MAX(created_at)::timestamptz AS last_activity
+FROM current_memory_blocks
+WHERE user_id = @user_id
+  AND session_id IS NOT NULL
+GROUP BY session_id
+ORDER BY last_activity DESC
+LIMIT @result_limit;
+
+-- name: GetSessionMemories :many
+-- Get all current memories for a specific session.
+-- Security: filtered by user_id — users can only see their own memories.
+SELECT * FROM current_memory_blocks
+WHERE user_id = @user_id
+  AND session_id = @session_id
+ORDER BY created_at;
+
 -- name: IncrementRecallCount :exec
 -- Batch-increment recall counts for memories returned in a search.
 -- The user_id filter is defense-in-depth: block IDs are already derived

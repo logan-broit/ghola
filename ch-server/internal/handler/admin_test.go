@@ -740,6 +740,12 @@ func (m *adminMockQueries) IncrementRecallCount(ctx context.Context, arg sqlc.In
 func (m *adminMockQueries) PruneOldVersions(ctx context.Context, retainCount int32) error {
 	return nil
 }
+func (m *adminMockQueries) ListUserSessions(ctx context.Context, arg sqlc.ListUserSessionsParams) ([]sqlc.ListUserSessionsRow, error) {
+	return nil, nil
+}
+func (m *adminMockQueries) GetSessionMemories(ctx context.Context, arg sqlc.GetSessionMemoriesParams) ([]sqlc.CurrentMemoryBlock, error) {
+	return nil, nil
+}
 
 // Verify adminMockQueries implements sqlc.Querier
 var _ sqlc.Querier = (*adminMockQueries)(nil)

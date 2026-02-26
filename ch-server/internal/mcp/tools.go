@@ -776,6 +776,228 @@ func matchesTags(tags []string, filter []string) bool {
 	return true
 }
 
+// relativeTime formats a time as a human-readable relative string.
+func relativeTime(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", h)
+	case d < 48*time.Hour:
+		return "yesterday"
+	default:
+		days := int(d.Hours() / 24)
+		if days < 7 {
+			return fmt.Sprintf("%d days ago", days)
+		}
+		return t.Format("Jan 2, 2006")
+	}
+}
+
+func (s *Server) handleListSessions(authCtx *auth.Context, args map[string]any) CallToolResult {
+	limit := int32(10)
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int32(l)
+	}
+	// Bound limit to 1-100 per security policy §3
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	ctx := auth.WithContext(context.Background(), authCtx)
+	sessions, err := s.queries.ListUserSessions(ctx, sqlc.ListUserSessionsParams{
+		UserID:      authCtx.UserID,
+		ResultLimit: limit,
+	})
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	if len(sessions) == 0 {
+		return toolResult("No sessions with memories found")
+	}
+
+	var lines []string
+	for _, sess := range sessions {
+		if !sess.SessionID.Valid {
+			continue
+		}
+		sid := uuid.UUID(sess.SessionID.Bytes).String()
+		lastActive := relativeTime(sess.LastActivity)
+		duration := sess.LastActivity.Sub(sess.FirstActivity)
+
+		durationStr := ""
+		if duration < time.Minute {
+			durationStr = "< 1 min"
+		} else if duration < time.Hour {
+			durationStr = fmt.Sprintf("%d min", int(duration.Minutes()))
+		} else {
+			durationStr = fmt.Sprintf("%.1f hrs", duration.Hours())
+		}
+
+		lines = append(lines, fmt.Sprintf("[%s] %d memories, %s duration, last active %s",
+			sid, sess.MemoryCount, durationStr, lastActive))
+	}
+
+	return toolResult(fmt.Sprintf("Found %d sessions:\n\n%s", len(lines), strings.Join(lines, "\n")))
+}
+
+func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any) CallToolResult {
+	sessionID, err := parseSessionIDArg(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	if sessionID == "" {
+		return toolError("session_id is required")
+	}
+
+	parsed, _ := uuid.Parse(sessionID)
+	ctx := auth.WithContext(context.Background(), authCtx)
+	memories, err := s.queries.GetSessionMemories(ctx, sqlc.GetSessionMemoriesParams{
+		UserID:    authCtx.UserID,
+		SessionID: pgtype.UUID{Bytes: parsed, Valid: true},
+	})
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	if len(memories) == 0 {
+		return toolResult("No memories found for this session")
+	}
+
+	// Compute time range
+	first := memories[0].CreatedAt
+	last := memories[len(memories)-1].CreatedAt
+	for _, m := range memories {
+		if m.CreatedAt.Before(first) {
+			first = m.CreatedAt
+		}
+		if m.CreatedAt.After(last) {
+			last = m.CreatedAt
+		}
+	}
+
+	// Group by memory type
+	typeCounts := make(map[string]int)
+	tagSet := make(map[string]bool)
+	for _, m := range memories {
+		typeCounts[m.MemoryType]++
+		for _, t := range m.Tags {
+			if t != "" {
+				tagSet[t] = true
+			}
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Session %s\n", sessionID))
+	sb.WriteString(fmt.Sprintf("Time: %s — %s (%s)\n",
+		first.Format("Jan 2 15:04"), last.Format("15:04 MST"), relativeTime(last)))
+	sb.WriteString(fmt.Sprintf("Memories: %d total", len(memories)))
+
+	// Type breakdown
+	var typeParts []string
+	for _, t := range []string{"factual", "experiential", "working"} {
+		if c, ok := typeCounts[t]; ok {
+			typeParts = append(typeParts, fmt.Sprintf("%d %s", c, t))
+		}
+	}
+	if len(typeParts) > 0 {
+		sb.WriteString(fmt.Sprintf(" (%s)", strings.Join(typeParts, ", ")))
+	}
+	sb.WriteString("\n")
+
+	// Tags
+	if len(tagSet) > 0 {
+		var tags []string
+		for t := range tagSet {
+			tags = append(tags, t)
+		}
+		sort.Strings(tags)
+		sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(tags, ", ")))
+	}
+
+	sb.WriteString("\nMemories:\n")
+	for _, m := range memories {
+		value := ""
+		if m.Value.Valid {
+			value = truncateText(m.Value.String, 120)
+		}
+		sb.WriteString(fmt.Sprintf("  [%d] [%s] %s\n", m.ID, m.MemoryType, value))
+	}
+
+	return toolResult(sb.String())
+}
+
+func (s *Server) handleSessionContext(authCtx *auth.Context, args map[string]any) CallToolResult {
+	sessionID, err := parseSessionIDArg(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	if sessionID == "" {
+		return toolError("session_id is required")
+	}
+
+	parsed, _ := uuid.Parse(sessionID)
+	ctx := auth.WithContext(context.Background(), authCtx)
+	memories, err := s.queries.GetSessionMemories(ctx, sqlc.GetSessionMemoriesParams{
+		UserID:    authCtx.UserID,
+		SessionID: pgtype.UUID{Bytes: parsed, Valid: true},
+	})
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	if len(memories) == 0 {
+		return toolResult("No memories found for this session")
+	}
+
+	// Group memories by type for structured context loading
+	groups := map[string][]sqlc.CurrentMemoryBlock{
+		"factual":      {},
+		"experiential": {},
+		"working":      {},
+	}
+	for _, m := range memories {
+		groups[m.MemoryType] = append(groups[m.MemoryType], m)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Session context (%d memories):\n", len(memories)))
+
+	// Output in priority order: factual → experiential → working
+	for _, memType := range []string{"factual", "experiential", "working"} {
+		group := groups[memType]
+		if len(group) == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("\n## %s (%d)\n", strings.ToUpper(memType[:1])+memType[1:], len(group)))
+		for _, m := range group {
+			value := ""
+			if m.Value.Valid {
+				value = m.Value.String
+			}
+			sb.WriteString(fmt.Sprintf("[%d] %s\n", m.ID, value))
+		}
+	}
+
+	return toolResult(sb.String())
+}
+
 func sanitizeName(s string) string {
 	runes := []rune(s)
 	if len(runes) > 50 {

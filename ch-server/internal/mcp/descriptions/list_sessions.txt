@@ -1,0 +1,13 @@
+List recent sessions that created memories. Use this to answer questions like "what were we working on yesterday?" or "show my recent sessions."
+
+Each session entry includes:
+- Session UUID (use with session_summary or session_context for details)
+- Number of memories created
+- Time range (first and last activity)
+
+WHEN TO USE:
+- User asks about recent work or past sessions
+- User wants to find a specific session to resume
+- User asks "what did we do yesterday/last week?"
+
+Use the returned session_id with session_summary (for details) or session_context (to resume).

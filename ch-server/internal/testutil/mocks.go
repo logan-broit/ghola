@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
@@ -167,15 +168,19 @@ func (m *MockQueries) CreateMemoryBlock(ctx context.Context, arg sqlc.CreateMemo
 	defer m.Mu.Unlock()
 
 	block := sqlc.MemoryBlock{
-		ID:        m.nextID,
-		UserID:    arg.UserID,
-		Name:      arg.Name,
-		Tier:      arg.Tier,
-		Value:     arg.Value,
-		Version:   arg.Version,
-		SortOrder: arg.SortOrder,
-		Tags:      arg.Tags,
-		SessionID: arg.SessionID,
+		ID:         m.nextID,
+		UserID:     arg.UserID,
+		Name:       arg.Name,
+		Tier:       arg.Tier,
+		Value:      arg.Value,
+		Version:    arg.Version,
+		SortOrder:  arg.SortOrder,
+		Tags:       arg.Tags,
+		SessionID:  arg.SessionID,
+		MemoryType: arg.MemoryType,
+		Scope:      arg.Scope,
+		CreatedAt:  time.Now(),
+		ModifiedAt: time.Now(),
 	}
 	m.nextID++
 
@@ -251,6 +256,59 @@ func (m *MockQueries) SearchAccessibleMemoryBlocks(ctx context.Context, arg sqlc
 	return m.GetCurrentMemoryBlocks(ctx, arg.UserID)
 }
 
+func (m *MockQueries) ListUserSessions(ctx context.Context, arg sqlc.ListUserSessionsParams) ([]sqlc.ListUserSessionsRow, error) {
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+
+	blocks := m.currentBlocks(arg.UserID)
+	sessions := make(map[pgtype.UUID]*sqlc.ListUserSessionsRow)
+	for _, b := range blocks {
+		if !b.SessionID.Valid {
+			continue
+		}
+		key := b.SessionID
+		if s, ok := sessions[key]; ok {
+			s.MemoryCount++
+			if b.CreatedAt.Before(s.FirstActivity) {
+				s.FirstActivity = b.CreatedAt
+			}
+			if b.CreatedAt.After(s.LastActivity) {
+				s.LastActivity = b.CreatedAt
+			}
+		} else {
+			sessions[key] = &sqlc.ListUserSessionsRow{
+				SessionID:     b.SessionID,
+				MemoryCount:   1,
+				FirstActivity: b.CreatedAt,
+				LastActivity:  b.CreatedAt,
+			}
+		}
+	}
+
+	var result []sqlc.ListUserSessionsRow
+	for _, s := range sessions {
+		result = append(result, *s)
+	}
+	if int32(len(result)) > arg.ResultLimit {
+		result = result[:arg.ResultLimit]
+	}
+	return result, nil
+}
+
+func (m *MockQueries) GetSessionMemories(ctx context.Context, arg sqlc.GetSessionMemoriesParams) ([]sqlc.CurrentMemoryBlock, error) {
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+
+	blocks := m.currentBlocks(arg.UserID)
+	var result []sqlc.CurrentMemoryBlock
+	for _, b := range blocks {
+		if b.SessionID.Valid && b.SessionID == arg.SessionID {
+			result = append(result, b)
+		}
+	}
+	return result, nil
+}
+
 // currentBlocks returns deduplicated current blocks for a user (must hold m.Mu).
 func (m *MockQueries) currentBlocks(userID uuid.UUID) []sqlc.CurrentMemoryBlock {
 	latest := make(map[string]sqlc.MemoryBlock)
@@ -263,15 +321,19 @@ func (m *MockQueries) currentBlocks(userID uuid.UUID) []sqlc.CurrentMemoryBlock 
 	var result []sqlc.CurrentMemoryBlock
 	for _, b := range latest {
 		result = append(result, sqlc.CurrentMemoryBlock{
-			ID:        b.ID,
-			UserID:    b.UserID,
-			Name:      b.Name,
-			Tier:      b.Tier,
-			Value:     b.Value,
-			Tags:      b.Tags,
-			Version:   b.Version,
-			SortOrder: b.SortOrder,
-			SessionID: b.SessionID,
+			ID:         b.ID,
+			UserID:     b.UserID,
+			Name:       b.Name,
+			Tier:       b.Tier,
+			Value:      b.Value,
+			Tags:       b.Tags,
+			Version:    b.Version,
+			SortOrder:  b.SortOrder,
+			SessionID:  b.SessionID,
+			MemoryType: b.MemoryType,
+			Scope:      b.Scope,
+			CreatedAt:  b.CreatedAt,
+			ModifiedAt: b.ModifiedAt,
 		})
 	}
 	return result

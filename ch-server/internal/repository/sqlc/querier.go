@@ -78,6 +78,9 @@ type Querier interface {
 	GetOrCreateUser(ctx context.Context, arg GetOrCreateUserParams) (User, error)
 	GetRecentDecisions(ctx context.Context, arg GetRecentDecisionsParams) ([]Journal, error)
 	GetRecentSolutions(ctx context.Context, arg GetRecentSolutionsParams) ([]Journal, error)
+	// Get all current memories for a specific session.
+	// Security: filtered by user_id — users can only see their own memories.
+	GetSessionMemories(ctx context.Context, arg GetSessionMemoriesParams) ([]CurrentMemoryBlock, error)
 	// Get most frequently used tags across all memories
 	GetTopTags(ctx context.Context, limit int32) ([]GetTopTagsRow, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
@@ -99,6 +102,10 @@ type Querier interface {
 	ListGitCommitsByDateRange(ctx context.Context, arg ListGitCommitsByDateRangeParams) ([]GitCommit, error)
 	ListJournalEntries(ctx context.Context, arg ListJournalEntriesParams) ([]Journal, error)
 	ListJournalEntriesByDateRange(ctx context.Context, arg ListJournalEntriesByDateRangeParams) ([]Journal, error)
+	// List sessions that created memories, aggregated from memory_blocks.
+	// Returns session_id, memory count, and time range for each session.
+	// Security: filtered by user_id — users can only see their own sessions.
+	ListUserSessions(ctx context.Context, arg ListUserSessionsParams) ([]ListUserSessionsRow, error)
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
 	ListUsersAdmin(ctx context.Context, arg ListUsersAdminParams) ([]User, error)
 	// Delete old versions of memory blocks, keeping the most recent N versions per (user_id, name).

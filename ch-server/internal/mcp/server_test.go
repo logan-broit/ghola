@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/testutil"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,7 +37,7 @@ func TestServer_Tools(t *testing.T) {
 	server, _, _, _ := newTestServer(t)
 	tools := server.Tools()
 
-	assert.Len(t, tools, 6)
+	assert.Len(t, tools, 9)
 
 	toolNames := make(map[string]bool)
 	for _, tool := range tools {
@@ -48,6 +50,9 @@ func TestServer_Tools(t *testing.T) {
 	assert.True(t, toolNames["forget"], "forget tool should exist")
 	assert.True(t, toolNames["list_memories"], "list_memories tool should exist")
 	assert.True(t, toolNames["export_memories"], "export_memories tool should exist")
+	assert.True(t, toolNames["list_sessions"], "list_sessions tool should exist")
+	assert.True(t, toolNames["session_summary"], "session_summary tool should exist")
+	assert.True(t, toolNames["session_context"], "session_context tool should exist")
 }
 
 func TestServer_HandleRequest_Initialize(t *testing.T) {
@@ -90,7 +95,7 @@ func TestServer_HandleRequest_ToolsList(t *testing.T) {
 
 	result, ok := resp.Result.(ToolsListResult)
 	require.True(t, ok)
-	assert.Len(t, result.Tools, 6)
+	assert.Len(t, result.Tools, 9)
 }
 
 func TestServer_HandleRequest_MethodNotFound(t *testing.T) {
@@ -1616,4 +1621,199 @@ func TestServer_ExportMemories_InvalidSinceFormat(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content[0].Text, "Invalid since timestamp")
+}
+
+// --- Session lifecycle tool tests ---
+
+func createMemoryWithSession(t *testing.T, queries *testutil.MockQueries, userID uuid.UUID, sessionID uuid.UUID, name, value, memType string) {
+	t.Helper()
+	queries.CreateMemoryBlock(nil, sqlc.CreateMemoryBlockParams{
+		UserID:     userID,
+		Name:       name,
+		Tier:       "index",
+		Value:      pgtype.Text{String: value, Valid: true},
+		Version:    1,
+		SortOrder:  0,
+		MemoryType: memType,
+		Scope:      "personal",
+		SessionID:  pgtype.UUID{Bytes: sessionID, Valid: true},
+	})
+}
+
+func callTool(t *testing.T, server *Server, authCtx *auth.Context, toolName string, args map[string]any) CallToolResult {
+	t.Helper()
+	params := CallToolParams{
+		Name:      toolName,
+		Arguments: args,
+	}
+	paramsJSON, _ := json.Marshal(params)
+	req := Request{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "tools/call",
+		Params:  paramsJSON,
+	}
+	resp := server.HandleRequest(authCtx, req)
+	require.Nil(t, resp.Error)
+	result, ok := resp.Result.(CallToolResult)
+	require.True(t, ok)
+	return result
+}
+
+func TestServer_ListSessions_Empty(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	result := callTool(t, server, authCtx, "list_sessions", map[string]any{})
+
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "No sessions with memories found")
+}
+
+func TestServer_ListSessions_WithSessions(t *testing.T) {
+	server, queries, _, _ := newTestServer(t)
+	userID := uuid.New()
+	authCtx := testutil.NewTestAuthContext(userID)
+
+	sessionA := uuid.New()
+	sessionB := uuid.New()
+
+	createMemoryWithSession(t, queries, userID, sessionA, "fact-1", "Go uses goroutines", "factual")
+	createMemoryWithSession(t, queries, userID, sessionA, "fact-2", "Channels for communication", "factual")
+	createMemoryWithSession(t, queries, userID, sessionB, "debug-1", "Fixed nil pointer", "experiential")
+
+	result := callTool(t, server, authCtx, "list_sessions", map[string]any{})
+
+	assert.False(t, result.IsError)
+	text := result.Content[0].Text
+	assert.Contains(t, text, "Found 2 sessions")
+	assert.Contains(t, text, sessionA.String())
+	assert.Contains(t, text, sessionB.String())
+	assert.Contains(t, text, "2 memories") // sessionA has 2
+	assert.Contains(t, text, "1 memories") // sessionB has 1
+}
+
+func TestServer_ListSessions_LimitBounded(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	// Verify limit > 100 is bounded (no error, just clamped)
+	result := callTool(t, server, authCtx, "list_sessions", map[string]any{"limit": float64(200)})
+	assert.False(t, result.IsError)
+}
+
+func TestServer_SessionSummary_ValidSession(t *testing.T) {
+	server, queries, _, _ := newTestServer(t)
+	userID := uuid.New()
+	authCtx := testutil.NewTestAuthContext(userID)
+	sessionID := uuid.New()
+
+	createMemoryWithSession(t, queries, userID, sessionID, "arch-decision", "Use PostgreSQL for persistence", "factual")
+	createMemoryWithSession(t, queries, userID, sessionID, "debug-fix", "Fixed connection pool leak", "experiential")
+	createMemoryWithSession(t, queries, userID, sessionID, "task-state", "Working on session tools", "working")
+
+	result := callTool(t, server, authCtx, "session_summary", map[string]any{
+		"session_id": sessionID.String(),
+	})
+
+	assert.False(t, result.IsError)
+	text := result.Content[0].Text
+	assert.Contains(t, text, sessionID.String())
+	assert.Contains(t, text, "3 total")
+	assert.Contains(t, text, "1 factual")
+	assert.Contains(t, text, "1 experiential")
+	assert.Contains(t, text, "1 working")
+	assert.Contains(t, text, "Use PostgreSQL")
+	assert.Contains(t, text, "Fixed connection pool")
+}
+
+func TestServer_SessionSummary_InvalidUUID(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	result := callTool(t, server, authCtx, "session_summary", map[string]any{
+		"session_id": "not-a-uuid",
+	})
+
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "invalid session_id")
+}
+
+func TestServer_SessionSummary_MissingSessionID(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	result := callTool(t, server, authCtx, "session_summary", map[string]any{})
+
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "session_id is required")
+}
+
+func TestServer_SessionSummary_NoMemories(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	result := callTool(t, server, authCtx, "session_summary", map[string]any{
+		"session_id": uuid.New().String(),
+	})
+
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "No memories found for this session")
+}
+
+func TestServer_SessionContext_ValidSession(t *testing.T) {
+	server, queries, _, _ := newTestServer(t)
+	userID := uuid.New()
+	authCtx := testutil.NewTestAuthContext(userID)
+	sessionID := uuid.New()
+
+	createMemoryWithSession(t, queries, userID, sessionID, "policy", "Always use parameterized queries", "factual")
+	createMemoryWithSession(t, queries, userID, sessionID, "fix", "Resolved by adding index", "experiential")
+	createMemoryWithSession(t, queries, userID, sessionID, "task", "Implementing session tools", "working")
+
+	result := callTool(t, server, authCtx, "session_context", map[string]any{
+		"session_id": sessionID.String(),
+	})
+
+	assert.False(t, result.IsError)
+	text := result.Content[0].Text
+	assert.Contains(t, text, "3 memories")
+	assert.Contains(t, text, "Factual")
+	assert.Contains(t, text, "Experiential")
+	assert.Contains(t, text, "Working")
+	assert.Contains(t, text, "Always use parameterized queries")
+	assert.Contains(t, text, "Resolved by adding index")
+	assert.Contains(t, text, "Implementing session tools")
+}
+
+func TestServer_SessionContext_InvalidUUID(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	result := callTool(t, server, authCtx, "session_context", map[string]any{
+		"session_id": "garbage",
+	})
+
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "invalid session_id")
+}
+
+func TestServer_SessionContext_UserIsolation(t *testing.T) {
+	server, queries, _, _ := newTestServer(t)
+	userA := uuid.New()
+	userB := uuid.New()
+	authCtxB := testutil.NewTestAuthContext(userB)
+	sessionID := uuid.New()
+
+	// Create memories for userA in sessionID
+	createMemoryWithSession(t, queries, userA, sessionID, "secret", "User A's secret data", "factual")
+
+	// UserB tries to load userA's session
+	result := callTool(t, server, authCtxB, "session_context", map[string]any{
+		"session_id": sessionID.String(),
+	})
+
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "No memories found for this session")
+	assert.NotContains(t, result.Content[0].Text, "User A's secret data")
 }

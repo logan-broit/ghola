@@ -163,6 +163,9 @@ func (NoopQueries) GetRecentDecisions(context.Context, sqlc.GetRecentDecisionsPa
 func (NoopQueries) GetRecentSolutions(context.Context, sqlc.GetRecentSolutionsParams) ([]sqlc.Journal, error) {
 	return nil, nil
 }
+func (NoopQueries) GetSessionMemories(context.Context, sqlc.GetSessionMemoriesParams) ([]sqlc.CurrentMemoryBlock, error) {
+	return nil, nil
+}
 func (NoopQueries) GetTopTags(context.Context, int32) ([]sqlc.GetTopTagsRow, error) { return nil, nil }
 func (NoopQueries) GetUserByID(context.Context, uuid.UUID) (sqlc.User, error) {
 	return sqlc.User{}, nil
@@ -198,6 +201,9 @@ func (NoopQueries) ListJournalEntries(context.Context, sqlc.ListJournalEntriesPa
 	return nil, nil
 }
 func (NoopQueries) ListJournalEntriesByDateRange(context.Context, sqlc.ListJournalEntriesByDateRangeParams) ([]sqlc.Journal, error) {
+	return nil, nil
+}
+func (NoopQueries) ListUserSessions(context.Context, sqlc.ListUserSessionsParams) ([]sqlc.ListUserSessionsRow, error) {
 	return nil, nil
 }
 func (NoopQueries) ListUsers(context.Context, sqlc.ListUsersParams) ([]sqlc.User, error) {
