@@ -13,8 +13,14 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/secrets"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// nearDuplicateThreshold is the cosine similarity threshold above which a
+// memory is considered a near-duplicate during store. The memory is still
+// stored — the notice lets the agent decide whether to forget the old one.
+const nearDuplicateThreshold = 0.92
 
 // Enum validation sets, shared across handlers.
 var (
@@ -28,6 +34,45 @@ var (
 		"org":      true,
 	}
 )
+
+// sessionToPgUUID converts an auth.Context SessionID to a pgtype.UUID.
+// Returns an invalid pgtype.UUID when the session is uuid.Nil (stateless transport).
+func sessionToPgUUID(id uuid.UUID) pgtype.UUID {
+	if id == uuid.Nil {
+		return pgtype.UUID{}
+	}
+	return pgtype.UUID{Bytes: id, Valid: true}
+}
+
+// sessionToString returns the session UUID as a string, or "" for uuid.Nil.
+func sessionToString(id uuid.UUID) string {
+	if id == uuid.Nil {
+		return ""
+	}
+	return id.String()
+}
+
+// parseSessionIDArg validates an optional session_id argument string.
+// Returns the parsed UUID string and any validation error.
+func parseSessionIDArg(args map[string]any) (string, error) {
+	raw, _ := args["session_id"].(string)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid session_id: must be a valid UUID")
+	}
+	return parsed.String(), nil
+}
+
+// truncateText shortens a string to maxLen characters, appending "..." if truncated.
+func truncateText(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
 
 func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) CallToolResult {
 	fact, _ := args["fact"].(string)
@@ -98,45 +143,70 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 		Version:    nextVersion,
 		SortOrder:  0,
 		Tags:       tagStrs,
+		SessionID:  sessionToPgUUID(authCtx.SessionID),
 	})
 	if err != nil {
 		return toolError(fmt.Sprintf("Error: %v", err))
 	}
 
+	var nearDuplicateNotice string
 	if s.embedder != nil && s.vectorDB != nil {
-		s.goBackground(func() {
-			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+		embedCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		vec, err := s.embedder.Embed(embedCtx, fact)
+		cancel()
 
-			vec, err := s.embedder.Embed(embedCtx, fact)
-			if err != nil {
-				s.logger.Warn("failed to generate embedding",
-					"error", err.Error(),
+		if err != nil {
+			s.logger.Warn("failed to generate embedding",
+				"error", err.Error(),
+				"block_id", block.ID,
+			)
+		} else {
+			// Check for near-duplicates before upserting
+			similar, searchErr := s.vectorDB.Search(ctx, authCtx.UserID, authCtx.OrgID, vec, 3, nil)
+			if searchErr != nil {
+				s.logger.Warn("near-duplicate check failed",
+					"error", searchErr.Error(),
 					"block_id", block.ID,
 				)
-				return
+			} else {
+				for _, r := range similar {
+					if r.Score >= nearDuplicateThreshold && r.BlockID != block.ID {
+						nearDuplicateNotice = fmt.Sprintf(
+							"\n\nNote: Similar memory exists (id=%d, similarity=%.0f%%): %s",
+							r.BlockID, r.Score*100, truncateText(r.Text, 120),
+						)
+						break
+					}
+				}
 			}
 
+			// Upsert vector in background
 			point := vector.Point{
-				ID:      vector.MemoryPointID(authCtx.UserID, name),
-				UserID:  authCtx.UserID,
-				OrgID:   authCtx.OrgID,
-				BlockID: block.ID,
-				Text:    fact,
-				Scope:   scope,
-				Vector:  vec,
+				ID:         vector.MemoryPointID(authCtx.UserID, name),
+				UserID:     authCtx.UserID,
+				OrgID:      authCtx.OrgID,
+				BlockID:    block.ID,
+				Text:       fact,
+				Scope:      scope,
+				MemoryType: memoryType,
+				Tags:       tagStrs,
+				SessionID:  sessionToString(authCtx.SessionID),
+				Vector:     vec,
 			}
-
-			if err := s.vectorDB.Upsert(embedCtx, point); err != nil {
-				s.logger.Warn("failed to store embedding",
-					"error", err.Error(),
-					"block_id", block.ID,
-				)
-			}
-		})
+			s.goBackground(func() {
+				upsertCtx, upsertCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer upsertCancel()
+				if err := s.vectorDB.Upsert(upsertCtx, point); err != nil {
+					s.logger.Warn("failed to store embedding",
+						"error", err.Error(),
+						"block_id", block.ID,
+					)
+				}
+			})
+		}
 	}
 
-	return toolResult(fmt.Sprintf("Remembered (id=%d): %s", block.ID, fact))
+	return toolResult(fmt.Sprintf("Remembered (id=%d): %s%s", block.ID, fact, nearDuplicateNotice))
 }
 
 // rankedResult holds a single search result with its source for RRF fusion.
@@ -165,6 +235,22 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 	ctx := auth.WithContext(context.Background(), authCtx)
 	memoryType, _ := args["memory_type"].(string)
 
+	// Parse optional session_id filter
+	sessionFilter, err := parseSessionIDArg(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+
+	// Parse tag filters
+	var tagFilter []string
+	if tags, ok := args["tags"].([]any); ok {
+		for _, t := range tags {
+			if ts, ok := t.(string); ok {
+				tagFilter = append(tagFilter, strings.ToLower(strings.TrimSpace(ts)))
+			}
+		}
+	}
+
 	var semanticResults []rankedResult
 	var keywordResults []rankedResult
 
@@ -173,13 +259,23 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 		embedCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
+		// Build vector search filter from memory_type, tags, and session_id
+		var searchFilter *vector.SearchFilter
+		if memoryType != "" || len(tagFilter) > 0 || sessionFilter != "" {
+			searchFilter = &vector.SearchFilter{
+				MemoryType: memoryType,
+				Tags:       tagFilter,
+				SessionID:  sessionFilter,
+			}
+		}
+
 		queryVec, err := s.embedder.Embed(embedCtx, query)
 		if err != nil {
 			s.logger.Warn("failed to generate query embedding",
 				"error", err.Error(),
 			)
 		} else {
-			results, err := s.vectorDB.Search(embedCtx, authCtx.UserID, authCtx.OrgID, queryVec, uint64(limit))
+			results, err := s.vectorDB.Search(embedCtx, authCtx.UserID, authCtx.OrgID, queryVec, uint64(limit), searchFilter)
 			if err != nil {
 				s.logger.Warn("vector search failed",
 					"error", err.Error(),
@@ -204,14 +300,33 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 		var blocks []sqlc.CurrentMemoryBlock
 		var err error
 
-		if memoryType != "" {
+		hasType := memoryType != ""
+		hasTags := len(tagFilter) > 0
+
+		switch {
+		case hasType && hasTags:
+			blocks, err = s.queries.SearchAccessibleMemoryBlocksByTypeAndTags(ctx, sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams{
+				UserID:      authCtx.UserID,
+				Query:       pgtype.Text{String: query, Valid: true},
+				MemoryType:  memoryType,
+				FilterTags:  tagFilter,
+				SearchLimit: searchLimit,
+			})
+		case hasType:
 			blocks, err = s.queries.SearchAccessibleMemoryBlocksByType(ctx, sqlc.SearchAccessibleMemoryBlocksByTypeParams{
 				UserID:      authCtx.UserID,
 				Query:       pgtype.Text{String: query, Valid: true},
 				MemoryType:  memoryType,
 				SearchLimit: searchLimit,
 			})
-		} else {
+		case hasTags:
+			blocks, err = s.queries.SearchAccessibleMemoryBlocksByTags(ctx, sqlc.SearchAccessibleMemoryBlocksByTagsParams{
+				UserID:      authCtx.UserID,
+				Query:       pgtype.Text{String: query, Valid: true},
+				FilterTags:  tagFilter,
+				SearchLimit: searchLimit,
+			})
+		default:
 			blocks, err = s.queries.SearchAccessibleMemoryBlocks(ctx, sqlc.SearchAccessibleMemoryBlocksParams{
 				UserID:      authCtx.UserID,
 				Query:       pgtype.Text{String: query, Valid: true},
@@ -224,6 +339,13 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 		}
 
 		for _, block := range blocks {
+			// App-side session_id filter for keyword results
+			if sessionFilter != "" {
+				if !block.SessionID.Valid || uuid.UUID(block.SessionID.Bytes).String() != sessionFilter {
+					continue
+				}
+			}
+
 			value := ""
 			if block.Value.Valid {
 				value = block.Value.String
@@ -239,15 +361,18 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 
 	// Fuse results using Reciprocal Rank Fusion (RRF) when in hybrid mode
 	var matches []string
+	var recalledBlockIDs []int64
 	if mode == "hybrid" && len(semanticResults) > 0 && len(keywordResults) > 0 {
-		matches = fuseRRF(semanticResults, keywordResults, limit)
+		matches, recalledBlockIDs = fuseRRF(semanticResults, keywordResults, limit)
 	} else {
 		// Single-source mode or one source returned nothing
 		for _, r := range semanticResults {
 			matches = append(matches, fmt.Sprintf("[%d] [%s] (semantic) %s", r.blockID, r.scope, r.text))
+			recalledBlockIDs = append(recalledBlockIDs, r.blockID)
 		}
 		for _, r := range keywordResults {
 			matches = append(matches, fmt.Sprintf("[%d] [%s] (keyword) %s", r.blockID, r.scope, r.text))
+			recalledBlockIDs = append(recalledBlockIDs, r.blockID)
 		}
 	}
 
@@ -257,6 +382,25 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 
 	if len(matches) > limit {
 		matches = matches[:limit]
+		recalledBlockIDs = recalledBlockIDs[:limit]
+	}
+
+	// Track recall hits asynchronously
+	if len(recalledBlockIDs) > 0 {
+		ids := recalledBlockIDs
+		userID := authCtx.UserID
+		s.goBackground(func() {
+			trackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.queries.IncrementRecallCount(trackCtx, sqlc.IncrementRecallCountParams{
+				BlockIds: ids,
+				UserID:   userID,
+			}); err != nil {
+				s.logger.Warn("failed to increment recall count",
+					"error", err.Error(),
+				)
+			}
+		})
 	}
 
 	return toolResult(strings.Join(matches, "\n"))
@@ -265,7 +409,7 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 // fuseRRF merges two ranked result lists using Reciprocal Rank Fusion.
 // RRF score = sum of 1/(k + rank) for each list the result appears in.
 // k=60 is the standard constant from the original RRF paper.
-func fuseRRF(semantic, keyword []rankedResult, limit int) []string {
+func fuseRRF(semantic, keyword []rankedResult, limit int) ([]string, []int64) {
 	const k = 60.0
 
 	type fusedEntry struct {
@@ -317,10 +461,12 @@ func fuseRRF(semantic, keyword []rankedResult, limit int) []string {
 	}
 
 	matches := make([]string, len(sorted))
+	blockIDs := make([]int64, len(sorted))
 	for i, e := range sorted {
 		matches[i] = fmt.Sprintf("[%d] [%s] (%s) %s", e.blockID, e.scope, e.sources, e.text)
+		blockIDs[i] = e.blockID
 	}
-	return matches
+	return matches, blockIDs
 }
 
 func (s *Server) handleForget(authCtx *auth.Context, args map[string]any) CallToolResult {
@@ -369,8 +515,13 @@ func (s *Server) handleListMemories(authCtx *auth.Context, args map[string]any) 
 
 	memoryType, _ := args["memory_type"].(string)
 
+	// Parse optional session_id filter
+	sessionFilter, err := parseSessionIDArg(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+
 	var blocks []sqlc.CurrentMemoryBlock
-	var err error
 
 	if memoryType != "" {
 		blocks, err = s.queries.GetAccessibleMemoryBlocksByType(ctx, sqlc.GetAccessibleMemoryBlocksByTypeParams{
@@ -400,13 +551,18 @@ func (s *Server) handleListMemories(authCtx *auth.Context, args map[string]any) 
 
 	var lines []string
 	for _, block := range blocks {
+		if len(tagFilter) > 0 && !matchesTags(block.Tags, tagFilter) {
+			continue
+		}
+		if sessionFilter != "" {
+			if !block.SessionID.Valid || uuid.UUID(block.SessionID.Bytes).String() != sessionFilter {
+				continue
+			}
+		}
+
 		value := ""
 		if block.Value.Valid {
 			value = block.Value.String
-		}
-
-		if len(tagFilter) > 0 && !matchesTags(block.Tags, tagFilter) {
-			continue
 		}
 
 		lines = append(lines, fmt.Sprintf("[%d] [%s,%s] [%s] %s", block.ID, block.Name, block.Tier, block.Scope, value))
@@ -471,14 +627,22 @@ func (s *Server) handleShareMemory(authCtx *auth.Context, args map[string]any) C
 				return
 			}
 
+			sessionID := ""
+			if updated.SessionID.Valid {
+				sessionID = uuid.UUID(updated.SessionID.Bytes).String()
+			}
+
 			point := vector.Point{
-				ID:      vector.MemoryPointID(authCtx.UserID, block.Name),
-				UserID:  authCtx.UserID,
-				OrgID:   authCtx.OrgID,
-				BlockID: updated.ID,
-				Text:    value,
-				Scope:   scope,
-				Vector:  vec,
+				ID:         vector.MemoryPointID(authCtx.UserID, block.Name),
+				UserID:     authCtx.UserID,
+				OrgID:      authCtx.OrgID,
+				BlockID:    updated.ID,
+				Text:       value,
+				Scope:      scope,
+				MemoryType: updated.MemoryType,
+				Tags:       updated.Tags,
+				SessionID:  sessionID,
+				Vector:     vec,
 			}
 
 			if err := s.vectorDB.Upsert(embedCtx, point); err != nil {
@@ -509,6 +673,12 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 	memoryType, _ := args["memory_type"].(string)
 	scope, _ := args["scope"].(string)
 	since, _ := args["since"].(string)
+
+	// Parse optional session_id filter
+	sessionFilter, parseErr := parseSessionIDArg(args)
+	if parseErr != nil {
+		return toolError(parseErr.Error())
+	}
 
 	var sinceTime time.Time
 	if since != "" {
@@ -541,6 +711,11 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 		if len(tagFilter) > 0 && !matchesTags(mem.Tags, tagFilter) {
 			continue
 		}
+		if sessionFilter != "" {
+			if !mem.SessionID.Valid || uuid.UUID(mem.SessionID.Bytes).String() != sessionFilter {
+				continue
+			}
+		}
 
 		content := ""
 		if mem.Value.Valid {
@@ -560,6 +735,9 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 			"modified_at": mem.ModifiedAt.Format(time.RFC3339),
 		}
 
+		if mem.SessionID.Valid {
+			exportRecord["session_id"] = uuid.UUID(mem.SessionID.Bytes).String()
+		}
 		if mem.ExpiresAt.Valid {
 			exportRecord["expires_at"] = mem.ExpiresAt.Time.Format(time.RFC3339)
 		}

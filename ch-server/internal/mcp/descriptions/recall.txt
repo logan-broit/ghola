@@ -7,4 +7,10 @@ WHEN TO USE: Proactively search memory when:
 - Making technical decisions (check for established patterns)
 - Unsure about project conventions or preferences
 
+FILTERING: Narrow results with optional filters:
+- memory_type: Filter by 'factual', 'experiential', or 'working'
+- tags: Filter by tags (AND logic — results must have all specified tags)
+- mode: 'semantic' (meaning-based), 'keyword' (exact match), 'hybrid' (both, default)
+- session_id: Filter by MCP session UUID to recall context from a specific session
+
 The search understands meaning, not just keywords - ask natural questions.

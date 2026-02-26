@@ -12,6 +12,7 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -125,14 +126,22 @@ func run() error {
 			continue
 		}
 
+		sessionID := ""
+		if block.SessionID.Valid {
+			sessionID = uuid.UUID(block.SessionID.Bytes).String()
+		}
+
 		point := vector.Point{
-			ID:      vector.MemoryPointID(block.UserID, block.Name),
-			UserID:  block.UserID,
-			OrgID:   block.OrgID,
-			BlockID: block.ID,
-			Text:    value,
-			Scope:   block.Scope,
-			Vector:  vec,
+			ID:         vector.MemoryPointID(block.UserID, block.Name),
+			UserID:     block.UserID,
+			OrgID:      block.OrgID,
+			BlockID:    block.ID,
+			Text:       value,
+			Scope:      block.Scope,
+			MemoryType: block.MemoryType,
+			Tags:       block.Tags,
+			SessionID:  sessionID,
+			Vector:     vec,
 		}
 
 		if err := vectorDB.Upsert(ctx, point); err != nil {

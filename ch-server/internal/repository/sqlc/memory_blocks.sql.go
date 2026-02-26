@@ -46,11 +46,11 @@ func (q *Queries) CountMemoryBlocksByUser(ctx context.Context, userID uuid.UUID)
 
 const createMemoryBlock = `-- name: CreateMemoryBlock :one
 INSERT INTO memory_blocks (
-    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags
+    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags, session_id
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
-RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags
+RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id
 `
 
 type CreateMemoryBlockParams struct {
@@ -64,6 +64,7 @@ type CreateMemoryBlockParams struct {
 	Scope      string             `json:"scope"`
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	Tags       []string           `json:"tags"`
+	SessionID  pgtype.UUID        `json:"session_id"`
 }
 
 func (q *Queries) CreateMemoryBlock(ctx context.Context, arg CreateMemoryBlockParams) (MemoryBlock, error) {
@@ -78,6 +79,7 @@ func (q *Queries) CreateMemoryBlock(ctx context.Context, arg CreateMemoryBlockPa
 		arg.Scope,
 		arg.ExpiresAt,
 		arg.Tags,
+		arg.SessionID,
 	)
 	var i MemoryBlock
 	err := row.Scan(
@@ -96,6 +98,9 @@ func (q *Queries) CreateMemoryBlock(ctx context.Context, arg CreateMemoryBlockPa
 		&i.Scope,
 		&i.IsCurrent,
 		&i.Tags,
+		&i.RecallCount,
+		&i.LastRecalledAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -109,30 +114,6 @@ WHERE expires_at IS NOT NULL AND expires_at <= NOW()
 func (q *Queries) DeleteExpiredMemories(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, deleteExpiredMemories)
 	return err
-}
-
-const pruneOldVersions = `-- name: PruneOldVersions :execresult
-DELETE FROM memory_blocks
-WHERE id IN (
-    SELECT id FROM (
-        SELECT id,
-            ROW_NUMBER() OVER (PARTITION BY user_id, name ORDER BY version DESC) AS rn
-        FROM memory_blocks
-    ) ranked
-    WHERE rn > $1 AND id NOT IN (
-        SELECT id FROM memory_blocks WHERE is_current = true
-    )
-)
-`
-
-// PruneOldVersions deletes old versions of memory blocks, keeping the most recent N versions per (user_id, name).
-// The is_current row is always preserved regardless of the retention limit.
-func (q *Queries) PruneOldVersions(ctx context.Context, retainCount int32) (int64, error) {
-	result, err := q.db.Exec(ctx, pruneOldVersions, retainCount)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }
 
 const deleteMemoryBlock = `-- name: DeleteMemoryBlock :exec
@@ -163,6 +144,7 @@ SELECT
     cmb.tags,
     cmb.memory_type,
     cmb.scope,
+    cmb.session_id,
     cmb.created_at,
     cmb.modified_at,
     cmb.expires_at
@@ -184,6 +166,7 @@ type ExportMemoriesRow struct {
 	Tags       []string           `json:"tags"`
 	MemoryType string             `json:"memory_type"`
 	Scope      string             `json:"scope"`
+	SessionID  pgtype.UUID        `json:"session_id"`
 	CreatedAt  time.Time          `json:"created_at"`
 	ModifiedAt time.Time          `json:"modified_at"`
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
@@ -210,6 +193,7 @@ func (q *Queries) ExportMemories(ctx context.Context, userID uuid.UUID) ([]Expor
 			&i.Tags,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
 			&i.CreatedAt,
 			&i.ModifiedAt,
 			&i.ExpiresAt,
@@ -225,7 +209,7 @@ func (q *Queries) ExportMemories(ctx context.Context, userID uuid.UUID) ([]Expor
 }
 
 const getAccessibleMemoryBlocks = `-- name: GetAccessibleMemoryBlocks :many
-SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
 JOIN users u ON cmb.user_id = u.id
 WHERE (cmb.user_id = $1 AND cmb.scope = 'personal')
    OR (u.org_id = (SELECT org_id FROM users WHERE id = $1) AND cmb.scope = 'org')
@@ -255,6 +239,9 @@ func (q *Queries) GetAccessibleMemoryBlocks(ctx context.Context, userID uuid.UUI
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -270,7 +257,7 @@ func (q *Queries) GetAccessibleMemoryBlocks(ctx context.Context, userID uuid.UUI
 }
 
 const getAccessibleMemoryBlocksByType = `-- name: GetAccessibleMemoryBlocksByType :many
-SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
 JOIN users u ON cmb.user_id = u.id
 WHERE memory_type = $2
   AND ((cmb.user_id = $1 AND cmb.scope = 'personal')
@@ -305,6 +292,9 @@ func (q *Queries) GetAccessibleMemoryBlocksByType(ctx context.Context, arg GetAc
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -320,7 +310,7 @@ func (q *Queries) GetAccessibleMemoryBlocksByType(ctx context.Context, arg GetAc
 }
 
 const getAllCurrentMemoryBlocks = `-- name: GetAllCurrentMemoryBlocks :many
-SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, expires_at, created_at, modified_at FROM current_memory_blocks
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
 ORDER BY id
 `
 
@@ -346,6 +336,9 @@ func (q *Queries) GetAllCurrentMemoryBlocks(ctx context.Context) ([]CurrentMemor
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -361,28 +354,31 @@ func (q *Queries) GetAllCurrentMemoryBlocks(ctx context.Context) ([]CurrentMemor
 }
 
 const getAllCurrentMemoryBlocksWithOrg = `-- name: GetAllCurrentMemoryBlocksWithOrg :many
-SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.expires_at, cmb.created_at, cmb.modified_at, u.org_id
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at, u.org_id
 FROM current_memory_blocks cmb
 JOIN users u ON cmb.user_id = u.id
 ORDER BY cmb.id
 `
 
 type GetAllCurrentMemoryBlocksWithOrgRow struct {
-	ID         int64              `json:"id"`
-	Guid       uuid.UUID          `json:"guid"`
-	UserID     uuid.UUID          `json:"user_id"`
-	Name       string             `json:"name"`
-	Tier       string             `json:"tier"`
-	Value      pgtype.Text        `json:"value"`
-	Tags       []string           `json:"tags"`
-	Version    int32              `json:"version"`
-	SortOrder  int32              `json:"sort_order"`
-	MemoryType string             `json:"memory_type"`
-	Scope      string             `json:"scope"`
-	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt  time.Time          `json:"created_at"`
-	ModifiedAt time.Time          `json:"modified_at"`
-	OrgID      uuid.UUID          `json:"org_id"`
+	ID             int64              `json:"id"`
+	Guid           uuid.UUID          `json:"guid"`
+	UserID         uuid.UUID          `json:"user_id"`
+	Name           string             `json:"name"`
+	Tier           string             `json:"tier"`
+	Value          pgtype.Text        `json:"value"`
+	Tags           []string           `json:"tags"`
+	Version        int32              `json:"version"`
+	SortOrder      int32              `json:"sort_order"`
+	MemoryType     string             `json:"memory_type"`
+	Scope          string             `json:"scope"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	RecallCount    int32              `json:"recall_count"`
+	LastRecalledAt pgtype.Timestamptz `json:"last_recalled_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt      time.Time          `json:"created_at"`
+	ModifiedAt     time.Time          `json:"modified_at"`
+	OrgID          uuid.UUID          `json:"org_id"`
 }
 
 // Get all current memory blocks with org_id for reindexing
@@ -407,6 +403,9 @@ func (q *Queries) GetAllCurrentMemoryBlocksWithOrg(ctx context.Context) ([]GetAl
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -423,7 +422,7 @@ func (q *Queries) GetAllCurrentMemoryBlocksWithOrg(ctx context.Context) ([]GetAl
 }
 
 const getCurrentMemoryBlockByName = `-- name: GetCurrentMemoryBlockByName :one
-SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, expires_at, created_at, modified_at FROM current_memory_blocks
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
 WHERE user_id = $1 AND name = $2
 `
 
@@ -447,6 +446,9 @@ func (q *Queries) GetCurrentMemoryBlockByName(ctx context.Context, arg GetCurren
 		&i.SortOrder,
 		&i.MemoryType,
 		&i.Scope,
+		&i.SessionID,
+		&i.RecallCount,
+		&i.LastRecalledAt,
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.ModifiedAt,
@@ -455,7 +457,7 @@ func (q *Queries) GetCurrentMemoryBlockByName(ctx context.Context, arg GetCurren
 }
 
 const getCurrentMemoryBlocks = `-- name: GetCurrentMemoryBlocks :many
-SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, expires_at, created_at, modified_at FROM current_memory_blocks
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
 WHERE user_id = $1
 ORDER BY tier, sort_order, name
 `
@@ -481,6 +483,9 @@ func (q *Queries) GetCurrentMemoryBlocks(ctx context.Context, userID uuid.UUID) 
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -496,7 +501,7 @@ func (q *Queries) GetCurrentMemoryBlocks(ctx context.Context, userID uuid.UUID) 
 }
 
 const getCurrentMemoryBlocksByTier = `-- name: GetCurrentMemoryBlocksByTier :many
-SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, expires_at, created_at, modified_at FROM current_memory_blocks
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
 WHERE user_id = $1 AND tier = $2
 ORDER BY sort_order, name
 `
@@ -527,6 +532,9 @@ func (q *Queries) GetCurrentMemoryBlocksByTier(ctx context.Context, arg GetCurre
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -542,7 +550,7 @@ func (q *Queries) GetCurrentMemoryBlocksByTier(ctx context.Context, arg GetCurre
 }
 
 const getCurrentMemoryBlocksByType = `-- name: GetCurrentMemoryBlocksByType :many
-SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, expires_at, created_at, modified_at FROM current_memory_blocks
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
 WHERE user_id = $1 AND memory_type = $2
 ORDER BY tier, sort_order, name
 `
@@ -573,6 +581,9 @@ func (q *Queries) GetCurrentMemoryBlocksByType(ctx context.Context, arg GetCurre
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -588,7 +599,7 @@ func (q *Queries) GetCurrentMemoryBlocksByType(ctx context.Context, arg GetCurre
 }
 
 const getMemoryBlockByGUID = `-- name: GetMemoryBlockByGUID :one
-SELECT id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags FROM memory_blocks
+SELECT id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id FROM memory_blocks
 WHERE guid = $1 AND user_id = $2
 `
 
@@ -616,12 +627,15 @@ func (q *Queries) GetMemoryBlockByGUID(ctx context.Context, arg GetMemoryBlockBy
 		&i.Scope,
 		&i.IsCurrent,
 		&i.Tags,
+		&i.RecallCount,
+		&i.LastRecalledAt,
+		&i.SessionID,
 	)
 	return i, err
 }
 
 const getMemoryBlockByID = `-- name: GetMemoryBlockByID :one
-SELECT id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags FROM memory_blocks
+SELECT id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id FROM memory_blocks
 WHERE id = $1 AND user_id = $2
 `
 
@@ -649,12 +663,15 @@ func (q *Queries) GetMemoryBlockByID(ctx context.Context, arg GetMemoryBlockByID
 		&i.Scope,
 		&i.IsCurrent,
 		&i.Tags,
+		&i.RecallCount,
+		&i.LastRecalledAt,
+		&i.SessionID,
 	)
 	return i, err
 }
 
 const getMemoryBlockHistory = `-- name: GetMemoryBlockHistory :many
-SELECT id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags FROM memory_blocks
+SELECT id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id FROM memory_blocks
 WHERE user_id = $1 AND name = $2
 ORDER BY version DESC
 LIMIT $3 OFFSET $4
@@ -697,6 +714,9 @@ func (q *Queries) GetMemoryBlockHistory(ctx context.Context, arg GetMemoryBlockH
 			&i.Scope,
 			&i.IsCurrent,
 			&i.Tags,
+			&i.RecallCount,
+			&i.LastRecalledAt,
+			&i.SessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -709,7 +729,7 @@ func (q *Queries) GetMemoryBlockHistory(ctx context.Context, arg GetMemoryBlockH
 }
 
 const getMemoryContext = `-- name: GetMemoryContext :many
-SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, expires_at, created_at, modified_at FROM current_memory_blocks
+SELECT id, guid, user_id, name, tier, value, tags, version, sort_order, memory_type, scope, session_id, recall_count, last_recalled_at, expires_at, created_at, modified_at FROM current_memory_blocks
 WHERE user_id = $1
 ORDER BY
     CASE tier
@@ -743,6 +763,9 @@ func (q *Queries) GetMemoryContext(ctx context.Context, userID uuid.UUID) ([]Cur
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -895,8 +918,8 @@ LIMIT $1
 `
 
 type GetTopTagsRow struct {
-	Tag   string `json:"tag"`
-	Count int64  `json:"count"`
+	Tag   interface{} `json:"tag"`
+	Count int64       `json:"count"`
 }
 
 // Get most frequently used tags across all memories
@@ -920,8 +943,58 @@ func (q *Queries) GetTopTags(ctx context.Context, limit int32) ([]GetTopTagsRow,
 	return items, nil
 }
 
+const incrementRecallCount = `-- name: IncrementRecallCount :exec
+UPDATE memory_blocks
+SET recall_count = recall_count + 1,
+    last_recalled_at = NOW(),
+    modified_at = NOW()
+WHERE id = ANY($1::bigint[])
+  AND user_id = $2
+  AND is_current = true
+`
+
+type IncrementRecallCountParams struct {
+	BlockIds []int64   `json:"block_ids"`
+	UserID   uuid.UUID `json:"user_id"`
+}
+
+// Batch-increment recall counts for memories returned in a search.
+// The user_id filter is defense-in-depth: block IDs are already derived
+// from ownership-filtered search results.
+func (q *Queries) IncrementRecallCount(ctx context.Context, arg IncrementRecallCountParams) error {
+	_, err := q.db.Exec(ctx, incrementRecallCount, arg.BlockIds, arg.UserID)
+	return err
+}
+
+const pruneOldVersions = `-- name: PruneOldVersions :exec
+DELETE FROM memory_blocks
+WHERE is_current = false
+  AND id NOT IN (
+    SELECT id FROM memory_blocks
+    ORDER BY user_id, name, version DESC
+    LIMIT 1000000
+  )
+  AND version < (
+    SELECT MIN(version) FROM (
+      SELECT version FROM memory_blocks mb2
+      WHERE mb2.user_id = memory_blocks.user_id
+        AND mb2.name = memory_blocks.name
+      ORDER BY version DESC
+      LIMIT $1
+    ) keep_versions
+  )
+`
+
+// Delete old versions of memory blocks, keeping the most recent N versions per (user_id, name).
+// The is_current row is always preserved regardless of the retention limit.
+// Uses a subquery with window function to identify rows beyond the retention limit.
+func (q *Queries) PruneOldVersions(ctx context.Context, limit int32) error {
+	_, err := q.db.Exec(ctx, pruneOldVersions, limit)
+	return err
+}
+
 const searchAccessibleMemoryBlocks = `-- name: SearchAccessibleMemoryBlocks :many
-SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
 JOIN users u ON cmb.user_id = u.id
 WHERE ((cmb.user_id = $1 AND cmb.scope = 'personal')
    OR (u.org_id = (SELECT org_id FROM users WHERE id = $1) AND cmb.scope = 'org'))
@@ -963,6 +1036,76 @@ func (q *Queries) SearchAccessibleMemoryBlocks(ctx context.Context, arg SearchAc
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchAccessibleMemoryBlocksByTags = `-- name: SearchAccessibleMemoryBlocksByTags :many
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
+JOIN users u ON cmb.user_id = u.id
+WHERE ((cmb.user_id = $1 AND cmb.scope = 'personal')
+   OR (u.org_id = (SELECT org_id FROM users WHERE id = $1) AND cmb.scope = 'org'))
+  AND cmb.tags @> $2::text[]
+  AND (
+    cmb.name ILIKE '%' || $3 || '%'
+    OR to_tsvector('english', COALESCE(cmb.value, '')) @@ plainto_tsquery('english', $3)
+  )
+ORDER BY
+    CASE WHEN cmb.name ILIKE '%' || $3 || '%' THEN 0 ELSE 1 END,
+    cmb.tier, cmb.sort_order, cmb.name
+LIMIT $4
+`
+
+type SearchAccessibleMemoryBlocksByTagsParams struct {
+	UserID      uuid.UUID   `json:"user_id"`
+	FilterTags  []string    `json:"filter_tags"`
+	Query       pgtype.Text `json:"query"`
+	SearchLimit int32       `json:"search_limit"`
+}
+
+// Search accessible memory blocks by keyword filtered by tags (AND logic).
+func (q *Queries) SearchAccessibleMemoryBlocksByTags(ctx context.Context, arg SearchAccessibleMemoryBlocksByTagsParams) ([]CurrentMemoryBlock, error) {
+	rows, err := q.db.Query(ctx, searchAccessibleMemoryBlocksByTags,
+		arg.UserID,
+		arg.FilterTags,
+		arg.Query,
+		arg.SearchLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CurrentMemoryBlock{}
+	for rows.Next() {
+		var i CurrentMemoryBlock
+		if err := rows.Scan(
+			&i.ID,
+			&i.Guid,
+			&i.UserID,
+			&i.Name,
+			&i.Tier,
+			&i.Value,
+			&i.Tags,
+			&i.Version,
+			&i.SortOrder,
+			&i.MemoryType,
+			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -978,7 +1121,7 @@ func (q *Queries) SearchAccessibleMemoryBlocks(ctx context.Context, arg SearchAc
 }
 
 const searchAccessibleMemoryBlocksByType = `-- name: SearchAccessibleMemoryBlocksByType :many
-SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
 JOIN users u ON cmb.user_id = u.id
 WHERE memory_type = $1
   AND ((cmb.user_id = $2 AND cmb.scope = 'personal')
@@ -1027,6 +1170,79 @@ func (q *Queries) SearchAccessibleMemoryBlocksByType(ctx context.Context, arg Se
 			&i.SortOrder,
 			&i.MemoryType,
 			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.ModifiedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchAccessibleMemoryBlocksByTypeAndTags = `-- name: SearchAccessibleMemoryBlocksByTypeAndTags :many
+SELECT cmb.id, cmb.guid, cmb.user_id, cmb.name, cmb.tier, cmb.value, cmb.tags, cmb.version, cmb.sort_order, cmb.memory_type, cmb.scope, cmb.session_id, cmb.recall_count, cmb.last_recalled_at, cmb.expires_at, cmb.created_at, cmb.modified_at FROM current_memory_blocks cmb
+JOIN users u ON cmb.user_id = u.id
+WHERE memory_type = $1
+  AND cmb.tags @> $2::text[]
+  AND ((cmb.user_id = $3 AND cmb.scope = 'personal')
+   OR (u.org_id = (SELECT org_id FROM users WHERE id = $3) AND cmb.scope = 'org'))
+  AND (
+    cmb.name ILIKE '%' || $4 || '%'
+    OR to_tsvector('english', COALESCE(cmb.value, '')) @@ plainto_tsquery('english', $4)
+  )
+ORDER BY
+    CASE WHEN cmb.name ILIKE '%' || $4 || '%' THEN 0 ELSE 1 END,
+    cmb.tier, cmb.sort_order, cmb.name
+LIMIT $5
+`
+
+type SearchAccessibleMemoryBlocksByTypeAndTagsParams struct {
+	MemoryType  string      `json:"memory_type"`
+	FilterTags  []string    `json:"filter_tags"`
+	UserID      uuid.UUID   `json:"user_id"`
+	Query       pgtype.Text `json:"query"`
+	SearchLimit int32       `json:"search_limit"`
+}
+
+// Search accessible memory blocks by keyword filtered by memory type and tags.
+func (q *Queries) SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]CurrentMemoryBlock, error) {
+	rows, err := q.db.Query(ctx, searchAccessibleMemoryBlocksByTypeAndTags,
+		arg.MemoryType,
+		arg.FilterTags,
+		arg.UserID,
+		arg.Query,
+		arg.SearchLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CurrentMemoryBlock{}
+	for rows.Next() {
+		var i CurrentMemoryBlock
+		if err := rows.Scan(
+			&i.ID,
+			&i.Guid,
+			&i.UserID,
+			&i.Name,
+			&i.Tier,
+			&i.Value,
+			&i.Tags,
+			&i.Version,
+			&i.SortOrder,
+			&i.MemoryType,
+			&i.Scope,
+			&i.SessionID,
+			&i.RecallCount,
+			&i.LastRecalledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.ModifiedAt,
@@ -1043,11 +1259,11 @@ func (q *Queries) SearchAccessibleMemoryBlocksByType(ctx context.Context, arg Se
 
 const updateMemoryBlock = `-- name: UpdateMemoryBlock :one
 INSERT INTO memory_blocks (
-    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags
+    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags, session_id
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
-RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags
+RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id
 `
 
 type UpdateMemoryBlockParams struct {
@@ -1061,6 +1277,7 @@ type UpdateMemoryBlockParams struct {
 	Scope      string             `json:"scope"`
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	Tags       []string           `json:"tags"`
+	SessionID  pgtype.UUID        `json:"session_id"`
 }
 
 // Updates by creating a new version (version must be provided)
@@ -1076,6 +1293,7 @@ func (q *Queries) UpdateMemoryBlock(ctx context.Context, arg UpdateMemoryBlockPa
 		arg.Scope,
 		arg.ExpiresAt,
 		arg.Tags,
+		arg.SessionID,
 	)
 	var i MemoryBlock
 	err := row.Scan(
@@ -1094,6 +1312,9 @@ func (q *Queries) UpdateMemoryBlock(ctx context.Context, arg UpdateMemoryBlockPa
 		&i.Scope,
 		&i.IsCurrent,
 		&i.Tags,
+		&i.RecallCount,
+		&i.LastRecalledAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -1106,7 +1327,7 @@ WHERE id = (
     SELECT cmb.id FROM current_memory_blocks cmb
     WHERE cmb.user_id = $1 AND cmb.name = $2
 )
-RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags
+RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id
 `
 
 type UpdateMemoryBlockScopeParams struct {
@@ -1135,6 +1356,9 @@ func (q *Queries) UpdateMemoryBlockScope(ctx context.Context, arg UpdateMemoryBl
 		&i.Scope,
 		&i.IsCurrent,
 		&i.Tags,
+		&i.RecallCount,
+		&i.LastRecalledAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -1148,7 +1372,7 @@ WHERE id = (
     SELECT cmb.id FROM current_memory_blocks cmb
     WHERE cmb.user_id = $1 AND cmb.name = $2
 )
-RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags
+RETURNING id, guid, user_id, name, tier, value, version, sort_order, created_at, modified_at, memory_type, expires_at, scope, is_current, tags, recall_count, last_recalled_at, session_id
 `
 
 type UpdateMemoryBlockTypeParams struct {
@@ -1183,6 +1407,9 @@ func (q *Queries) UpdateMemoryBlockType(ctx context.Context, arg UpdateMemoryBlo
 		&i.Scope,
 		&i.IsCurrent,
 		&i.Tags,
+		&i.RecallCount,
+		&i.LastRecalledAt,
+		&i.SessionID,
 	)
 	return i, err
 }

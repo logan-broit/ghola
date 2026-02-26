@@ -169,8 +169,12 @@ func (h *SystemStatsHandler) GetTopTags(w http.ResponseWriter, r *http.Request) 
 
 	result := make([]TopTag, 0, len(rows))
 	for _, row := range rows {
+		tag := ""
+		if s, ok := row.Tag.(string); ok {
+			tag = s
+		}
 		result = append(result, TopTag{
-			Tag:   row.Tag,
+			Tag:   tag,
 			Count: row.Count,
 		})
 	}

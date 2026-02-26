@@ -56,7 +56,10 @@ func (NoopQueries) CreateUserWithPassword(context.Context, sqlc.CreateUserWithPa
 }
 func (NoopQueries) DeactivateUser(context.Context, uuid.UUID) error   { return nil }
 func (NoopQueries) DeleteExpiredMemories(context.Context) error              { return nil }
-func (NoopQueries) PruneOldVersions(context.Context, int32) (int64, error)   { return 0, nil }
+func (NoopQueries) IncrementRecallCount(context.Context, sqlc.IncrementRecallCountParams) error {
+	return nil
+}
+func (NoopQueries) PruneOldVersions(context.Context, int32) error            { return nil }
 func (NoopQueries) DeleteJournalEntry(context.Context, sqlc.DeleteJournalEntryParams) error {
 	return nil
 }
@@ -212,7 +215,13 @@ func (NoopQueries) RevokeAllAdminSessionsByUser(context.Context, uuid.UUID) erro
 func (NoopQueries) SearchAccessibleMemoryBlocks(context.Context, sqlc.SearchAccessibleMemoryBlocksParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
 }
+func (NoopQueries) SearchAccessibleMemoryBlocksByTags(context.Context, sqlc.SearchAccessibleMemoryBlocksByTagsParams) ([]sqlc.CurrentMemoryBlock, error) {
+	return nil, nil
+}
 func (NoopQueries) SearchAccessibleMemoryBlocksByType(context.Context, sqlc.SearchAccessibleMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error) {
+	return nil, nil
+}
+func (NoopQueries) SearchAccessibleMemoryBlocksByTypeAndTags(context.Context, sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
 }
 func (NoopQueries) SearchJournalFullText(context.Context, sqlc.SearchJournalFullTextParams) ([]sqlc.SearchJournalFullTextRow, error) {

@@ -560,7 +560,13 @@ func (m *adminMockQueries) GetAccessibleMemoryBlocksByType(ctx context.Context, 
 func (m *adminMockQueries) SearchAccessibleMemoryBlocks(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
 }
+func (m *adminMockQueries) SearchAccessibleMemoryBlocksByTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTagsParams) ([]sqlc.CurrentMemoryBlock, error) {
+	return nil, nil
+}
 func (m *adminMockQueries) SearchAccessibleMemoryBlocksByType(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error) {
+	return nil, nil
+}
+func (m *adminMockQueries) SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
 }
 func (m *adminMockQueries) GetAdminSessionByToken(ctx context.Context, tokenHash string) (sqlc.GetAdminSessionByTokenRow, error) {
@@ -728,8 +734,11 @@ func (m *adminMockQueries) GetAllCurrentMemoryBlocksWithOrg(ctx context.Context)
 	return nil, nil
 }
 
-func (m *adminMockQueries) PruneOldVersions(ctx context.Context, retainCount int32) (int64, error) {
-	return 0, nil
+func (m *adminMockQueries) IncrementRecallCount(ctx context.Context, arg sqlc.IncrementRecallCountParams) error {
+	return nil
+}
+func (m *adminMockQueries) PruneOldVersions(ctx context.Context, retainCount int32) error {
+	return nil
 }
 
 // Verify adminMockQueries implements sqlc.Querier

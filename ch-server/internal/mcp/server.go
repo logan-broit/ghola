@@ -41,12 +41,15 @@ type MemoryQuerier interface {
 	ExportMemories(ctx context.Context, userID uuid.UUID) ([]sqlc.ExportMemoriesRow, error)
 	SearchAccessibleMemoryBlocks(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksParams) ([]sqlc.CurrentMemoryBlock, error)
 	SearchAccessibleMemoryBlocksByType(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error)
+	SearchAccessibleMemoryBlocksByTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTagsParams) ([]sqlc.CurrentMemoryBlock, error)
+	SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]sqlc.CurrentMemoryBlock, error)
+	IncrementRecallCount(ctx context.Context, arg sqlc.IncrementRecallCountParams) error
 }
 
 // VectorDB defines the vector database operations needed by the MCP server.
 type VectorDB interface {
 	Upsert(ctx context.Context, point vector.Point) error
-	Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vec []float32, limit uint64) ([]vector.SearchResult, error)
+	Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vec []float32, limit uint64, filter *vector.SearchFilter) ([]vector.SearchResult, error)
 	Delete(ctx context.Context, pointID string) error
 }
 
@@ -164,6 +167,10 @@ func (s *Server) Tools() []Tool {
 						Description: "Search mode: 'semantic' (meaning-based), 'keyword' (exact match), 'hybrid' (both). Default: hybrid.",
 						Enum:        []string{"semantic", "keyword", "hybrid"},
 					},
+					"session_id": {
+						Type:        "string",
+						Description: "Filter results to a specific MCP session (UUID). Useful for recalling context from a particular session.",
+					},
 				},
 				Required: []string{"query"},
 			},
@@ -202,6 +209,10 @@ func (s *Server) Tools() []Tool {
 						Type:        "integer",
 						Description: "Maximum number of results (default: 50).",
 					},
+					"session_id": {
+						Type:        "string",
+						Description: "Filter results to a specific MCP session (UUID).",
+					},
 				},
 			},
 		},
@@ -229,6 +240,10 @@ func (s *Server) Tools() []Tool {
 					"since": {
 						Type:        "string",
 						Description: "Only export memories created/modified since this RFC3339 timestamp",
+					},
+					"session_id": {
+						Type:        "string",
+						Description: "Filter results to a specific MCP session (UUID).",
 					},
 				},
 			},
@@ -343,6 +358,9 @@ func (s *Server) createAuditLog(authCtx *auth.Context, params CallToolParams, re
 		"tool":        params.Name,
 		"duration_ms": duration.Milliseconds(),
 		"is_error":    result.IsError,
+	}
+	if authCtx.SessionID != uuid.Nil {
+		details["session_id"] = authCtx.SessionID.String()
 	}
 
 	switch params.Name {

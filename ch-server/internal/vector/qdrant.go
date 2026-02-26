@@ -44,13 +44,23 @@ func MemoryPointID(userID uuid.UUID, name string) string {
 
 // Point represents a vector with metadata for storage.
 type Point struct {
-	ID      string
-	UserID  uuid.UUID
-	OrgID   uuid.UUID
-	BlockID int64
-	Text    string
-	Scope   string // "personal" or "org"
-	Vector  []float32
+	ID         string
+	UserID     uuid.UUID
+	OrgID      uuid.UUID
+	BlockID    int64
+	Text       string
+	Scope      string // "personal" or "org"
+	MemoryType string // "factual", "experiential", or "working"
+	Tags       []string
+	SessionID  string // MCP transport session UUID; empty for stateless/unknown
+	Vector     []float32
+}
+
+// SearchFilter holds optional filters for vector search.
+type SearchFilter struct {
+	MemoryType string
+	Tags       []string
+	SessionID  string // Filter by MCP session UUID
 }
 
 // SearchResult represents a search match.
@@ -99,6 +109,37 @@ func apiKeyInterceptor(apiKey string) grpc.UnaryClientInterceptor {
 	}
 }
 
+// tagsToValue converts a string slice to a Qdrant ListValue payload.
+// Qdrant indexes keyword lists element-wise, so each tag is individually searchable.
+func tagsToValue(tags []string) *pb.Value {
+	vals := make([]*pb.Value, len(tags))
+	for i, t := range tags {
+		vals[i] = pb.NewValueString(t)
+	}
+	return &pb.Value{
+		Kind: &pb.Value_ListValue{
+			ListValue: &pb.ListValue{Values: vals},
+		},
+	}
+}
+
+// pointPayload builds the standard metadata payload for a Qdrant point.
+func pointPayload(p Point) map[string]*pb.Value {
+	payload := map[string]*pb.Value{
+		"user_id":     pb.NewValueString(p.UserID.String()),
+		"org_id":      pb.NewValueString(p.OrgID.String()),
+		"block_id":    pb.NewValueInt(p.BlockID),
+		"text":        pb.NewValueString(p.Text),
+		"scope":       pb.NewValueString(p.Scope),
+		"memory_type": pb.NewValueString(p.MemoryType),
+		"tags":        tagsToValue(p.Tags),
+	}
+	if p.SessionID != "" {
+		payload["session_id"] = pb.NewValueString(p.SessionID)
+	}
+	return payload
+}
+
 // EnsureCollection creates the collection if it doesn't exist and ensures
 // all required payload indexes are present.
 func (c *Client) EnsureCollection(ctx context.Context) error {
@@ -133,6 +174,9 @@ func (c *Client) EnsureCollection(ctx context.Context) error {
 		{"block_id", pb.FieldType_FieldTypeInteger},
 		{"scope", pb.FieldType_FieldTypeKeyword},
 		{"org_id", pb.FieldType_FieldTypeKeyword},
+		{"memory_type", pb.FieldType_FieldTypeKeyword},
+		{"tags", pb.FieldType_FieldTypeKeyword},
+		{"session_id", pb.FieldType_FieldTypeKeyword},
 	}
 	for _, idx := range indexes {
 		_, err = c.points.CreateFieldIndex(ctx, &pb.CreateFieldIndexCollection{
@@ -162,13 +206,7 @@ func (c *Client) Upsert(ctx context.Context, point Point) error {
 						Vector: &pb.Vector{Data: point.Vector},
 					},
 				},
-				Payload: map[string]*pb.Value{
-					"user_id":  pb.NewValueString(point.UserID.String()),
-					"org_id":   pb.NewValueString(point.OrgID.String()),
-					"block_id": pb.NewValueInt(point.BlockID),
-					"text":     pb.NewValueString(point.Text),
-					"scope":    pb.NewValueString(point.Scope),
-				},
+				Payload: pointPayload(point),
 			},
 		},
 	})
@@ -194,13 +232,7 @@ func (c *Client) UpsertBatch(ctx context.Context, points []Point) error {
 					Vector: &pb.Vector{Data: p.Vector},
 				},
 			},
-			Payload: map[string]*pb.Value{
-				"user_id":  pb.NewValueString(p.UserID.String()),
-				"org_id":   pb.NewValueString(p.OrgID.String()),
-				"block_id": pb.NewValueInt(p.BlockID),
-				"text":     pb.NewValueString(p.Text),
-				"scope":    pb.NewValueString(p.Scope),
-			},
+			Payload: pointPayload(p),
 		}
 	}
 
@@ -215,65 +247,46 @@ func (c *Client) UpsertBatch(ctx context.Context, points []Point) error {
 	return nil
 }
 
-// Search finds similar vectors for a user, including org-scoped memories from the same org.
-func (c *Client) Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vector []float32, limit uint64) ([]SearchResult, error) {
-	resp, err := c.points.Search(ctx, &pb.SearchPoints{
-		CollectionName: c.collection,
-		Vector:         vector,
-		Limit:          limit,
-		WithPayload: &pb.WithPayloadSelector{
-			SelectorOptions: &pb.WithPayloadSelector_Enable{Enable: true},
+// fieldMatch builds a Qdrant keyword match condition for a payload field.
+func fieldMatch(key, value string) *pb.Condition {
+	return &pb.Condition{
+		ConditionOneOf: &pb.Condition_Field{
+			Field: &pb.FieldCondition{
+				Key: key,
+				Match: &pb.Match{
+					MatchValue: &pb.Match_Keyword{
+						Keyword: value,
+					},
+				},
+			},
 		},
-		Filter: &pb.Filter{
-			// (user_id = X) OR (org_id = Y AND scope = 'org')
-			Should: []*pb.Condition{
-				{
-					ConditionOneOf: &pb.Condition_Filter{
-						Filter: &pb.Filter{
-							Must: []*pb.Condition{
-								{
-									ConditionOneOf: &pb.Condition_Field{
-										Field: &pb.FieldCondition{
-											Key: "user_id",
-											Match: &pb.Match{
-												MatchValue: &pb.Match_Keyword{
-													Keyword: userID.String(),
-												},
-											},
-										},
-									},
+	}
+}
+
+// Search finds similar vectors for a user, including org-scoped memories from the same org.
+// An optional SearchFilter narrows results by memory_type and/or tags without
+// bypassing the ownership filter.
+func (c *Client) Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vector []float32, limit uint64, filter *SearchFilter) ([]SearchResult, error) {
+	// Ownership filter: (user_id = X) OR (org_id = Y AND scope = 'org')
+	ownershipCondition := &pb.Condition{
+		ConditionOneOf: &pb.Condition_Filter{
+			Filter: &pb.Filter{
+				Should: []*pb.Condition{
+					{
+						ConditionOneOf: &pb.Condition_Filter{
+							Filter: &pb.Filter{
+								Must: []*pb.Condition{
+									fieldMatch("user_id", userID.String()),
 								},
 							},
 						},
 					},
-				},
-				{
-					ConditionOneOf: &pb.Condition_Filter{
-						Filter: &pb.Filter{
-							Must: []*pb.Condition{
-								{
-									ConditionOneOf: &pb.Condition_Field{
-										Field: &pb.FieldCondition{
-											Key: "org_id",
-											Match: &pb.Match{
-												MatchValue: &pb.Match_Keyword{
-													Keyword: orgID.String(),
-												},
-											},
-										},
-									},
-								},
-								{
-									ConditionOneOf: &pb.Condition_Field{
-										Field: &pb.FieldCondition{
-											Key: "scope",
-											Match: &pb.Match{
-												MatchValue: &pb.Match_Keyword{
-													Keyword: "org",
-												},
-											},
-										},
-									},
+					{
+						ConditionOneOf: &pb.Condition_Filter{
+							Filter: &pb.Filter{
+								Must: []*pb.Condition{
+									fieldMatch("org_id", orgID.String()),
+									fieldMatch("scope", "org"),
 								},
 							},
 						},
@@ -281,6 +294,32 @@ func (c *Client) Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, 
 				},
 			},
 		},
+	}
+
+	// Top-level Must: ownership is always required
+	must := []*pb.Condition{ownershipCondition}
+
+	// Append optional metadata filters
+	if filter != nil {
+		if filter.MemoryType != "" {
+			must = append(must, fieldMatch("memory_type", filter.MemoryType))
+		}
+		for _, tag := range filter.Tags {
+			must = append(must, fieldMatch("tags", tag))
+		}
+		if filter.SessionID != "" {
+			must = append(must, fieldMatch("session_id", filter.SessionID))
+		}
+	}
+
+	resp, err := c.points.Search(ctx, &pb.SearchPoints{
+		CollectionName: c.collection,
+		Vector:         vector,
+		Limit:          limit,
+		WithPayload: &pb.WithPayloadSelector{
+			SelectorOptions: &pb.WithPayloadSelector_Enable{Enable: true},
+		},
+		Filter: &pb.Filter{Must: must},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)

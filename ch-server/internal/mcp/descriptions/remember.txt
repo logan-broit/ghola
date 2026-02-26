@@ -24,4 +24,13 @@ IMPORTANT: Classify each memory with the appropriate memory_type:
 - 'experiential': Solutions to problems, debugging insights, lessons learned from mistakes
 - 'working': Temporary session context (auto-expires in 7 days)
 
+TAGGING CONVENTIONS:
+- Use tags to categorize memories for filtered recall (e.g., tags: ['kubernetes', 'deployment'])
+- Tags are lowercased automatically and support AND-filtered recall
+
+SESSION TRACKING:
+- Each memory is automatically linked to the MCP session that created it
+- No action needed — the server records the session_id transparently
+- Use the session_id filter on recall/list_memories to retrieve session-specific context
+
 Be specific and self-contained so facts are useful without additional context.

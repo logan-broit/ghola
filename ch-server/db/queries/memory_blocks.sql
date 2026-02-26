@@ -33,18 +33,18 @@ WHERE user_id = $1 AND name = $2;
 
 -- name: CreateMemoryBlock :one
 INSERT INTO memory_blocks (
-    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags
+    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags, session_id
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
 RETURNING *;
 
 -- name: UpdateMemoryBlock :one
 -- Updates by creating a new version (version must be provided)
 INSERT INTO memory_blocks (
-    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags
+    user_id, name, tier, value, version, sort_order, memory_type, scope, expires_at, tags, session_id
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
 RETURNING *;
 
@@ -119,20 +119,26 @@ RETURNING *;
 DELETE FROM memory_blocks
 WHERE expires_at IS NOT NULL AND expires_at <= NOW();
 
--- name: PruneOldVersions :execresult
+-- name: PruneOldVersions :exec
 -- Delete old versions of memory blocks, keeping the most recent N versions per (user_id, name).
 -- The is_current row is always preserved regardless of the retention limit.
+-- Uses a subquery with window function to identify rows beyond the retention limit.
 DELETE FROM memory_blocks
-WHERE id IN (
-    SELECT id FROM (
-        SELECT id,
-            ROW_NUMBER() OVER (PARTITION BY user_id, name ORDER BY version DESC) AS rn
-        FROM memory_blocks
-    ) ranked
-    WHERE rn > $1 AND id NOT IN (
-        SELECT id FROM memory_blocks WHERE is_current = true
-    )
-);
+WHERE is_current = false
+  AND id NOT IN (
+    SELECT id FROM memory_blocks
+    ORDER BY user_id, name, version DESC
+    LIMIT 1000000
+  )
+  AND version < (
+    SELECT MIN(version) FROM (
+      SELECT version FROM memory_blocks mb2
+      WHERE mb2.user_id = memory_blocks.user_id
+        AND mb2.name = memory_blocks.name
+      ORDER BY version DESC
+      LIMIT $1
+    ) keep_versions
+  );
 
 -- name: GetMemoryTypeDistribution :many
 -- Get count of memories by type for visualization
@@ -214,6 +220,7 @@ SELECT
     cmb.tags,
     cmb.memory_type,
     cmb.scope,
+    cmb.session_id,
     cmb.created_at,
     cmb.modified_at,
     cmb.expires_at
@@ -253,3 +260,48 @@ ORDER BY
     CASE WHEN cmb.name ILIKE '%' || @query || '%' THEN 0 ELSE 1 END,
     cmb.tier, cmb.sort_order, cmb.name
 LIMIT @search_limit;
+
+-- name: SearchAccessibleMemoryBlocksByTags :many
+-- Search accessible memory blocks by keyword filtered by tags (AND logic).
+SELECT cmb.* FROM current_memory_blocks cmb
+JOIN users u ON cmb.user_id = u.id
+WHERE ((cmb.user_id = @user_id AND cmb.scope = 'personal')
+   OR (u.org_id = (SELECT org_id FROM users WHERE id = @user_id) AND cmb.scope = 'org'))
+  AND cmb.tags @> @filter_tags::text[]
+  AND (
+    cmb.name ILIKE '%' || @query || '%'
+    OR to_tsvector('english', COALESCE(cmb.value, '')) @@ plainto_tsquery('english', @query)
+  )
+ORDER BY
+    CASE WHEN cmb.name ILIKE '%' || @query || '%' THEN 0 ELSE 1 END,
+    cmb.tier, cmb.sort_order, cmb.name
+LIMIT @search_limit;
+
+-- name: SearchAccessibleMemoryBlocksByTypeAndTags :many
+-- Search accessible memory blocks by keyword filtered by memory type and tags.
+SELECT cmb.* FROM current_memory_blocks cmb
+JOIN users u ON cmb.user_id = u.id
+WHERE memory_type = @memory_type
+  AND cmb.tags @> @filter_tags::text[]
+  AND ((cmb.user_id = @user_id AND cmb.scope = 'personal')
+   OR (u.org_id = (SELECT org_id FROM users WHERE id = @user_id) AND cmb.scope = 'org'))
+  AND (
+    cmb.name ILIKE '%' || @query || '%'
+    OR to_tsvector('english', COALESCE(cmb.value, '')) @@ plainto_tsquery('english', @query)
+  )
+ORDER BY
+    CASE WHEN cmb.name ILIKE '%' || @query || '%' THEN 0 ELSE 1 END,
+    cmb.tier, cmb.sort_order, cmb.name
+LIMIT @search_limit;
+
+-- name: IncrementRecallCount :exec
+-- Batch-increment recall counts for memories returned in a search.
+-- The user_id filter is defense-in-depth: block IDs are already derived
+-- from ownership-filtered search results.
+UPDATE memory_blocks
+SET recall_count = recall_count + 1,
+    last_recalled_at = NOW(),
+    modified_at = NOW()
+WHERE id = ANY(@block_ids::bigint[])
+  AND user_id = @user_id
+  AND is_current = true;

@@ -48,20 +48,23 @@ type AuditLog struct {
 }
 
 type CurrentMemoryBlock struct {
-	ID         int64              `json:"id"`
-	Guid       uuid.UUID          `json:"guid"`
-	UserID     uuid.UUID          `json:"user_id"`
-	Name       string             `json:"name"`
-	Tier       string             `json:"tier"`
-	Value      pgtype.Text        `json:"value"`
-	Tags       []string           `json:"tags"`
-	Version    int32              `json:"version"`
-	SortOrder  int32              `json:"sort_order"`
-	MemoryType string             `json:"memory_type"`
-	Scope      string             `json:"scope"`
-	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt  time.Time          `json:"created_at"`
-	ModifiedAt time.Time          `json:"modified_at"`
+	ID             int64              `json:"id"`
+	Guid           uuid.UUID          `json:"guid"`
+	UserID         uuid.UUID          `json:"user_id"`
+	Name           string             `json:"name"`
+	Tier           string             `json:"tier"`
+	Value          pgtype.Text        `json:"value"`
+	Tags           []string           `json:"tags"`
+	Version        int32              `json:"version"`
+	SortOrder      int32              `json:"sort_order"`
+	MemoryType     string             `json:"memory_type"`
+	Scope          string             `json:"scope"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	RecallCount    int32              `json:"recall_count"`
+	LastRecalledAt pgtype.Timestamptz `json:"last_recalled_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt      time.Time          `json:"created_at"`
+	ModifiedAt     time.Time          `json:"modified_at"`
 }
 
 type GitCommit struct {
@@ -105,9 +108,12 @@ type MemoryBlock struct {
 	// Optional expiration timestamp for working memories (auto-set to 7 days for working type)
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 	// Memory visibility scope: personal (only creator sees it) or org (all users in organization see it)
-	Scope     string   `json:"scope"`
-	IsCurrent bool     `json:"is_current"`
-	Tags      []string `json:"tags"`
+	Scope          string             `json:"scope"`
+	IsCurrent      bool               `json:"is_current"`
+	Tags           []string           `json:"tags"`
+	RecallCount    int32              `json:"recall_count"`
+	LastRecalledAt pgtype.Timestamptz `json:"last_recalled_at"`
+	SessionID      pgtype.UUID        `json:"session_id"`
 }
 
 type User struct {

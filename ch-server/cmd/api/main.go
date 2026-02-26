@@ -204,15 +204,12 @@ func run() error {
 					logger.Info("expired memories cleanup completed")
 				}
 
-				pruned, err := queries.PruneOldVersions(context.Background(), 10)
-				if err != nil {
+				if err := queries.PruneOldVersions(context.Background(), 10); err != nil {
 					logger.Error("failed to prune old memory versions",
 						slog.String("error", err.Error()),
 					)
-				} else if pruned > 0 {
-					logger.Info("old memory versions pruned",
-						slog.Int64("pruned", pruned),
-					)
+				} else {
+					logger.Info("old memory versions pruned")
 				}
 			}
 		}

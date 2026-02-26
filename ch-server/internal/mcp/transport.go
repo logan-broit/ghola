@@ -24,6 +24,7 @@ type StdioHandler struct {
 }
 
 func NewStdioHandler(server *Server, authCtx *auth.Context) *StdioHandler {
+	authCtx.SessionID = uuid.New() // process-lifetime session
 	return &StdioHandler{
 		server:  server,
 		authCtx: authCtx,
@@ -188,7 +189,9 @@ func (h *StreamableHTTPHandler) handleInitialize(w http.ResponseWriter, r *http.
 	authCtx.IPAddress = r.RemoteAddr
 	authCtx.UserAgent = r.Header.Get("User-Agent")
 
-	sessionID := uuid.New().String()
+	sessionUUID := uuid.New()
+	authCtx.SessionID = sessionUUID
+	sessionID := sessionUUID.String()
 	h.mu.Lock()
 	h.sessions[sessionID] = &httpSession{
 		authCtx:   authCtx,

@@ -104,7 +104,7 @@ func (m *MockVectorDB) Upsert(ctx context.Context, point vector.Point) error {
 	return nil
 }
 
-func (m *MockVectorDB) Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vec []float32, limit uint64) ([]vector.SearchResult, error) {
+func (m *MockVectorDB) Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vec []float32, limit uint64, filter *vector.SearchFilter) ([]vector.SearchResult, error) {
 	m.Mu.Lock()
 	defer m.Mu.Unlock()
 
@@ -158,8 +158,8 @@ func (m *MockQueries) GetNextMemoryBlockVersion(ctx context.Context, arg sqlc.Ge
 	return version + 1, nil
 }
 
-func (m *MockQueries) PruneOldVersions(ctx context.Context, retainCount int32) (int64, error) {
-	return 0, nil
+func (m *MockQueries) PruneOldVersions(ctx context.Context, retainCount int32) error {
+	return nil
 }
 
 func (m *MockQueries) CreateMemoryBlock(ctx context.Context, arg sqlc.CreateMemoryBlockParams) (sqlc.MemoryBlock, error) {
@@ -175,6 +175,7 @@ func (m *MockQueries) CreateMemoryBlock(ctx context.Context, arg sqlc.CreateMemo
 		Version:   arg.Version,
 		SortOrder: arg.SortOrder,
 		Tags:      arg.Tags,
+		SessionID: arg.SessionID,
 	}
 	m.nextID++
 
@@ -270,6 +271,7 @@ func (m *MockQueries) currentBlocks(userID uuid.UUID) []sqlc.CurrentMemoryBlock 
 			Tags:      b.Tags,
 			Version:   b.Version,
 			SortOrder: b.SortOrder,
+			SessionID: b.SessionID,
 		})
 	}
 	return result

@@ -76,8 +76,6 @@ type Querier interface {
 	GetMemoryTypeDistribution(ctx context.Context) ([]GetMemoryTypeDistributionRow, error)
 	GetNextMemoryBlockVersion(ctx context.Context, arg GetNextMemoryBlockVersionParams) (int32, error)
 	GetOrCreateUser(ctx context.Context, arg GetOrCreateUserParams) (User, error)
-	// PruneOldVersions deletes old versions of memory blocks, keeping the most recent N versions.
-	PruneOldVersions(ctx context.Context, retainCount int32) (int64, error)
 	GetRecentDecisions(ctx context.Context, arg GetRecentDecisionsParams) ([]Journal, error)
 	GetRecentSolutions(ctx context.Context, arg GetRecentSolutionsParams) ([]Journal, error)
 	// Get most frequently used tags across all memories
@@ -88,6 +86,10 @@ type Querier interface {
 	// Admin-related queries
 	// ============================================================================
 	GetUserByUsernameForAuth(ctx context.Context, username string) (User, error)
+	// Batch-increment recall counts for memories returned in a search.
+	// The user_id filter is defense-in-depth: block IDs are already derived
+	// from ownership-filtered search results.
+	IncrementRecallCount(ctx context.Context, arg IncrementRecallCountParams) error
 	ListAPIKeysByUser(ctx context.Context, userID uuid.UUID) ([]ListAPIKeysByUserRow, error)
 	ListActiveAdminSessions(ctx context.Context) ([]ListActiveAdminSessionsRow, error)
 	ListAllAPIKeys(ctx context.Context, arg ListAllAPIKeysParams) ([]ListAllAPIKeysRow, error)
@@ -99,6 +101,10 @@ type Querier interface {
 	ListJournalEntriesByDateRange(ctx context.Context, arg ListJournalEntriesByDateRangeParams) ([]Journal, error)
 	ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error)
 	ListUsersAdmin(ctx context.Context, arg ListUsersAdminParams) ([]User, error)
+	// Delete old versions of memory blocks, keeping the most recent N versions per (user_id, name).
+	// The is_current row is always preserved regardless of the retention limit.
+	// Uses a subquery with window function to identify rows beyond the retention limit.
+	PruneOldVersions(ctx context.Context, limit int32) error
 	ReactivateUser(ctx context.Context, id uuid.UUID) error
 	RevokeAPIKey(ctx context.Context, id uuid.UUID) error
 	RevokeAdminSession(ctx context.Context, id uuid.UUID) error
@@ -107,8 +113,12 @@ type Querier interface {
 	RevokeAllAdminSessionsByUser(ctx context.Context, userID uuid.UUID) error
 	// Search accessible memory blocks by keyword using ILIKE (name) and full-text search (value).
 	SearchAccessibleMemoryBlocks(ctx context.Context, arg SearchAccessibleMemoryBlocksParams) ([]CurrentMemoryBlock, error)
+	// Search accessible memory blocks by keyword filtered by tags (AND logic).
+	SearchAccessibleMemoryBlocksByTags(ctx context.Context, arg SearchAccessibleMemoryBlocksByTagsParams) ([]CurrentMemoryBlock, error)
 	// Search accessible memory blocks by keyword filtered by memory type.
 	SearchAccessibleMemoryBlocksByType(ctx context.Context, arg SearchAccessibleMemoryBlocksByTypeParams) ([]CurrentMemoryBlock, error)
+	// Search accessible memory blocks by keyword filtered by memory type and tags.
+	SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]CurrentMemoryBlock, error)
 	SearchJournalFullText(ctx context.Context, arg SearchJournalFullTextParams) ([]SearchJournalFullTextRow, error)
 	SetJournalVectorID(ctx context.Context, arg SetJournalVectorIDParams) error
 	SetUserAdmin(ctx context.Context, arg SetUserAdminParams) error

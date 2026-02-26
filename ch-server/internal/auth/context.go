@@ -17,6 +17,7 @@ const (
 type Context struct {
 	UserID    uuid.UUID
 	OrgID     uuid.UUID
+	SessionID uuid.UUID // MCP transport session; uuid.Nil for stateless/unknown
 	Username  string
 	Email     string
 	Roles     []string
