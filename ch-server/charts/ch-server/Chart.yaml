@@ -2,8 +2,8 @@ apiVersion: v2
 name: ch-server
 description: Chapterhouse API Server - Cloud-Native Agentic Memory REST API and MCP endpoint
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
 keywords:
   - chapterhouse
   - api
