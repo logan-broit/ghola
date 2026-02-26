@@ -197,6 +197,18 @@ func (m *MockQueries) GetCurrentMemoryBlocks(ctx context.Context, userID uuid.UU
 	return m.currentBlocks(userID), nil
 }
 
+// GetAllBlocks returns all stored memory blocks across all users (test helper, not a Querier method).
+func (m *MockQueries) GetAllBlocks() []sqlc.MemoryBlock {
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+
+	var all []sqlc.MemoryBlock
+	for _, blocks := range m.memoryBlocks {
+		all = append(all, blocks...)
+	}
+	return all
+}
+
 func (m *MockQueries) DeleteMemoryBlock(ctx context.Context, arg sqlc.DeleteMemoryBlockParams) error {
 	m.Mu.Lock()
 	defer m.Mu.Unlock()

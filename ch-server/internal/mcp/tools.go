@@ -123,6 +123,17 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 		}
 	}
 
+	// Determine session_id: prefer client-provided arg, fall back to transport session.
+	sessionID := sessionToPgUUID(authCtx.SessionID)
+	sessionIDStr := sessionToString(authCtx.SessionID)
+	if clientSID, err := parseSessionIDArg(args); err != nil {
+		return toolError(err.Error())
+	} else if clientSID != "" {
+		parsed, _ := uuid.Parse(clientSID)
+		sessionID = pgtype.UUID{Bytes: parsed, Valid: true}
+		sessionIDStr = clientSID
+	}
+
 	ctx := auth.WithContext(context.Background(), authCtx)
 	nextVersion, err := s.queries.GetNextMemoryBlockVersion(ctx, sqlc.GetNextMemoryBlockVersionParams{
 		UserID: authCtx.UserID,
@@ -143,7 +154,7 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 		Version:    nextVersion,
 		SortOrder:  0,
 		Tags:       tagStrs,
-		SessionID:  sessionToPgUUID(authCtx.SessionID),
+		SessionID:  sessionID,
 	})
 	if err != nil {
 		return toolError(fmt.Sprintf("Error: %v", err))
@@ -190,7 +201,7 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 				Scope:      scope,
 				MemoryType: memoryType,
 				Tags:       tagStrs,
-				SessionID:  sessionToString(authCtx.SessionID),
+				SessionID:  sessionIDStr,
 				Vector:     vec,
 			}
 			s.goBackground(func() {

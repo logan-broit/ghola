@@ -1798,6 +1798,76 @@ func TestServer_SessionContext_InvalidUUID(t *testing.T) {
 	assert.Contains(t, result.Content[0].Text, "invalid session_id")
 }
 
+func TestServer_Remember_WithClientSessionID(t *testing.T) {
+	server, queries, _, _ := newTestServer(t)
+	userID := uuid.New()
+	authCtx := testutil.NewTestAuthContext(userID)
+	sessionID := uuid.New()
+
+	// Remember a fact with an explicit session_id
+	result := callTool(t, server, authCtx, "remember", map[string]any{
+		"fact":       "Client sessions work",
+		"session_id": sessionID.String(),
+	})
+
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "Remembered")
+
+	// Verify list_sessions returns the session
+	listResult := callTool(t, server, authCtx, "list_sessions", map[string]any{})
+	assert.False(t, listResult.IsError)
+	assert.Contains(t, listResult.Content[0].Text, sessionID.String())
+
+	// Verify session_context returns the memory
+	ctxResult := callTool(t, server, authCtx, "session_context", map[string]any{
+		"session_id": sessionID.String(),
+	})
+	assert.False(t, ctxResult.IsError)
+	assert.Contains(t, ctxResult.Content[0].Text, "Client sessions work")
+
+	// Verify the stored block has the correct session_id
+	blocks := queries.GetAllBlocks()
+	found := false
+	for _, b := range blocks {
+		if b.SessionID.Valid && uuid.UUID(b.SessionID.Bytes) == sessionID {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "stored block should have client-provided session_id")
+}
+
+func TestServer_Remember_InvalidSessionID(t *testing.T) {
+	server, _, _, _ := newTestServer(t)
+	authCtx := testutil.NewTestAuthContext(uuid.New())
+
+	result := callTool(t, server, authCtx, "remember", map[string]any{
+		"fact":       "This should fail",
+		"session_id": "not-a-uuid",
+	})
+
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].Text, "invalid session_id")
+}
+
+func TestServer_Remember_WithoutSessionID(t *testing.T) {
+	server, queries, _, _ := newTestServer(t)
+	userID := uuid.New()
+	authCtx := testutil.NewTestAuthContext(userID)
+
+	// Remember without session_id on stateless transport (auth.SessionID == uuid.Nil)
+	result := callTool(t, server, authCtx, "remember", map[string]any{
+		"fact": "No session provided",
+	})
+
+	assert.False(t, result.IsError)
+
+	// Verify stored block has no session_id
+	blocks := queries.GetAllBlocks()
+	assert.Len(t, blocks, 1)
+	assert.False(t, blocks[0].SessionID.Valid, "block should have null session_id on stateless transport")
+}
+
 func TestServer_SessionContext_UserIsolation(t *testing.T) {
 	server, queries, _, _ := newTestServer(t)
 	userA := uuid.New()

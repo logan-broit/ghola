@@ -249,14 +249,22 @@ All HTTP requests are logged via structured JSON middleware:
 
 ### Session ID Protection
 
-MCP session IDs are treated as bearer tokens and are only logged in truncated
-form (first 8 characters) to prevent session hijacking via log access.
+Chapterhouse distinguishes two types of session ID:
 
-Memory session IDs (`session_id` arguments to `session_summary` and
-`session_context`) are similarly truncated to 8 characters in audit log
-`details` entries. The `list_sessions` tool returns full session IDs to the
-calling user, but these are the user's own session IDs filtered by ownership --
-not a log exposure risk.
+- **Transport session IDs** (MCP `Mcp-Session-Id` header) are bearer tokens
+  created during the `initialize` handshake. These are always logged in
+  truncated form (first 8 characters) to prevent session hijacking via log
+  access.
+- **Memory session IDs** (client-provided `session_id` on `remember`, or
+  filter arguments on `recall`/`list_memories`/`export_memories`) are grouping
+  tags within a user's own namespace. They are not authentication tokens and
+  carry no authorization -- all access control is enforced by `user_id`
+  filtering at the query level. These are also truncated to 8 characters in
+  audit log `details` entries for consistency.
+
+The `list_sessions` tool returns full memory session IDs to the calling user,
+but these are the user's own session IDs filtered by ownership -- not a log
+exposure risk.
 
 **Source**: `ch-server/db/migrations/001_initial_schema.sql`,
 `ch-server/internal/middleware/middleware.go`

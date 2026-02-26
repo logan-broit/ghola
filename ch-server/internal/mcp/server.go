@@ -126,6 +126,10 @@ func (s *Server) Tools() []Tool {
 						Description: "Memory visibility scope: 'personal' (default, only you see it) or 'org' (shared with everyone in your organization). Most memories should be personal unless they contain team-wide knowledge.",
 						Enum:        []string{"personal", "org"},
 					},
+					"session_id": {
+						Type:        "string",
+						Description: "Optional session UUID to group this memory with. Links related memories for later retrieval via list_sessions/session_context.",
+					},
 				},
 				Required: []string{"fact"},
 			},

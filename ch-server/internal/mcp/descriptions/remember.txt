@@ -29,8 +29,9 @@ TAGGING CONVENTIONS:
 - Tags are lowercased automatically and support AND-filtered recall
 
 SESSION TRACKING:
-- Each memory is automatically linked to the MCP session that created it
-- No action needed — the server records the session_id transparently
+- Provide an optional session_id (UUID) to group related memories into a session
+- If not provided, the server uses the MCP transport session ID (if available)
 - Use the session_id filter on recall/list_memories to retrieve session-specific context
+- Use list_sessions to see all sessions, session_summary/session_context to drill in
 
 Be specific and self-contained so facts are useful without additional context.
