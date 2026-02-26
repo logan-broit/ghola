@@ -462,8 +462,18 @@ func TestJWTProvider_Authenticate_ExpiredToken(t *testing.T) {
 }
 
 func TestParseRSAPublicKey(t *testing.T) {
-	// Test the placeholder implementation
-	_, err := parseRSAPublicKey("test-n", "test-e")
+	// Test with invalid base64 input
+	_, err := parseRSAPublicKey("!!!invalid!!!", "AQAB")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not implemented")
+	assert.Contains(t, err.Error(), "failed to decode modulus")
+
+	// Test with valid base64url-encoded RSA key components
+	// These are minimal valid values: n = large prime, e = 65537 (AQAB in base64url)
+	key, err := parseRSAPublicKey(
+		"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+		"AQAB",
+	)
+	assert.NoError(t, err)
+	assert.NotNil(t, key)
+	assert.Equal(t, 65537, key.E)
 }

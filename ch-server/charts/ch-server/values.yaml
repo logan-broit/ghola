@@ -189,8 +189,8 @@ admin:
 
 # CORS configuration
 cors:
-  # -- Allowed origins (comma-separated)
-  origins: "*"
+  # -- Allowed origins (comma-separated, empty = no cross-origin allowed)
+  origins: ""
 
 # =============================================================================
 # Ingress Configuration

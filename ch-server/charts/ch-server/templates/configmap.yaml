@@ -12,6 +12,7 @@ data:
   DATABASE_HOST: {{ .Values.database.host | quote }}
   DATABASE_PORT: {{ .Values.database.port | quote }}
   DATABASE_NAME: {{ .Values.database.name | quote }}
+  DATABASE_SSL_MODE: {{ .Values.database.sslMode | default "prefer" | quote }}
   DATABASE_MAX_CONNS: {{ .Values.database.maxConns | quote }}
   DATABASE_MIN_CONNS: {{ .Values.database.minConns | quote }}
   QDRANT_HOST: {{ .Values.qdrant.host | quote }}

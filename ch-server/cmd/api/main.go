@@ -125,6 +125,7 @@ func run() error {
 		Host:       cfg.Qdrant.Host,
 		GRPCPort:   cfg.Qdrant.GRPCPort,
 		APIKey:     cfg.Qdrant.APIKey,
+		UseTLS:     cfg.Qdrant.UseTLS,
 		Collection: cfg.Qdrant.Collection,
 		Dimensions: cfg.Embedding.Dimensions,
 	})
@@ -279,8 +280,8 @@ func buildRouter(
 	r.Use(middleware.RecoveryMiddleware(logger))
 	r.Use(middleware.LoggingMiddleware(logger))
 
-	if cfg.IsDevelopment() {
-		r.Use(middleware.CORSMiddleware([]string{"*"}))
+	if len(cfg.CORSOrigins) > 0 {
+		r.Use(middleware.CORSMiddleware(cfg.CORSOrigins))
 	}
 
 	// Health endpoints (no auth required)
@@ -361,6 +362,12 @@ func buildRouter(
 
 				r.Post("/logout", adminHandler.Logout)
 				r.Get("/me", adminHandler.GetCurrentUser)
+			})
+
+			// Admin-only routes (session auth + admin role required)
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.AuthMiddleware(sessionProvider))
+				r.Use(middleware.RequireAdmin)
 
 				r.Get("/stats", adminHandler.GetStats)
 				r.Get("/system-stats", systemStatsHandler.GetSystemStats)
@@ -368,12 +375,6 @@ func buildRouter(
 				r.Get("/memory-scope-distribution", systemStatsHandler.GetMemoryScopeDistribution)
 				r.Get("/top-tags", systemStatsHandler.GetTopTags)
 				r.Get("/audit", adminHandler.ListAuditLogs)
-			})
-
-			// Admin-only routes (session auth + admin role required)
-			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(sessionProvider))
-				r.Use(middleware.RequireAdmin)
 
 				r.Route("/users", func(r chi.Router) {
 					r.Get("/", adminHandler.ListUsers)

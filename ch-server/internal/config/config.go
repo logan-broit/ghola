@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,7 +16,8 @@ type Config struct {
 	Database    DatabaseConfig
 	Qdrant      QdrantConfig
 	Embedding   EmbeddingConfig
-	Auth AuthConfig
+	Auth        AuthConfig
+	CORSOrigins []string
 }
 
 // ServerConfig holds HTTP server configuration.
@@ -54,6 +57,7 @@ type QdrantConfig struct {
 	HTTPPort   int
 	GRPCPort   int
 	APIKey     string
+	UseTLS     bool
 	Collection string
 }
 
@@ -95,7 +99,7 @@ func Load() (*Config, error) {
 			Name:            getEnv("DATABASE_NAME", "memories"),
 			User:            getEnv("DATABASE_USER", "memory_api"),
 			Password:        getEnv("DATABASE_PASSWORD", ""),
-			SSLMode:         getEnv("DATABASE_SSL_MODE", "disable"),
+			SSLMode:         getEnv("DATABASE_SSL_MODE", "prefer"),
 			MaxConns:        getEnvInt("DATABASE_MAX_CONNS", 25),
 			MinConns:        getEnvInt("DATABASE_MIN_CONNS", 5),
 			MaxConnLifetime: getEnvDuration("DATABASE_MAX_CONN_LIFETIME", time.Hour),
@@ -106,6 +110,7 @@ func Load() (*Config, error) {
 			HTTPPort:   getEnvInt("QDRANT_HTTP_PORT", 6333),
 			GRPCPort:   getEnvInt("QDRANT_GRPC_PORT", 6334),
 			APIKey:     getEnv("QDRANT_API_KEY", ""),
+			UseTLS:     getEnvBool("QDRANT_TLS", false),
 			Collection: getEnv("QDRANT_COLLECTION", "memories"),
 		},
 		Embedding: EmbeddingConfig{
@@ -125,6 +130,7 @@ func Load() (*Config, error) {
 			JWKSURL:      getEnv("JWKS_URL", ""),
 			JWKSCacheTTL: getEnvDuration("JWKS_CACHE_TTL", 15*time.Minute),
 		},
+		CORSOrigins: parseCORSOrigins(getEnv("CORS_ORIGINS", "")),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -143,6 +149,11 @@ func (c *Config) validate() error {
 			return fmt.Errorf("JWT_ISSUER is required when AUTH_PROVIDER is jwt")
 		}
 	}
+
+	if c.IsProduction() && c.Auth.Provider == "default" {
+		slog.Warn("AUTH_PROVIDER is 'default' in production — all API requests will bypass authentication. Set AUTH_PROVIDER to 'jwt' or ensure MCP endpoints use API key auth.")
+	}
+
 	return nil
 }
 
@@ -151,9 +162,11 @@ func (c *Config) IsProduction() bool {
 	return c.Environment == "production"
 }
 
-// IsDevelopment returns true if running in a non-production environment.
+// IsDevelopment returns true if running in a local development environment.
+// Unknown environment names are treated as production (safe by default).
 func (c *Config) IsDevelopment() bool {
-	return !c.IsProduction()
+	env := strings.ToLower(c.Environment)
+	return env == "local" || env == "development"
 }
 
 func getEnv(key, defaultValue string) string {
@@ -172,6 +185,13 @@ func getEnvInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		return strings.EqualFold(value, "true") || value == "1"
+	}
+	return defaultValue
+}
+
 func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
 		if duration, err := time.ParseDuration(value); err == nil {
@@ -179,4 +199,21 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 		}
 	}
 	return defaultValue
+}
+
+// parseCORSOrigins splits a comma-separated origin string into a slice,
+// filtering out empty entries.
+func parseCORSOrigins(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var origins []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			origins = append(origins, p)
+		}
+	}
+	return origins
 }

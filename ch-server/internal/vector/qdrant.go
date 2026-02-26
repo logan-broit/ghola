@@ -2,12 +2,15 @@ package vector
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"github.com/google/uuid"
 	pb "github.com/qdrant/go-client/qdrant"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
+	grpcinsecure "google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 // Client wraps the Qdrant gRPC client with convenience methods.
@@ -23,6 +26,7 @@ type Config struct {
 	Host       string
 	GRPCPort   int
 	APIKey     string
+	UseTLS     bool
 	Collection string
 	Dimensions int
 }
@@ -61,8 +65,16 @@ type SearchResult struct {
 func NewClient(cfg Config) (*Client, error) {
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.GRPCPort)
 
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	var opts []grpc.DialOption
+
+	if cfg.UseTLS {
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(grpcinsecure.NewCredentials()))
+	}
+
+	if cfg.APIKey != "" {
+		opts = append(opts, grpc.WithUnaryInterceptor(apiKeyInterceptor(cfg.APIKey)))
 	}
 
 	conn, err := grpc.NewClient(addr, opts...)
@@ -76,6 +88,15 @@ func NewClient(cfg Config) (*Client, error) {
 		collection: cfg.Collection,
 		dimensions: uint64(cfg.Dimensions),
 	}, nil
+}
+
+// apiKeyInterceptor returns a gRPC unary interceptor that attaches the API key
+// as metadata on every request.
+func apiKeyInterceptor(apiKey string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx = metadata.AppendToOutgoingContext(ctx, "api-key", apiKey)
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
 }
 
 // EnsureCollection creates the collection if it doesn't exist and ensures

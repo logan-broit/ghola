@@ -7,12 +7,17 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 //go:embed all:static
 var staticFiles embed.FS
+
+// proxyClient is a shared HTTP client for proxying API requests.
+var proxyClient = &http.Client{Timeout: 30 * time.Second}
 
 func main() {
 	port := flag.String("port", getEnv("PORT", "8080"), "Port to listen on")
@@ -35,7 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux.Handle("/", spaHandler(http.FS(staticFS)))
+	mux.Handle("/", securityHeaders(spaHandler(http.FS(staticFS))))
 
 	log.Printf("Chapterhouse Admin listening on :%s", *port)
 	log.Printf("API proxy target: %s", *apiURL)
@@ -49,6 +54,17 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// securityHeaders wraps a handler to set standard security headers on all responses.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // spaHandler serves static files with admin routing
@@ -137,32 +153,38 @@ func serveFile(w http.ResponseWriter, r *http.Request, fsys http.FileSystem, nam
 	http.ServeContent(w, r, name, stat.ModTime(), f.(io.ReadSeeker))
 }
 
-// proxyHandler forwards requests to the API server
+// proxyHandler forwards requests to the API server.
+// Uses a shared http.Client with timeout. Validates the constructed URL
+// stays within the expected API host.
 func proxyHandler(baseURL string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		targetURL := strings.TrimSuffix(baseURL, "/") + r.URL.Path
-		if r.URL.RawQuery != "" {
-			targetURL += "?" + r.URL.RawQuery
-		}
+	parsedBase, err := url.Parse(strings.TrimSuffix(baseURL, "/"))
+	if err != nil {
+		log.Fatalf("invalid API_URL: %v", err)
+	}
 
-		proxyReq, err := http.NewRequest(r.Method, targetURL, r.Body)
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Construct target URL and validate it stays on the expected host.
+		target, err := url.Parse(parsedBase.String() + r.URL.Path)
+		if err != nil || target.Host != parsedBase.Host {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		target.RawQuery = r.URL.RawQuery
+
+		proxyReq, err := http.NewRequest(r.Method, target.String(), r.Body)
 		if err != nil {
 			http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 			return
 		}
 
-		for key, values := range r.Header {
-			for _, value := range values {
-				proxyReq.Header.Add(key, value)
+		// Forward safe headers only.
+		for _, key := range []string{"Content-Type", "Accept", "Cookie", "Authorization"} {
+			if v := r.Header.Get(key); v != "" {
+				proxyReq.Header.Set(key, v)
 			}
 		}
 
-		for _, cookie := range r.Cookies() {
-			proxyReq.AddCookie(cookie)
-		}
-
-		client := &http.Client{}
-		resp, err := client.Do(proxyReq)
+		resp, err := proxyClient.Do(proxyReq)
 		if err != nil {
 			http.Error(w, "Failed to reach API server", http.StatusBadGateway)
 			return

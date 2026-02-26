@@ -10,6 +10,7 @@ data:
   DATABASE_HOST: "chapterhouse-db-rw.ch-system.svc"
   DATABASE_PORT: "5432"
   DATABASE_NAME: "memories"
+  DATABASE_SSL_MODE: "prefer"
   DATABASE_MAX_CONNS: "25"
   DATABASE_MIN_CONNS: "5"
   QDRANT_HOST: "chapterhouse-qdrant.ch-system.svc"
@@ -22,4 +23,4 @@ data:
   EMBEDDING_DIMENSIONS: "768"
   AUTH_PROVIDER: "default"
   AUTH_DEFAULT_USER: "00000000-0000-0000-0000-000000000001"
-  CORS_ORIGINS: "*"
+  CORS_ORIGINS: ""

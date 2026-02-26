@@ -1014,6 +1014,8 @@ func newTestHTTPHandler(t *testing.T) (*StreamableHTTPHandler, *testutil.MockQue
 }
 
 func TestStreamableHTTPHandler_Options(t *testing.T) {
+	// CORS is now handled by router-level middleware, not the handler.
+	// OPTIONS requests reaching the handler directly get 405.
 	handler, _ := newTestHTTPHandler(t)
 
 	req := httptest.NewRequest(http.MethodOptions, "/mcp", nil)
@@ -1021,9 +1023,7 @@ func TestStreamableHTTPHandler_Options(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
-	assert.Contains(t, rec.Header().Get("Access-Control-Allow-Methods"), "POST")
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
 func TestStreamableHTTPHandler_MethodNotAllowed(t *testing.T) {

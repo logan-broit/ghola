@@ -119,16 +119,7 @@ func (h *StreamableHTTPHandler) cleanupSessions() {
 }
 
 func (h *StreamableHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version")
-	w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
+	// CORS is handled by the router-level middleware; no hardcoded headers here.
 	switch r.Method {
 	case http.MethodPost:
 		h.handlePost(w, r)
@@ -206,7 +197,7 @@ func (h *StreamableHTTPHandler) handleInitialize(w http.ResponseWriter, r *http.
 	h.mu.Unlock()
 
 	h.logger.Info("HTTP session created",
-		slog.String("session", sessionID),
+		slog.String("session_prefix", sessionID[:8]),
 		slog.String("user", authCtx.UserID.String()),
 	)
 
@@ -285,11 +276,27 @@ func (h *StreamableHTTPHandler) handleDelete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Authenticate the delete request to prevent unauthorized session termination.
+	authCtx, err := h.authProvider.Authenticate(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	h.mu.Lock()
+	session, exists := h.sessions[sessionID]
+	if exists && session.authCtx.UserID != authCtx.UserID {
+		h.mu.Unlock()
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	delete(h.sessions, sessionID)
 	h.mu.Unlock()
 
-	h.logger.Info("HTTP session deleted", slog.String("session", sessionID))
+	h.logger.Info("HTTP session deleted",
+		slog.String("session_prefix", sessionID[:8]),
+		slog.String("user", authCtx.UserID.String()),
+	)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -321,15 +328,7 @@ func NewStatelessHTTPHandler(server *Server, authProvider auth.Provider, logger 
 }
 
 func (h *StatelessHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
+	// CORS is handled by the router-level middleware; no hardcoded headers here.
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return

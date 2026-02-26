@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -251,9 +253,26 @@ func (p *JWTProvider) extractContext(claims jwt.MapClaims) (*Context, error) {
 	}, nil
 }
 
-// parseRSAPublicKey parses RSA public key from JWK n and e values.
-func parseRSAPublicKey(n, e string) (*rsa.PublicKey, error) {
-	// This is a simplified implementation.
-	// In production, use a proper JWK library like github.com/lestrrat-go/jwx
-	return nil, fmt.Errorf("RSA key parsing not implemented - use github.com/lestrrat-go/jwx")
+// parseRSAPublicKey parses RSA public key from JWK n and e values (base64url-encoded).
+func parseRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(nStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode modulus: %w", err)
+	}
+
+	eBytes, err := base64.RawURLEncoding.DecodeString(eStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode exponent: %w", err)
+	}
+
+	// Convert exponent bytes to int
+	var exp int
+	for _, b := range eBytes {
+		exp = exp<<8 + int(b)
+	}
+
+	return &rsa.PublicKey{
+		N: new(big.Int).SetBytes(nBytes),
+		E: exp,
+	}, nil
 }
