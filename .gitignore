@@ -36,3 +36,13 @@ planning/
 # Coverage
 coverage.out
 coverage.html
+
+# Claude Code
+.claude/
+
+# Compiled binaries (outside bin/)
+ch-web/server
+ch-server/ch-server
+
+# Export artifacts
+*.jsonl
