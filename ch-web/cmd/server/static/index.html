@@ -1126,8 +1126,8 @@
                 <div class="feature-icon" style="background: rgba(167, 139, 250, 0.12);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
                 </div>
-                <div class="feature-title">6 MCP Tools</div>
-                <div class="feature-desc">Remember, recall, forget, list, share, and export. A complete memory API through the Model Context Protocol.</div>
+                <div class="feature-title">9 MCP Tools</div>
+                <div class="feature-desc">Memory tools (remember, recall, forget, list, share, export) plus session lifecycle (list sessions, summarize, resume). A complete context API through MCP.</div>
             </div>
             <div class="feature-card" data-animate data-animate-delay="7">
                 <div class="feature-icon" style="background: rgba(244, 114, 182, 0.12);">
@@ -1193,8 +1193,8 @@
     <section class="section tools-section" id="tools">
         <div class="section-header" data-animate>
             <div class="section-label">Protocol</div>
-            <h2 class="section-title">6 tools. One protocol.</h2>
-            <p class="section-subtitle">A complete memory API through the Model Context Protocol.</p>
+            <h2 class="section-title">9 tools. One protocol.</h2>
+            <p class="section-subtitle">Memory management and session lifecycle through the Model Context Protocol.</p>
         </div>
         <div class="tools-container" data-animate>
             <div class="tools-tabs">
@@ -1204,16 +1204,20 @@
                 <button class="tool-tab" data-tool="list">list</button>
                 <button class="tool-tab" data-tool="share">share</button>
                 <button class="tool-tab" data-tool="export">export</button>
+                <button class="tool-tab" data-tool="sessions">sessions</button>
+                <button class="tool-tab" data-tool="summary">summary</button>
+                <button class="tool-tab" data-tool="context">context</button>
             </div>
 
             <div class="tool-panel active" data-tool-panel="remember">
-                <div class="tool-desc">Store a fact with optional tags, memory type, and scope. Proactively triggered when your AI learns something important.</div>
+                <div class="tool-desc">Store a fact with optional tags, memory type, scope, and session ID. Proactively triggered when your AI learns something important.</div>
                 <div class="code-block">
                     <code>{
   "fact": "Our API uses snake_case for all JSON fields",
   "memory_type": "factual",
   "tags": ["api", "conventions"],
-  "scope": "org"
+  "scope": "org",
+  "session_id": "a1b2c3d4-..."
 }</code>
                     <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 </div>
@@ -1271,6 +1275,36 @@
   "memory_type": "experiential",
   "tags": ["debugging"],
   "since": "2025-01-01T00:00:00Z"
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="sessions">
+                <div class="tool-desc">List recent sessions that created memories. Answer "what were we working on yesterday?" and find sessions to resume.</div>
+                <div class="code-block">
+                    <code>{
+  "limit": 10
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="summary">
+                <div class="tool-desc">Get a detailed breakdown of a session: memory count by type, tags used, time range, and truncated previews of each memory.</div>
+                <div class="code-block">
+                    <code>{
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="context">
+                <div class="tool-desc">Resume where you left off. Loads all memories from a previous session, organized by type, for seamless context resumption.</div>
+                <div class="code-block">
+                    <code>{
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }</code>
                     <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 </div>

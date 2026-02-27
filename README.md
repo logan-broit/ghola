@@ -1,6 +1,6 @@
 # Chapterhouse
 
-Persistent agentic memory for AI assistants. Store, search, and recall context across sessions using the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP).
+Context persistence and memory management for AI assistants. Store, search, and recall context across sessions using the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP).
 
 ## What it does
 
@@ -41,14 +41,19 @@ Claude Code / AI Assistant
 
 | Tool | Description |
 |------|-------------|
-| `remember` | Store a memory with optional tags, type, and scope |
+| `remember` | Store a memory with optional tags, type, scope, and session ID |
 | `recall` | Search memories using semantic similarity or keywords |
 | `forget` | Remove a specific memory |
 | `list_memories` | Browse memories with filters |
 | `share_memory` | Change scope between personal and org-wide |
 | `export_memories` | Export memories to JSONL |
+| `list_sessions` | List recent sessions with memory counts and timestamps |
+| `session_summary` | Get a detailed breakdown of a specific session |
+| `session_context` | Load all memories from a session for context resumption |
 
 Memory types: **factual** (standards, configs), **experiential** (lessons learned), **working** (temporary, auto-expires in 7 days)
+
+Session lifecycle: memories can be grouped by session ID, enabling temporal queries ("what were we working on yesterday?") and session resumption ("continue where we left off").
 
 ## Prerequisites
 
