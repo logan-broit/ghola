@@ -2,8 +2,8 @@ apiVersion: v2
 name: ch-web
 description: Chapterhouse Admin Console - vanilla JS web interface
 type: application
-version: 0.5.1
-appVersion: "0.5.1"
+version: 0.5.2
+appVersion: "0.5.2"
 keywords:
   - chapterhouse
   - admin
