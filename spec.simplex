@@ -43,6 +43,25 @@ CONSTRAINT: v01_scope
   driven explicitly through SQL-callable batch functions. The background worker
   is deferred to v0.2.
 
+CONSTRAINT: file_ownership
+  Each task owns specific files. No task may edit another task's primary owned
+  file unless it is the final integration task. This prevents merge conflicts
+  when tasks execute in parallel. Ownership:
+    - bootstrap: Cargo.toml, pg_recall.control, src/lib.rs, empty module stubs
+    - types: src/types.rs
+    - scoring: src/scoring.rs
+    - schema: sql/pg_recall--0.1.0.sql
+    - hebbian: src/hebbian.rs
+    - recall: src/recall.rs
+    - integration: final edits to src/lib.rs, end-to-end tests, README
+
+CONSTRAINT: schema_via_pgrx
+  Tables and indexes are defined using pgrx extension_sql! or
+  extension_sql_file! macros in Rust, not a hand-written SQL install script
+  separate from the crate. The sql/pg_recall--0.1.0.sql file is generated
+  by cargo pgrx schema. Agents must not write raw SQL that bypasses pgrx
+  registration.
+
 ---
 
 DATA: recall_result
@@ -58,7 +77,7 @@ DATA: recall_result
 DATA: score_weights
   semantic:      float, default 0.6, weight for vector cosine similarity
   fts:           float, default 0.4, weight for full-text search rank
-  actr_decay:    float, default 0.5, ACT-R power-law decay exponent
+  actr_decay:    float, default 0.5, ACT-R power-law decay exponent (d parameter)
   hebbian_scale: float, default 4.0, multiplier for Hebbian boost in activation
 
 ---
@@ -76,6 +95,8 @@ FUNCTION: bootstrap_extension_skeleton() -> compiling pgrx project
     - All scoring, recall, and hebbian function signatures are stubbed
     - Project compiles and boots with cargo pgrx run
     - CREATE EXTENSION pg_recall succeeds on the booted instance
+    - Running bootstrap on a workspace with partial files overwrites stubs
+      cleanly without leaving orphaned artifacts
 
   DONE_WHEN:
     - cargo pgrx run boots Postgres with the extension loadable
@@ -83,10 +104,15 @@ FUNCTION: bootstrap_extension_skeleton() -> compiling pgrx project
     - All downstream module files exist in the source tree as compilable stubs
 
   EXAMPLES:
-    greenfield workspace
-      -> compiling pgrx project, cargo pgrx run boots cleanly
+    greenfield workspace with no existing files
+      -> compiling pgrx project, cargo pgrx run boots cleanly,
+         CREATE EXTENSION pg_recall succeeds
+
+    workspace with partial or stale files from a previous attempt
+      -> stubs are overwritten, project compiles cleanly, no orphaned files
+
     CREATE EXTENSION pg_recall on booted instance
-      -> pg_recall schema exists, no errors
+      -> pg_recall schema exists, stub functions visible, no errors
 
   ERRORS:
     - cargo pgrx run fails -> resolve compilation errors before any downstream work
@@ -145,6 +171,8 @@ FUNCTION: implement_scoring_primitives() -> four SQL-callable scoring functions
       base-level activation: B = ln(n+1) - d * ln(max(age_days, 1/1440) / (n+1))
       where n = access_count + 1, d = 0.5, age_days = days since last_access,
       and 1/1440 is the one-minute age floor
+    - actr_activation clamps age_days to at least 1/1440 (one minute) to
+      prevent division by zero for very recent accesses
     - ebbinghaus_decay(last_access timestamptz, access_count int, created_at timestamptz)
       returns retention factor with spacing-aware stability:
       stability = clamp(ln(n+1)*20 * (1 + 0.5*tanh(avg_spacing/7)), 14, 365),
@@ -170,6 +198,8 @@ FUNCTION: implement_scoring_primitives() -> four SQL-callable scoring functions
       -> ~2.08 (frequently accessed, moderate age: high activation)
     actr_activation(0, now() - interval '1400 days')
       -> ~-3.27 (never re-accessed, very old: low activation)
+    actr_activation(5, now() - interval '10 seconds')
+      -> age clamped to 1/1440 days (one-minute floor), high activation from recency
 
     ebbinghaus_decay(now()-'30 days', 50, now()-'180 days')
       -> ~0.78 (50 accesses spaced over 6 months: high stability, slow decay)
@@ -193,8 +223,10 @@ FUNCTION: implement_scoring_primitives() -> four SQL-callable scoring functions
 
 FUNCTION: create_extension_schema() -> tables, indexes, constraints
 
-  Define the SQL install script that CREATE EXTENSION pg_recall executes.
-  Produces the three core tables, all indexes, and all constraints.
+  Define the schema objects that CREATE EXTENSION pg_recall produces. Tables,
+  indexes, and constraints are declared via pgrx extension_sql! or
+  extension_sql_file! macros so they are registered in the extension's
+  generated install script.
 
   RULES:
     - mnemes table: id (uuid PK), workspace_id (uuid NOT NULL),
@@ -244,7 +276,7 @@ FUNCTION: create_extension_schema() -> tables, indexes, constraints
     - project skeleton from bootstrap
 
   WRITES:
-    - SQL install script (pg_recall--0.1.0.sql)
+    - schema SQL via pgrx extension_sql! macros in the schema module
 
 ---
 
@@ -271,14 +303,20 @@ FUNCTION: implement_hebbian_helpers() -> six SQL-callable Hebbian and confidence
     - confirm_recall(mneme_ids uuid[]) applies evidence=0.95 to every
       provided mneme ID via update_confidence
     - process_co_activation_batch(batch_limit int DEFAULT 100) consumes up to
-      batch_limit rows from co_activation_queue: generates all canonical (i,j)
-      pairs where i < j from each event's mneme_ids, aggregates pair signals
-      as sum(score_i * score_j), upserts associations with log-space weight
-      update (new = min(1.0, exp(ln(current) + signal * ln(1.01)))), seeds
-      cold-start associations at 0.01, updates mnemes.access_count and
-      mnemes.last_access for all referenced mnemes, deletes consumed queue
-      rows, and returns the number of rows processed
-    - process_co_activation_batch returns 0 when the queue is empty
+      batch_limit rows from co_activation_queue in a single transaction
+    - Batch processing generates all canonical (i,j) pairs where i < j from
+      each event's mneme_ids array
+    - Batch processing aggregates pair signals across all events in the batch
+      as sum(score_i * score_j) for each unique pair
+    - Batch processing upserts associations with log-space weight update:
+      new_weight = min(1.0, exp(ln(current_weight) + signal * ln(1.01)))
+    - New associations not yet in the table are seeded at weight 0.01
+      before the log-space reinforcement is applied
+    - Batch processing updates mnemes.access_count += 1 and
+      mnemes.last_access = now() for all mneme IDs referenced in the batch
+    - Batch processing deletes consumed queue rows after successful processing
+    - process_co_activation_batch returns the number of queue rows processed,
+      or 0 when the queue is empty
     - process_all_pending_co_activations() repeatedly calls batch processing
       until the queue is drained and returns total rows processed
 
@@ -316,6 +354,8 @@ FUNCTION: implement_hebbian_helpers() -> six SQL-callable Hebbian and confidence
       -> returns 0, no side effects
     process_co_activation_batch(100) with co-activation containing new pair
       -> new association row created with weight seeded at 0.01 then reinforced
+    process_co_activation_batch(100) with co-activation for existing association
+      -> existing weight updated via log-space reinforcement, weight increases
 
     process_all_pending_co_activations() with 250 pending rows
       -> returns 250, queue fully drained across multiple batch cycles
@@ -335,11 +375,18 @@ FUNCTION: implement_hebbian_helpers() -> six SQL-callable Hebbian and confidence
 
 ---
 
-FUNCTION: implement_composite_recall(workspace_id uuid, query_text text, query_embedding vector(384), limit_n int, min_confidence float, weights score_weights) -> SETOF recall_result
+FUNCTION: implement_composite_recall() -> SQL-callable recall function
 
   The primary retrieval entry point. Fuses vector similarity, full-text search,
   ACT-R temporal activation, Hebbian association strength, and Bayesian
   confidence into a single ranked result set.
+
+  The SQL signature is:
+    pg_recall.recall(workspace_id uuid, query_text text,
+      query_embedding vector(384), limit_n int DEFAULT 10,
+      min_confidence float DEFAULT 0.0,
+      weights pg_recall.score_weights DEFAULT NULL)
+    RETURNS SETOF pg_recall.recall_result
 
   RULES:
     - Candidate pool is the union of HNSW nearest neighbors and FTS ts_rank
@@ -348,8 +395,10 @@ FUNCTION: implement_composite_recall(workspace_id uuid, query_text text, query_e
       weights.fts * tanh(fts_rank)
     - Hebbian boost for each candidate is the sum of association weights
       to any other candidate in the current result set
-    - temporal_weight = softplus(actr_activation + weights.hebbian_scale *
-      hebbian_boost) / (1 + softplus(0))
+    - temporal_weight = softplus(actr_activation_value +
+      weights.hebbian_scale * hebbian_boost) / (1 + softplus(0)),
+      where actr_activation_value is computed using weights.actr_decay as
+      the decay exponent d (instead of the hardcoded 0.5 default)
     - Composite score = content_match * temporal_weight * confidence
     - Only mnemes with state='active' and confidence >= min_confidence
       are included in results
@@ -367,11 +416,12 @@ FUNCTION: implement_composite_recall(workspace_id uuid, query_text text, query_e
     - Co-activation event enqueued after each recall
     - Workspace and confidence filtering behave correctly
     - Default weights applied when weights parameter is NULL
+    - Custom actr_decay value changes temporal scoring relative to defaults
 
   EXAMPLES:
     recall('ws1', 'kubernetes pod scheduling', embedding, 10, 0.0, NULL)
       -> up to 10 results ranked by composite score, co-activation event enqueued,
-         default weights used
+         default weights used (semantic=0.6, fts=0.4, actr_decay=0.5, hebbian_scale=4.0)
 
     recall('ws1', 'database migration', embedding, 5, 0.7, NULL)
       -> only mnemes with confidence >= 0.7 included, others excluded even if
@@ -379,6 +429,10 @@ FUNCTION: implement_composite_recall(workspace_id uuid, query_text text, query_e
 
     recall('ws1', 'query', embedding, 10, 0.0, (0.8, 0.2, 0.5, 2.0)::pg_recall.score_weights)
       -> custom weights applied: heavier semantic, lighter FTS, reduced hebbian scale
+
+    recall('ws1', 'query', embedding, 10, 0.0, (0.6, 0.4, 0.8, 4.0)::pg_recall.score_weights)
+      -> actr_decay=0.8 causes faster temporal decay than default 0.5,
+         older mnemes score lower relative to recent ones
 
     recall('ws1', 'nonexistent topic', embedding, 10, 0.0, NULL)
       where no mnemes match at all
