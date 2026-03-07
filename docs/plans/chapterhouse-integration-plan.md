@@ -20,7 +20,8 @@ pg_recall stays clean and reusable. Chapterhouse keeps its mature schema (versio
 
 ### Infrastructure
 
-- **Postgres**: CNPG operator on k3s homelab cluster, custom image with pgvector + pg_recall
+- **Postgres**: CNPG operator on k3s homelab cluster, custom image based on `ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie` with pgvector 0.8.2 + pg_recall
+- **Rust**: 1.94+ stable, pgrx 0.17.x (with `pg18` feature flag)
 - **Embeddings**: Together.ai, BAAI/bge-small-en-v1.5 (384 dimensions)
 - **MCP Server**: Chapterhouse (Go), `final-refactor` branch, streamable HTTP
 
@@ -34,8 +35,8 @@ pg_recall stays clean and reusable. Chapterhouse keeps its mature schema (versio
 
 **Tasks**:
 - Initialize pgrx project with `cargo pgrx init`
-- Configure `Cargo.toml` with pgrx dependency, pgvector interop (`pgvector` crate for Rust)
-- Create `pg_recall.control` file (extension metadata: version 0.1.0, schema pg_recall, requires pgvector)
+- Configure `Cargo.toml` with pgrx 0.17.x dependency, `pg18` feature flag, pgvector interop (`pgvector` crate for Rust)
+- Create `pg_recall.control` file (extension metadata: version 0.1.0, schema pg_recall, requires vector)
 - Create `src/lib.rs` with pgrx extension macro, schema creation, background worker registration
 - Verify: `cargo pgrx run` → connect → `CREATE EXTENSION pg_recall` → schema exists
 
@@ -299,11 +300,11 @@ fn recall(workspace_id, query_text, query_embedding, limit_n, min_confidence, we
 **Tasks**:
 - Finalize `pg_recall.control`: `default_version = '0.1.0'`, `schema = 'pg_recall'`, `requires = 'vector'`
 - Generate or author `sql/pg_recall--0.1.0.sql` migration
-- Create Dockerfile:
+- Create Dockerfile (multi-stage: Rust 1.94+ build stage → PG18.3 runtime):
   ```dockerfile
-  FROM ghcr.io/cloudnative-pg/postgresql:17
-  # Install pgvector
-  # Build and install pg_recall from source (cargo pgrx install)
+  FROM ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie
+  # Install pgvector 0.8.2 from source
+  # Build and install pg_recall from source (cargo pgrx install --pg18)
   ```
 - Test: `CREATE EXTENSION vector; CREATE EXTENSION pg_recall;` → full schema + worker running
 - Build and push image to a registry accessible from the k3s cluster
@@ -675,9 +676,9 @@ func (s *Server) runHebbianWorker(ctx context.Context) {
 **Goal**: Build a Postgres 17 container image with pgvector + pg_recall for CNPG.
 
 **Tasks**:
-- Create Dockerfile based on `ghcr.io/cloudnative-pg/postgresql:17`
-- Install pgvector from source or packages
-- Build and install pg_recall extension (`cargo pgrx install`)
+- Create Dockerfile based on `ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie`
+- Install pgvector 0.8.2 from source (critical: fixes CVE-2026-3172 in parallel HNSW builds)
+- Build and install pg_recall extension (`cargo pgrx install --pg18`)
 - Multi-stage build: Rust build stage → copy .so + .control + .sql into Postgres image
 - Push to a container registry accessible from k3s cluster (local registry or GitHub Packages)
 - Test: `CREATE EXTENSION vector; CREATE EXTENSION pg_recall;`

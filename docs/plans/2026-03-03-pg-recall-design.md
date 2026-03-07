@@ -16,8 +16,9 @@ RULES
   - Depend on pgvector for vector search. Do not reinvent similarity indexing.
   - Pure extension (Approach A): schema, functions, types, and background worker
     all ship as one compiled unit installed via CREATE EXTENSION.
-  - Rust via pgrx. Type safety for the scoring hot path, bgworker support for
-    Hebbian processing.
+  - Rust (1.94+) via pgrx (0.17.x). Type safety for the scoring hot path,
+    bgworker support for Hebbian processing.
+  - Targets PostgreSQL 18.3+ with pgvector 0.8.2+.
   - Multi-tenant via workspace_id column. Works with Postgres RLS out of the box.
   - Every scoring primitive is independently callable. Users can compose custom
     retrieval pipelines from the parts.
@@ -479,8 +480,10 @@ pg_recall/
     recall.rs       -- cognitive_recall composite function
     hebbian.rs      -- background worker
     types.rs        -- recall_result, score_weights custom types
-  Cargo.toml
+  Cargo.toml        -- pgrx 0.17.x, pg18 feature flag
   README.md
+
+Toolchain: Rust 1.94+ stable, pgrx 0.17.x, PostgreSQL 18.3+, pgvector 0.8.2+
 ```
 
 ---
@@ -494,6 +497,18 @@ pg_recall/
 - Association graph traversal function (BFS/DFS with weight thresholds)
 - Configurable vector dimensions (v0.1 hardcodes 384 for bge-small)
 - MCP server layer (separate project, not part of the extension)
+
+---
+
+## Version Requirements
+
+| Dependency | Minimum | Notes |
+|------------|---------|-------|
+| Rust | 1.94+ | Stable toolchain |
+| pgrx | 0.17.x | With `pg18` feature flag |
+| PostgreSQL | 18.3+ | GA since Sept 2025; 18.3 is latest patch |
+| pgvector | 0.8.2+ | Fixes CVE-2026-3172 (parallel HNSW buffer overflow) |
+| CNPG image | `ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie` | Base for custom image |
 
 ---
 
