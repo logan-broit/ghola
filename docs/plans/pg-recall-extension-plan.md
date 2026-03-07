@@ -8,7 +8,7 @@ that ships as `CREATE EXTENSION pg_recall`.
 This plan is optimized for one outcome above all others: **getting work merged
 reliably**.
 
-The previous plan was technically coherent, but it created too many merge
+Previous plans were coherent, but created too many merge
 hotspots:
 
 - `src/lib.rs`
@@ -25,9 +25,6 @@ This version reduces those collisions by:
 - front-loading stubs and extension wiring
 - reserving hotspot edits for one integration task
 - deferring the autonomous background worker to v0.2
-
-Chapterhouse integration, MCP server work, and deployment remain out of scope.
-The extension is the product.
 
 ---
 
