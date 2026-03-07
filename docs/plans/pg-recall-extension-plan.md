@@ -102,6 +102,7 @@ All marked `#[pg_extern(immutable, parallel_safe, schema = "pg_recall")]`.
 - `pg_recall.mnemes` — id (uuid PK), workspace_id (uuid), concept (text), content (text), embedding vector(384), search_vector (generated tsvector), confidence (float, default 0.5), access_count (int), last_access (timestamptz), created_at (timestamptz), state (text, CHECK active/archived/dormant)
 - `pg_recall.associations` — src_id/dst_id (uuid FK, PK), weight (float), co_activations (int), updated_at (timestamptz), CHECK src_id < dst_id
 - `pg_recall.co_activation_queue` — id (bigserial PK), workspace_id (uuid), mneme_ids (uuid[]), scores (float[]), created_at (timestamptz)
+- `pg_recall.worker_state` — id (int PK, CHECK id=1), state (text), queue_depth (bigint), batches_processed (bigint), pairs_updated (bigint), last_batch_at (timestamptz), last_decay_at (timestamptz)
 
 **Indexes**:
 - HNSW on mnemes(embedding) with vector_cosine_ops
@@ -147,22 +148,101 @@ Returns top-n as `SETOF pg_recall.recall_result`. Enqueues co-activation event (
 
 ### 7. Background Worker
 
-**Goal**: pgrx background worker for Hebbian learning.
+**This is the most complex component.** Decomposed into four subtasks to reduce risk.
 
-**Behavior**:
-- Single worker per Postgres instance, starts on extension load
-- Polls `co_activation_queue`, batch size up to 100 rows
-- Per batch: generate (i,j) pairs, aggregate signal = sum(score_i * score_j), update association weights in log-space: `min(1.0, exp(ln(current) + signal * ln(1.01)))`, cold start at 0.01
-- Single transaction: UPDATE associations, DELETE consumed queue rows, UPDATE mnemes access_count + last_access
-- Adaptive polling: active (100ms) -> idle >30s (1s) -> dormant >5min (5s)
-- Hourly decay: `weight *= 0.999` where stale > 1 day, prune below 0.001
-- On shutdown: drain remaining queue
+#### 7a. Worker Skeleton
 
-**`worker_stats() -> record`**: state, queue_depth, batches_processed, pairs_updated, last_batch_at, last_decay_at
+**Goal**: A pgrx background worker that starts on extension load, connects to the database via SPI, and shuts down cleanly. No processing logic yet.
 
-**This is the most complex component.** Integration tests: associations form from co-activation, weights follow log-space formula, decay prunes weak links, access tracking updates.
+- Register bgworker via pgrx `BackgroundWorkerBuilder`
+- Worker starts automatically when the extension is loaded via `shared_preload_libraries`
+- On start: connect to the database via `BackgroundWorker::connect_worker_to_spi()`
+- Run a trivial loop: log a heartbeat every 5 seconds, check for shutdown signal
+- On shutdown signal: log clean exit, return
+- Verify: `cargo pgrx run` with `shared_preload_libraries = 'pg_recall'` -> worker appears in `pg_stat_activity`, logs heartbeat, stops on `pg_ctl stop`
 
-**Dependencies**: Requires 3, 4.
+**Dependencies**: Requires 1, 4 (schema must exist for SPI access).
+
+---
+
+#### 7b. Batch Processing
+
+**Goal**: The worker polls `co_activation_queue` and processes Hebbian weight updates.
+
+- Replace heartbeat loop with queue polling loop (fixed 1s interval for now; adaptive polling comes in 7c)
+- Each cycle:
+  1. `SELECT * FROM pg_recall.co_activation_queue ORDER BY id LIMIT 100` via SPI
+  2. If no rows, continue to next cycle
+  3. Generate all (i, j) pairs from each event's `mneme_ids` (canonical ordering: i < j)
+  4. Aggregate pairs across batch: `signal[i,j] = sum(score_i * score_j)`
+  5. For each pair, UPSERT into `associations`:
+     - If exists: `weight = min(1.0, exp(ln(weight) + signal * ln(1.01)))`
+     - If new (cold start): seed at weight = 0.01, then apply signal
+  6. Single transaction: UPDATE associations, DELETE consumed queue rows by ID, UPDATE mnemes SET `access_count = access_count + 1, last_access = now()` for all mneme_ids in the batch
+- Integration tests:
+  - Insert co-activation events manually, verify associations form
+  - Verify weight updates follow the log-space formula
+  - Verify access_count and last_access are updated on mnemes
+  - Verify consumed queue rows are deleted
+
+**Dependencies**: Requires 7a, 3 (scoring primitives for formula reference).
+
+---
+
+#### 7c. Adaptive Polling and Decay
+
+**Goal**: Add the adaptive polling state machine and hourly decay pass.
+
+**Adaptive polling**:
+- Track time since last non-empty batch
+- Active (processed rows last cycle): poll every 100ms
+- Idle (no rows for >30s): poll every 1s
+- Dormant (no rows for >5min): poll every 5s
+- Any row found resets to Active
+
+**Hourly decay pass**:
+- Track `last_decay_at` timestamp
+- Every hour: `UPDATE pg_recall.associations SET weight = weight * 0.999 WHERE updated_at < now() - interval '1 day'`
+- Prune: `DELETE FROM pg_recall.associations WHERE weight < 0.001`
+
+**Graceful shutdown**:
+- On shutdown signal: drain remaining queue rows (process all pending batches), then exit
+
+- Integration tests:
+  - Verify polling interval changes with activity
+  - Verify decay pass prunes weak associations
+  - Verify shutdown drains the queue
+
+**Dependencies**: Requires 7b.
+
+---
+
+#### 7d. Worker Stats
+
+**Goal**: `worker_stats()` function that exposes background worker state for monitoring.
+
+**Implementation**: Stats table approach (not shared memory). The worker maintains a single row in `pg_recall.worker_state`:
+
+```sql
+CREATE TABLE pg_recall.worker_state (
+    id              int PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    state           text NOT NULL DEFAULT 'starting',
+    queue_depth     bigint NOT NULL DEFAULT 0,
+    batches_processed bigint NOT NULL DEFAULT 0,
+    pairs_updated   bigint NOT NULL DEFAULT 0,
+    last_batch_at   timestamptz,
+    last_decay_at   timestamptz
+);
+```
+
+- Worker UPSERTs this row at the end of each batch cycle
+- `queue_depth` is refreshed each cycle via `SELECT count(*) FROM pg_recall.co_activation_queue`
+- `worker_stats() -> record` is a simple `SELECT * FROM pg_recall.worker_state` wrapper, marked `STABLE`
+- The table is created in Task 4 (schema); this task adds the writes and the function
+
+- Verify: `SELECT * FROM pg_recall.worker_stats()` returns current state after processing events
+
+**Dependencies**: Requires 7a. Can run in parallel with 7b and 7c.
 
 ---
 
@@ -182,16 +262,16 @@ Returns top-n as `SETOF pg_recall.recall_result`. Enqueues co-activation event (
 ## Parallelization
 
 ```
-1. Scaffolding ──┬── 2. Types ─────────────────┐
-                  ├── 3. Scoring Primitives ────┤
-                  └── 4. Schema ────────────────┤
-                                                ├── 5. Recall Function ──┐
-                                                └── 6. Hebbian Ops ─────┤
-                                                                        ├── 7. Background Worker
-                                                                        └── 8. Packaging
+Wave 1:  1. Scaffolding
+Wave 2:  2. Types | 3. Scoring Primitives | 4. Schema
+Wave 3:  5. Recall Function | 6. Hebbian Ops
+Wave 4:  7a. Worker Skeleton
+Wave 5:  7b. Batch Processing | 7d. Worker Stats
+Wave 6:  7c. Adaptive Polling + Decay
+Wave 7:  8. Packaging
 ```
 
-After scaffolding, tasks 2/3/4 are fully independent and can run in parallel. Tasks 5 and 6 can also run in parallel once their shared dependencies land. Task 7 is the critical path item. Task 8 is the final gate.
+After scaffolding, tasks 2/3/4 are fully independent and can run in parallel. Tasks 5 and 6 can also run in parallel once their shared dependencies land. The background worker is decomposed into four subtasks: 7a (skeleton) gates 7b and 7d which can run in parallel, then 7c layers on top. Task 8 is the final gate.
 
 ---
 
