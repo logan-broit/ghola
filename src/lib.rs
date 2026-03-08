@@ -22,6 +22,7 @@ pub mod recall;
 pub mod worker_stats;
 pub mod worker;
 pub mod contradiction;
+pub mod associations;
 
 #[cfg(any(test, feature = "pg_test"))]
 pub mod integration_tests;
