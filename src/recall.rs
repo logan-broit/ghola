@@ -30,7 +30,11 @@ CREATE FUNCTION recall(
     query_embedding vector(768),
     limit_n int DEFAULT 10,
     min_confidence float8 DEFAULT 0.0,
-    weights pg_recall.score_weights DEFAULT NULL
+    weights pg_recall.score_weights DEFAULT NULL,
+    memory_type text DEFAULT NULL,
+    scope text DEFAULT NULL,
+    tags text[] DEFAULT NULL,
+    session_id uuid DEFAULT NULL
 ) RETURNS SETOF pg_recall.recall_result
 LANGUAGE SQL
 STABLE
@@ -42,7 +46,8 @@ AS $$
         COALESCE((weights).semantic, 0.6),
         COALESCE((weights).fts, 0.4),
         COALESCE((weights).actr_decay, 0.5),
-        COALESCE((weights).hebbian_scale, 4.0)
+        COALESCE((weights).hebbian_scale, 4.0),
+        memory_type, scope, tags, session_id
     );
 $$;
 "#,
@@ -71,6 +76,8 @@ struct Candidate {
     age_days: f64,
     cosine_sim: f64,
     fts_rank: f64,
+    memory_type: String,
+    candidate_session_id: Option<String>,
 }
 
 /// Scored candidate ready for output.
@@ -100,6 +107,10 @@ fn recall_inner(
     w_fts: default!(f64, 0.4),
     w_actr_decay: default!(f64, 0.5),
     w_hebbian_scale: default!(f64, 4.0),
+    filter_memory_type: default!(Option<String>, "NULL"),
+    filter_scope: default!(Option<String>, "NULL"),
+    filter_tags: default!(Option<Vec<String>>, "NULL"),
+    filter_session_id: default!(Option<pgrx::Uuid>, "NULL"),
 ) -> TableIterator<
     'static,
     (
@@ -116,6 +127,34 @@ fn recall_inner(
     let pool_size = 3 * limit_n;
     let escaped_text = query_text.replace('\'', "''");
 
+    // Build optional filter clauses
+    let mut extra_filters = String::new();
+    if let Some(ref mt) = filter_memory_type {
+        extra_filters.push_str(&format!(" AND memory_type = '{}'", mt.replace('\'', "''")));
+    }
+    if let Some(ref sc) = filter_scope {
+        extra_filters.push_str(&format!(" AND scope = '{}'", sc.replace('\'', "''")));
+    }
+    if let Some(ref tags) = filter_tags {
+        if !tags.is_empty() {
+            let tag_literals: Vec<String> = tags
+                .iter()
+                .map(|t| format!("'{}'", t.replace('\'', "''")))
+                .collect();
+            extra_filters.push_str(&format!(
+                " AND tags @> ARRAY[{}]::text[]",
+                tag_literals.join(",")
+            ));
+        }
+    }
+    if let Some(ref sid) = filter_session_id {
+        extra_filters.push_str(&format!(" AND session_id = '{sid}'::uuid"));
+    }
+    // Always exclude expired working memories
+    extra_filters.push_str(
+        " AND (expires_at IS NULL OR expires_at > now())"
+    );
+
     // Step 1: Fetch candidate pool — union of HNSW nearest neighbors and FTS matches
     let candidates: Vec<Candidate> = Spi::connect(|client| {
         let query = format!(
@@ -123,11 +162,13 @@ fn recall_inner(
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector(768)))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank \
+                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       memory_type, session_id::text \
                 FROM pg_recall.mnemes \
                 WHERE workspace_id = '{ws}' \
                   AND state = 'active' \
                   AND confidence >= {min_conf} \
+                  {filters} \
                 ORDER BY embedding <=> '{emb}'::vector(768) \
                 LIMIT {pool} \
             ), \
@@ -135,17 +176,19 @@ fn recall_inner(
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector(768)))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank \
+                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       memory_type, session_id::text \
                 FROM pg_recall.mnemes \
                 WHERE workspace_id = '{ws}' \
                   AND state = 'active' \
                   AND confidence >= {min_conf} \
+                  {filters} \
                   AND search_vector @@ plainto_tsquery('english', '{qt}') \
                 ORDER BY ts_rank(search_vector, plainto_tsquery('english', '{qt}')) DESC \
                 LIMIT {pool} \
             ) \
             SELECT DISTINCT ON (id) id, concept, content, confidence, access_count, \
-                   age_days, cosine_sim, fts_rank \
+                   age_days, cosine_sim, fts_rank, memory_type, session_id \
             FROM ( \
                 SELECT * FROM hnsw_candidates \
                 UNION ALL \
@@ -157,6 +200,7 @@ fn recall_inner(
             min_conf = min_confidence,
             min_age = ONE_MINUTE_DAYS,
             pool = pool_size,
+            filters = extra_filters,
         );
 
         let rows = client
@@ -177,12 +221,14 @@ fn recall_inner(
                 age_days: row.get::<f64>(6).expect("err").unwrap_or(ONE_MINUTE_DAYS),
                 cosine_sim: row.get::<f64>(7).expect("err").unwrap_or(0.0),
                 fts_rank: row.get::<f64>(8).expect("err").unwrap_or(0.0),
+                memory_type: row.get::<String>(9).expect("err").unwrap_or("factual".to_string()),
+                candidate_session_id: row.get::<String>(10).expect("err"),
             });
         }
         result
     });
 
-    // Step 2: Fetch Hebbian associations between all candidates in the pool
+    // Step 2: Fetch typed associations between all candidates in the pool
     let candidate_ids: Vec<String> = candidates.iter().map(|c| c.id.to_string()).collect();
 
     let hebbian_boosts: HashMap<String, f64> = if candidates.len() > 1 {
@@ -194,23 +240,38 @@ fn recall_inner(
                 .join(",");
 
             let query = format!(
-                "SELECT src_id, dst_id, weight FROM pg_recall.associations \
+                "SELECT src_id, dst_id, association_type, weight FROM pg_recall.associations \
                  WHERE src_id IN ({ids}) AND dst_id IN ({ids})",
                 ids = id_list,
             );
 
             let rows = client
                 .select(&query, None, &[])
-                .expect("failed to query associations for Hebbian boost");
+                .expect("failed to query associations for boost");
 
             let mut boosts: HashMap<String, f64> = HashMap::new();
             for row in rows {
                 let src: pgrx::Uuid = row.get(1).expect("err").expect("null src_id");
                 let dst: pgrx::Uuid = row.get(2).expect("err").expect("null dst_id");
-                let weight: f64 = row.get(3).expect("err").expect("null weight");
+                let assoc_type: String = row.get::<String>(3).expect("err").expect("null type");
+                let weight: f64 = row.get(4).expect("err").expect("null weight");
 
-                *boosts.entry(src.to_string()).or_insert(0.0) += weight;
-                *boosts.entry(dst.to_string()).or_insert(0.0) += weight;
+                // Type-aware boost scaling:
+                //   hebbian:     full weight (1.0×)
+                //   supports:    moderate boost (0.5×)
+                //   session:     mild boost (0.3×)
+                //   contradicts: negative boost (-0.5×)
+                //   supersedes:  no scoring contribution (archived mnemes excluded)
+                let scaled = match assoc_type.as_str() {
+                    "hebbian" => weight,
+                    "supports" => weight * 0.5,
+                    "session" => weight * 0.3,
+                    "contradicts" => -weight * 0.5,
+                    _ => 0.0, // supersedes and unknown types don't contribute
+                };
+
+                *boosts.entry(src.to_string()).or_insert(0.0) += scaled;
+                *boosts.entry(dst.to_string()).or_insert(0.0) += scaled;
             }
             boosts
         })
@@ -223,15 +284,33 @@ fn recall_inner(
     let softplus_0 = softplus_inner(0.0);
     let normalizer = 1.0 + softplus_0;
 
+    // Session ID for session boost (convert to string for comparison)
+    let session_str = filter_session_id.map(|s| s.to_string());
+
     let mut scored: Vec<ScoredCandidate> = candidates
         .into_iter()
         .map(|c| {
             let content_match = w_semantic * c.cosine_sim + w_fts * c.fts_rank.tanh();
-            let actr_val = actr_activation_inner(c.access_count, c.age_days, w_actr_decay);
-            let heb_boost = hebbian_boosts
+
+            // Type-aware ACT-R decay: working memories decay twice as fast
+            let effective_decay = match c.memory_type.as_str() {
+                "working" => (w_actr_decay * 2.0).min(1.5),
+                _ => w_actr_decay,
+            };
+            let actr_val = actr_activation_inner(c.access_count, c.age_days, effective_decay);
+
+            let mut heb_boost = hebbian_boosts
                 .get(&c.id.to_string())
                 .copied()
                 .unwrap_or(0.0);
+
+            // Session boost: mnemes from the requested session get a mild boost
+            if let Some(ref sid) = session_str {
+                if c.candidate_session_id.as_deref() == Some(sid.as_str()) {
+                    heb_boost += 0.3;
+                }
+            }
+
             let temporal_weight =
                 softplus_inner(actr_val + w_hebbian_scale * heb_boost) / normalizer;
             let score = content_match * temporal_weight * c.confidence;
