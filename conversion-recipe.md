@@ -1,269 +1,179 @@
-# Chapterhouse Air-Gap Conversion
+# Homelab Conversion Plan
 
 ## Context
 
-Chapterhouse currently targets GitHub (ghcr.io) and public internet for builds and deployment. It needs to be converted for the corporate air-gapped environment: Rancher Kubernetes on Oxide compute, Nexus artifact registry at `ats-dev.nexus.switchnet.nv`, and corporate MITM SSL proxy. The runcell project serves as the reference implementation for all patterns. The switch-endura conversion recipe defines the work items.
+Chapterhouse is a memory and context management system for AI coding agents, deployed as an MCP server over streamable HTTP. It was originally built for an air-gapped corporate environment (MITM proxy, private Nexus/Zot registries, Rancher-managed K8s, Istio ingress, ceph-rbd storage).
 
-This is purely build and deployment work — no application code changes.
+This plan converts the `final-refactor` branch — which has the latest application code — to run in a local Homelab environment. This branch will become the new `main` and canonical branch. The old corporate codebase is being retired.
 
-## Files Modified / Created
+### Source Branch
 
-### New Files
-| File | Purpose |
-|------|---------|
-| `VERSION` | Single source of truth for version (`0.1.0`) |
-| `ca-bundle.pem` | Corporate CA certificates (copied from runcell) |
-| `.gitlab-ci.yml` | CI/CD pipeline (test → build → publish → deploy) |
-| `ch-server/charts/ch-server/templates/servicemonitor.yaml` | Prometheus scraping for ch-server metrics |
-| `ch-server/charts/ch-server/templates/NOTES.txt` | Post-install instructions |
-| `ch-web/charts/ch-web/templates/NOTES.txt` | Post-install instructions |
-| `ch-server/charts/ch-server/values-homelab.yaml` | Local K3s overrides |
-| `ch-web/charts/ch-web/values-homelab.yaml` | Local K3s overrides |
+`final-refactor` — contains all latest Go code including:
+- 9 MCP tools (remember, recall, forget, list_memories, share_memory, export_memories, list_sessions, session_summary, session_context)
+- Near-duplicate detection (0.92 cosine similarity threshold)
+- Recall count tracking
+- Client-provided session_id support
+- 8 database migrations (through session_id)
+- Filtered search, RRF hybrid search
 
-### Modified Files
-| File | Changes |
-|------|---------|
-| `Makefile` | Nexus registry, VERSION integration, release target, ch-web push |
-| `ch-server/Dockerfile` | Mandatory CA bundle injection (replace optional `ARG CUSTOM_CA_BUNDLE`) |
-| `ch-web/Dockerfile` | CA bundle injection + bump to golang:1.24-alpine |
-| `ch-server/charts/ch-server/values.yaml` | Nexus registry defaults, imagePullSecrets |
-| `ch-server/charts/ch-server/Chart.yaml` | appVersion from VERSION |
-| `ch-server/charts/ch-server/templates/deployment.yaml` | Security context hardening |
-| `ch-server/charts/ch-server/templates/virtualservice.yaml` | Route updates for ch-web paths |
-| `ch-web/charts/ch-web/values.yaml` | Nexus registry defaults, imagePullSecrets, image helper |
-| `ch-web/charts/ch-web/Chart.yaml` | appVersion from VERSION |
-| `ch-web/charts/ch-web/templates/_helpers.tpl` | Add image helper (matching ch-server pattern) |
-| `ch-web/charts/ch-web/templates/deployment.yaml` | Security context, use image helper |
-| `deploy/examples/memory-db.yaml` | Add `storageClassName: ceph-rbd` |
-| `deploy/examples/qdrant.yaml` | Add `storageClassName: ceph-rbd` |
-| `RUNBOOK.md` | Corporate environment sections |
+### Target Environment
+
+| Property | Value |
+|----------|-------|
+| Cluster | K3s on AMD64 (single node) |
+| Kubeconfig | `~/.kube/sandbox` |
+| Namespace | `ch-system` |
+| Ingress | HAProxy ingress controller |
+| Storage | `local-path` (K3s default) |
+| GitOps | Flux (manages core cluster services) |
+| Registry | `ghcr.io/thinkwright/chapterhouse` |
+| Container runtime | Podman (macOS dev) / containerd (K3s) |
+| PostgreSQL | CNPG operator (already installed) |
+| Vector DB | Qdrant v1.16.0 |
+| Embeddings | Together.ai (`BAAI/bge-base-en-v1.5`, 768 dims) |
+
+### Prior State
+
+A previous homelab deployment exists in the K3s cluster from the `homelab` branch. It will be **completely torn down** before redeploying. This includes:
+- ch-server and ch-web Helm releases
+- CNPG PostgreSQL cluster
+- Qdrant deployment and PVC
+- Any secrets in ch-system namespace
 
 ---
 
-## Work Items
+## What Gets Removed
 
-### 1. VERSION File + CA Bundle
-Create `VERSION` containing `0.1.0`. Copy `ca-bundle.pem` from `../runcell/ca-bundle.pem` (ATL-Palo + LAS-Palo corporate CA certs).
+These files exist only for the corporate air-gapped environment and have no purpose in the homelab:
 
-### 2. Dockerfile — ch-server (`ch-server/Dockerfile`)
-**Current state:** Has optional `ARG CUSTOM_CA_BUNDLE` pattern with conditional copy.
-**Change:** Replace with mandatory `COPY ca-bundle.pem` before any network operations, matching runcell pattern. Remove `ARG CUSTOM_CA_BUNDLE` and conditional logic. Keep existing multi-stage build, `CGO_ENABLED=0`, alpine runtime, non-root user.
+| File | Reason |
+|------|--------|
+| `ca-bundle.pem` (root + ch-server/ + ch-web/) | MITM proxy CA certificates |
+| `.gitlab-ci.yml` | GitLab CI/CD pipeline (no GitLab in homelab) |
+| `VERSION` | CI-driven versioning (replaced by git tags) |
+| `SECURITY_STATEMENT.md` | Corporate compliance document |
+| `ch-server/charts/ch-server/templates/servicemonitor.yaml` | Prometheus ServiceMonitor (no Prometheus stack) |
+| `ch-server/charts/ch-server/templates/NOTES.txt` | Helm post-install notes (corporate-specific) |
+| `ch-web/charts/ch-web/templates/NOTES.txt` | Helm post-install notes (corporate-specific) |
 
-**Critical: CA bundle must be injected before `apk add` in EVERY stage.** The MITM proxy intercepts Alpine package mirror TLS, so even `apk add ca-certificates` will fail without the bundle already appended to the trust store. The pattern is:
+---
 
-```dockerfile
-COPY ca-bundle.pem /usr/local/share/ca-certificates/switch-ca.crt
-RUN cat /usr/local/share/ca-certificates/switch-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
-    && apk add --no-cache git ca-certificates \
-    && update-ca-certificates
-```
+## What Gets Modified
 
-This applies to both the builder stage (golang-alpine) and the runtime stage (alpine). Distroless images (ch-web runtime) don't use apk and are unaffected.
+### Dockerfiles (both)
 
-**Build context:** `ca-bundle.pem` must be present in each component's build context directory (`ch-server/`, `ch-web/`), not just the repo root. The Makefile `server` and `web` targets pass the component directory as context.
+Strip all ca-bundle.pem injection. The build stage just needs `apk add --no-cache git ca-certificates` without the MITM workaround. ch-web Dockerfile stays on distroless runtime. ch-server stays on alpine runtime (needs tzdata).
 
-### 3. Dockerfile — ch-web (`ch-web/Dockerfile`)
-**Current state:** No CA bundle handling. Uses `golang:1.22-alpine`.
-**Change:** Bump to `golang:1.24-alpine`. Add CA bundle injection before `apk add` in builder stage (same `cat >> /etc/ssl/certs` pattern). Keep distroless runtime (no apk needed there).
+### Makefile
 
-### 4. Makefile Overhaul (`Makefile`)
-**Current state:** `REGISTRY = ghcr.io/thinkwright/chapterhouse`, no VERSION integration, missing ch-web push target.
+- Registry: `ghcr.io/thinkwright/chapterhouse`
+- Auto-detect `podman` or `docker`
+- Kubeconfig: `~/.kube/sandbox`
+- Drop VERSION file integration, release target, buildx complexity
+- Simple `build-server`, `build-web`, `push`, `deploy` targets
 
-**Changes:**
-- `REGISTRY ?= ats-dev.nexus.switchnet.nv/chapterhouse`
-- `VERSION = $(shell cat VERSION)`
-- `make server` — build + push ch-server image
-- `make web` — build + push ch-web image
-- `make release VERSION=X.Y.Z` — stamp version in VERSION + all Chart.yaml files, commit, tag
-- `make images` — build + push both
-- `make charts` — package both Helm charts
-- Explicit `--platform linux/amd64` for buildx
-- Reference: `../runcell/Makefile`
+### .gitignore
 
-### 5. Helm — ch-web `_helpers.tpl` Enhancement
-**Current state:** Has name, fullname, labels, selectorLabels, serviceAccountName helpers. Missing image helper.
-**Change:** Add `ch-web.image` helper matching the existing ch-server pattern:
-```
-{{- define "ch-web.image" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.tag -}}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.repository $tag }}
-{{- end }}
-```
+Add: `ca-bundle.pem`, `dist/`, `.mcp.json`, `.env*`
 
-### 6. Helm — Values Files (both charts)
-**ch-server `values.yaml`:**
-- Change `registry: registry.example.com` → `registry: ats-dev.nexus.switchnet.nv`
-- Change `repository: chapterhouse/ch-server` (keep as-is, already correct pattern)
-- Add `imagePullSecrets: [{name: nexus-registry}]`
+### Helm Chart Defaults — ch-server values.yaml
 
-**ch-web `values.yaml`:**
-- Add structured `image:` block with `registry`, `repository`, `tag` (matching ch-server pattern)
-- Add `imagePullSecrets: [{name: nexus-registry}]`
+- `image.registry`: `registry.example.com` (generic default)
+- `database.host`: `memory-db-rw.ch-system.svc`
+- `qdrant.host`: `qdrant.ch-system.svc`
+- `cors.origins`: `"*"` (permissive default for single-user homelab)
+- Drop `DATABASE_SSL_MODE` from configmap template (not needed without TLS to DB)
+- Keep VirtualService template (gated, disabled by default) for portability
+- Remove ServiceMonitor template
 
-**New `values-homelab.yaml` for each chart:**
-- Local registry overrides, reduced resources, no Istio, no imagePullSecrets
+### Helm Chart Defaults — ch-web values.yaml
 
-### 7. Helm — Security Context (ch-web deployment)
-**Current state:** ch-server already has security context. ch-web deployment is missing it.
-**Change:** Add to ch-web `deployment.yaml`:
-```yaml
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 65534
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop: [ALL]
-```
+- `image.registry`: `registry.example.com` (generic default)
+- `image.pullPolicy`: `IfNotPresent`
+- Drop pod security context fields not applicable to distroless
 
-### 8. Helm — VirtualService Update
-**Current state:** ch-server has a `virtualservice.yaml` template (disabled by default).
-**Change:** Update route configuration to include ch-web routing:
-- `/api/*`, `/health`, `/metrics` → ch-server:8080
-- `/*` → ch-web:8080
+### Chart.yaml (both)
 
-### 9. Helm — ServiceMonitor (`ch-server/charts/ch-server/templates/servicemonitor.yaml`)
-New template. Prometheus ServiceMonitor targeting `/metrics` on port 8080. Gated by `serviceMonitor.enabled` in values.yaml (default: true).
+Reset to `version: 0.5.2` / `appVersion: "0.5.2"` matching the current release.
 
-### 10. Helm — NOTES.txt
-Post-install connection instructions for each chart, using template helpers for service names and ports.
+### deploy/examples/
 
-### 11. Helm — Storage Class
-Add `storageClassName: ceph-rbd` to:
-- `deploy/examples/memory-db.yaml` (CNPG cluster storage)
-- `deploy/examples/qdrant.yaml` (PVC)
+- `postgres-cnpg.yaml`: Change `storageClass: ceph-rbd` to `local-path`
+- `qdrant.yaml`: Change `storageClassName: ceph-rbd` to `local-path`
 
-### 12. GitLab CI Pipeline (`.gitlab-ci.yml`)
-**Stages:** `test` → `build` → `publish` → `deploy`
+---
 
-**Key patterns from runcell:**
-- CA bundle injection in every stage's `before_script`
-- Docker-in-Docker with `--insecure-registry=ats-dev.nexus.switchnet.nv`
-- Version from tag (`$CI_COMMIT_TAG`) or commit SHA (`$CI_COMMIT_SHORT_SHA`)
-- `test` stage: `go vet`, `go test`
-- `build` stage: Build both images with buildx `--platform linux/amd64`
-- `publish` stage: Push images to Nexus, package + push Helm charts
-- `deploy` stage: `helm upgrade --install` with kubeconfig from CI variable
-- Manual deploy gate for production
+## What Gets Added
 
-### 13. RUNBOOK Updates
-Add corporate-specific sections:
-- CA bundle requirements and maintenance
-- Nexus registry coordinates (`ats-dev.nexus.switchnet.nv/chapterhouse`)
-- Istio VirtualService routing configuration
-- GitLab CI pipeline usage and variables
-- `ceph-rbd` storage class requirements
-- `nexus-registry` image pull secret setup
+### deploy/homelab/ directory
+
+Environment-specific deployment artifacts for the K3s homelab:
+
+| File | Purpose |
+|------|---------|
+| `deploy/homelab/deploy.sh` | Build, push, deploy script (podman + helm) |
+| `deploy/homelab/ch-server-values.yaml` | Helm value overrides (ghcr.io, Together.ai, reduced resources) |
+| `deploy/homelab/ch-web-values.yaml` | Helm value overrides (ghcr.io, reduced resources) |
+| `deploy/homelab/infra/postgres-cluster.yaml` | CNPG cluster (local-path, homelab-sized) |
+| `deploy/homelab/infra/qdrant.yaml` | Qdrant deployment + PVC + Service (local-path) |
+| `deploy/homelab/infra/ingress.yaml` | HAProxy Ingress routing ch-server + ch-web |
 
 ---
 
 ## Execution Order
 
-| Step | Items | Dependencies |
-|------|-------|-------------|
-| 1 | VERSION file, ca-bundle.pem | — |
-| 2 | Both Dockerfiles (CA injection) | ca-bundle.pem |
-| 3 | Makefile overhaul | VERSION |
-| 4 | Helm _helpers.tpl, values, security contexts, storage class | — |
-| 5 | Helm VirtualService, ServiceMonitor, NOTES.txt, env values | — |
-| 6 | GitLab CI pipeline | Makefile, VERSION, Dockerfiles |
-| 7 | RUNBOOK updates | All above |
+### Phase 1: Clean up corporate artifacts
+1. Delete `ca-bundle.pem` (root, ch-server/, ch-web/)
+2. Delete `.gitlab-ci.yml`, `VERSION`, `SECURITY_STATEMENT.md`
+3. Delete `servicemonitor.yaml`, `NOTES.txt` templates
+4. Update `.gitignore`
 
-Steps 1-5 are largely parallelizable. Step 6 depends on 1-3. Step 7 is last.
+### Phase 2: Update build system
+5. Rewrite ch-server/Dockerfile (strip CA injection)
+6. Rewrite ch-web/Dockerfile (strip CA injection)
+7. Rewrite Makefile (ghcr.io, podman/docker detect)
 
-## Verification
+### Phase 3: Update Helm charts
+8. Update ch-server values.yaml (registry, service names, CORS)
+9. Update ch-web values.yaml (registry, pullPolicy)
+10. Update both Chart.yaml files
+11. Remove DATABASE_SSL_MODE from configmap template
 
-1. **Dockerfiles:** `docker build --platform linux/amd64 -f ch-server/Dockerfile .` and `docker build --platform linux/amd64 -f ch-web/Dockerfile .` — both must succeed with CA bundle in place
-2. **Makefile:** `make server`, `make web`, `make charts` — verify correct registry/tags
-3. **Helm lint:** `helm lint ch-server/charts/ch-server` and `helm lint ch-web/charts/ch-web`
-4. **Helm template:** `helm template test ch-server/charts/ch-server` — verify security contexts, imagePullSecrets, image coordinates, ServiceMonitor, VirtualService
-5. **GitLab CI:** Validate YAML syntax with `gitlab-ci-lint` or manual review
-6. **Version flow:** `make release VERSION=0.1.0` — verify VERSION file, Chart.yaml appVersion, git tag all updated
+### Phase 4: Add homelab deployment config
+12. Create deploy/homelab/ directory structure
+13. Write deploy.sh script
+14. Write ch-server-values.yaml and ch-web-values.yaml overrides
+15. Write infra/ manifests (postgres, qdrant, ingress)
+16. Update deploy/examples/ storage classes
 
----
-
-## Deployment Status (ovas-ai-prod)
-
-Deployed 2026-02-24 to the `ovas-ai-prod` cluster.
-
-### Cluster Details
-
-| Property | Value |
-|----------|-------|
-| Kubeconfig | `~/.kube/ovas-ai-prod.yaml` |
-| Namespace | `ch-system` |
-| Hostname | `chapterhouse.switchcraft.pd.internal` |
-| Gateway | `istio-ingress/switch-wildcard-ingress` |
-| StorageClass | `ceph-rbd` (default) |
-| Image version | `0.1.0` |
-
-### Components
-
-| Component | Image | Status |
-|-----------|-------|--------|
-| ch-server | `ats-dev.nexus.switchnet.nv/chapterhouse/ch-server:0.1.0` | Running |
-| ch-web | `ats-dev.nexus.switchnet.nv/chapterhouse/ch-web:0.1.0` | Running |
-| PostgreSQL (CNPG) | `memory-db` cluster, 1 instance | Healthy |
-| Qdrant | Single instance, `ceph-rbd` PVC | Running |
-
-### Verified Endpoints
-
-| Endpoint | Result |
-|----------|--------|
-| `/health` | `{"status":"ok"}` |
-| `/ready` | `{"status":"ok","checks":{"database":"healthy","qdrant":"healthy"}}` |
-| `/` (landing page) | Serving HTML |
-| `/admin/login` | Serving HTML |
-| `/mcp/stateless` | Auth enforced (401 without key) |
-| Admin login | Session cookie working |
-
-### Deployment Commands Used
-
-```bash
-export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
-
-# Namespace + pull secret
-kubectl create namespace ch-system
-# nexus-registry secret copied from runcell-system
-
-# Infrastructure
-kubectl apply -f deploy/examples/postgres-cnpg.yaml
-kubectl apply -f deploy/examples/qdrant.yaml
-
-# Secrets
-kubectl create secret generic ch-admin-bootstrap -n ch-system \
-  --from-literal=ADMIN_USERNAME=admin \
-  --from-literal=ADMIN_PASSWORD="$(openssl rand -base64 16)"
-
-# Migrations (all 6 files + privilege grants)
-
-# Build + push images
-docker login ats-dev.nexus.switchnet.nv
-make server
-make web
-
-# Helm deploys
-helm upgrade --install ch-server ch-server/charts/ch-server \
-  --namespace ch-system \
-  --set image.tag=0.1.0 \
-  --set virtualService.enabled=true \
-  --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
-  --set virtualService.host=chapterhouse.switchcraft.pd.internal
-
-helm upgrade --install ch-web ch-web/charts/ch-web \
-  --namespace ch-system \
-  --set image.tag=0.1.0
-```
-
-### Lessons Learned
-
-1. **CA bundle before `apk add`**: The MITM proxy intercepts Alpine mirror TLS. `cat ca-bundle.pem >> /etc/ssl/certs/ca-certificates.crt` must happen before any `apk add`, including `apk add ca-certificates` itself. This affects every Dockerfile stage that uses Alpine.
-
-2. **Build context copies**: `ca-bundle.pem` must exist in each component's build context directory (`ch-server/`, `ch-web/`), not just the repo root. The Makefile passes component directories as Docker build context.
-
-3. **CNPG auto-creates `-app` secret**: CNPG creates `memory-db-app` secret automatically from the bootstrap credentials. The ch-server chart references this via `database.existingSecret: memory-db-app`.
-
-4. **Istio gateway discovery**: The wildcard gateway at `istio-ingress/switch-wildcard-ingress` accepts `*.switchcraft.pd.internal` and `*.aidt.pd.internal`. This was discovered by inspecting the existing runcell deployment.
+### Phase 5: Clean up old cluster and deploy
+17. Tear down existing ch-system resources in K3s
+18. Deploy infrastructure (CNPG, Qdrant)
+19. Create secrets (admin bootstrap, embedding API key, ghcr pull secret, DB credentials)
+20. Run database migrations
+21. Build and push images
+22. Helm install ch-server and ch-web
+23. Verify endpoints
 
 ---
 
-*Generated with [Claude Code](https://claude.com/claude-code) — 2026-02-24*
+## Verification Checklist
+
+- [ ] `podman build` succeeds for both images (no ca-bundle references)
+- [ ] `helm lint` passes for both charts
+- [ ] `helm template` renders correct image refs, configmap, secrets
+- [ ] Images push to ghcr.io successfully
+- [ ] CNPG cluster comes up healthy on local-path storage
+- [ ] Qdrant pod running with local-path PVC
+- [ ] ch-server /health and /ready return OK
+- [ ] MCP stateless endpoint responds (401 without key, 200 with key)
+- [ ] ch-web admin console loads through HAProxy ingress
+- [ ] Remember/recall cycle works end-to-end through MCP
+
+---
+
+## Notes
+
+- **No Go code changes.** This is purely build, config, and deployment work. The application code on `final-refactor` is the canonical version.
+- **Flux manages core services** in this cluster but Chapterhouse will be deployed manually via Helm for now. It can be added to Flux later.
+- **The homelab branch** (origin/homelab) was a prior conversion of an older codebase. Its infrastructure patterns were referenced but the Go code from that branch is not used.

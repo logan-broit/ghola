@@ -1,0 +1,63 @@
+# Homelab overrides for ch-server
+# Usage: helm upgrade --install ch-server ch-server/charts/ch-server -n ch-system -f deploy/homelab/ch-server-values.yaml
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: thinkwright/chapterhouse/ch-server
+  tag: latest
+  pullPolicy: Always
+
+# Homelab-sized resources
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+config:
+  environment: homelab
+  logLevel: debug
+
+database:
+  host: memory-db-rw.ch-system.svc
+  port: 5432
+  name: memories
+  maxConns: 10
+  minConns: 2
+  existingSecret: memory-db-app
+  usernameKey: username
+  passwordKey: password
+
+qdrant:
+  host: qdrant.ch-system.svc
+  grpcPort: 6334
+  httpPort: 6333
+  collection: memories
+
+embedding:
+  provider: openai
+  url: "https://api.together.xyz"
+  model: BAAI/bge-base-en-v1.5
+  dimensions: 768
+  existingSecret: together-api-key
+  secretKey: TOGETHER_API_KEY
+
+auth:
+  provider: default
+  defaultUser: "00000000-0000-0000-0000-000000000001"
+
+admin:
+  enabled: true
+  existingSecret: ch-admin-bootstrap
+  usernameKey: ADMIN_USERNAME
+  passwordKey: ADMIN_PASSWORD
+
+autoscaling:
+  enabled: false
