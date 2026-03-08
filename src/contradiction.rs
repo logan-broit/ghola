@@ -305,6 +305,21 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
                     &[],
                 )
                 .expect("failed to weaken association");
+
+            // Create a 'contradicts' association (directional: newer → older)
+            client
+                .update(
+                    &format!(
+                        "INSERT INTO pg_recall.associations \
+                         (src_id, dst_id, association_type, weight, co_activations, updated_at) \
+                         VALUES ('{mneme_a}'::uuid, '{mneme_b}'::uuid, 'contradicts', 1.0, 1, now()) \
+                         ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
+                             weight = 1.0, updated_at = now()"
+                    ),
+                    None,
+                    &[],
+                )
+                .expect("failed to create contradicts association");
         }
 
         // Update candidate status
@@ -817,16 +832,43 @@ mod tests {
             "SELECT pg_recall.resolve_contradiction({candidate_id}, 'confirmed')"
         )).expect("resolve failed");
 
-        // Association weight should be weakened to 0.08 (0.8 * 0.1)
+        // Hebbian association weight should be weakened to 0.08 (0.8 * 0.1)
         let weight = Spi::get_one::<f64>(
-            "SELECT weight FROM pg_recall.associations LIMIT 1",
+            "SELECT weight FROM pg_recall.associations WHERE association_type = 'hebbian' LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
 
         assert!(
             (weight - 0.08).abs() < 0.01,
-            "association should be weakened to ~0.08, got {weight}"
+            "hebbian association should be weakened to ~0.08, got {weight}"
+        );
+
+        // A 'contradicts' association should also be created (newer → older)
+        let contradicts_count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.associations \
+             WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
+               AND association_type = 'contradicts'"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(
+            contradicts_count, 1,
+            "confirmed contradiction should create a 'contradicts' association"
+        );
+
+        let contradicts_weight = Spi::get_one::<f64>(&format!(
+            "SELECT weight FROM pg_recall.associations \
+             WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
+               AND association_type = 'contradicts'"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert!(
+            (contradicts_weight - 1.0).abs() < 0.001,
+            "contradicts association should have weight 1.0, got {contradicts_weight}"
         );
     }
 
