@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "pg_recall"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "pgrx",
  "pgrx-tests",
