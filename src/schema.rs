@@ -30,7 +30,16 @@ CREATE TABLE mnemes (
     last_access     timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
     state           text NOT NULL DEFAULT 'active'
-        CHECK (state IN ('active', 'archived', 'dormant'))
+        CHECK (state IN ('active', 'archived', 'dormant')),
+    memory_type     text NOT NULL DEFAULT 'factual'
+        CHECK (memory_type IN ('factual', 'experiential', 'working')),
+    scope           text NOT NULL DEFAULT 'personal'
+        CHECK (scope IN ('personal', 'org')),
+    tier            text NOT NULL DEFAULT 'index'
+        CHECK (tier IN ('core', 'index', 'state')),
+    tags            text[] NOT NULL DEFAULT '{}',
+    session_id      uuid,
+    expires_at      timestamptz
 );
 "#,
     name = "create_mnemes_table",
@@ -166,6 +175,22 @@ CREATE INDEX associations_dst_src_idx
 -- B-tree index for pending contradiction lookups by workspace
 CREATE INDEX contradiction_candidates_workspace_idx
     ON contradiction_candidates (workspace_id, status);
+
+-- B-tree index for memory_type filtering within a workspace
+CREATE INDEX mnemes_memory_type_idx
+    ON mnemes (workspace_id, memory_type);
+
+-- B-tree index for session-based lookups
+CREATE INDEX mnemes_session_id_idx
+    ON mnemes (session_id) WHERE session_id IS NOT NULL;
+
+-- GIN index for tag-based filtering
+CREATE INDEX mnemes_tags_idx
+    ON mnemes USING gin (tags);
+
+-- B-tree index for working memory expiration
+CREATE INDEX mnemes_expires_at_idx
+    ON mnemes (expires_at) WHERE expires_at IS NOT NULL;
 "#,
     name = "create_indexes",
     requires = ["create_mnemes_table", "create_associations_table", "create_contradiction_candidates_table"],
@@ -399,12 +424,16 @@ mod tests {
 
     #[pg_test]
     fn test_indexes_exist() {
-        // Verify all four indexes are present
+        // Verify all indexes are present
         let indexes = vec![
             "mnemes_embedding_hnsw_idx",
             "mnemes_search_vector_gin_idx",
             "mnemes_workspace_last_access_idx",
             "associations_dst_src_idx",
+            "mnemes_memory_type_idx",
+            "mnemes_session_id_idx",
+            "mnemes_tags_idx",
+            "mnemes_expires_at_idx",
         ];
         for idx_name in indexes {
             let count = Spi::get_one::<i64>(&format!(
@@ -435,15 +464,16 @@ mod tests {
         ))
         .expect("insert should succeed");
 
-        // Check defaults
+        // Check defaults including v0.4 typed columns
         let row = Spi::get_one::<String>(
-            "SELECT concat(confidence::text, '|', access_count::text, '|', state)
+            "SELECT concat(confidence::text, '|', access_count::text, '|', state, \
+                           '|', memory_type, '|', scope, '|', tier)
              FROM pg_recall.mnemes WHERE concept = 'test'",
         )
         .expect("query failed")
         .expect("null result");
 
-        assert_eq!(row, "0.5|0|active", "defaults should be confidence=0.5, access_count=0, state='active'");
+        assert_eq!(row, "0.5|0|active|factual|personal|index", "defaults should match");
     }
 
     #[pg_test]
@@ -503,5 +533,127 @@ mod tests {
         .expect("null");
 
         assert_eq!(count, 0, "association should be cascade-deleted when mneme is deleted");
+    }
+
+    // ── v0.4 typed column tests ──
+
+    #[pg_test]
+    #[should_panic(expected = "violates check constraint")]
+    fn test_memory_type_check_invalid() {
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding, memory_type)
+             VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
+        ))
+        .expect("should have failed");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "violates check constraint")]
+    fn test_scope_check_invalid() {
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding, scope)
+             VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
+        ))
+        .expect("should have failed");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "violates check constraint")]
+    fn test_tier_check_invalid() {
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding, tier)
+             VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
+        ))
+        .expect("should have failed");
+    }
+
+    #[pg_test]
+    fn test_typed_columns_accept_valid_values() {
+        let emb = zero_embedding_literal();
+        // All valid combinations
+        for (mtype, scope, tier) in &[
+            ("factual", "personal", "core"),
+            ("experiential", "org", "index"),
+            ("working", "personal", "state"),
+        ] {
+            Spi::run(&format!(
+                "INSERT INTO pg_recall.mnemes \
+                 (workspace_id, concept, content, embedding, memory_type, scope, tier) \
+                 VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, \
+                         '{mtype}', '{scope}', '{tier}')"
+            ))
+            .unwrap_or_else(|_| panic!("should accept {mtype}/{scope}/{tier}"));
+        }
+    }
+
+    #[pg_test]
+    fn test_tags_and_session_id() {
+        let emb = zero_embedding_literal();
+        let sid = "00000000-0000-0000-0000-000000000099";
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding, tags, session_id) \
+             VALUES (gen_random_uuid(), 'tagged', 'content', '{emb}'::vector, \
+                     ARRAY['rust', 'async']::text[], '{sid}'::uuid)"
+        ))
+        .expect("insert with tags and session_id should succeed");
+
+        let tag_count = Spi::get_one::<i32>(
+            "SELECT array_length(tags, 1) FROM pg_recall.mnemes WHERE concept = 'tagged'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(tag_count, 2, "should have 2 tags");
+    }
+
+    #[pg_test]
+    fn test_expires_at_column() {
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding, memory_type, expires_at) \
+             VALUES (gen_random_uuid(), 'ephemeral', 'temp content', '{emb}'::vector, \
+                     'working', now() + interval '1 hour')"
+        ))
+        .expect("insert with expires_at should succeed");
+
+        let has_expiry = Spi::get_one::<bool>(
+            "SELECT expires_at IS NOT NULL FROM pg_recall.mnemes WHERE concept = 'ephemeral'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert!(has_expiry, "expires_at should be set");
+    }
+
+    #[pg_test]
+    fn test_typed_indexes_exist() {
+        let indexes = vec![
+            "mnemes_memory_type_idx",
+            "mnemes_session_id_idx",
+            "mnemes_tags_idx",
+            "mnemes_expires_at_idx",
+        ];
+        for idx_name in indexes {
+            let count = Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM pg_indexes
+                 WHERE schemaname = 'pg_recall' AND indexname = '{idx_name}'"
+            ))
+            .expect("query failed")
+            .expect("null result");
+            assert_eq!(count, 1, "index {idx_name} should exist");
+        }
+    }
+
+    #[pg_test]
+    fn test_config_table_has_default_dims() {
+        let dims = Spi::get_one::<String>(
+            "SELECT value FROM pg_recall.config WHERE key = 'embedding_dims'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(dims, "768", "default embedding_dims should be 768");
     }
 }
