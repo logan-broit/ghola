@@ -89,6 +89,7 @@ pub struct StatsAccumulator {
     pub pairs_updated: i64,
     pub last_decay_at: Option<Instant>,
     pub last_archival_at: Option<Instant>,
+    pub last_expiration_at: Option<Instant>,
 }
 
 impl StatsAccumulator {
@@ -99,6 +100,7 @@ impl StatsAccumulator {
             pairs_updated: 0,
             last_decay_at: None,
             last_archival_at: None,
+            last_expiration_at: None,
         }
     }
 
@@ -116,6 +118,7 @@ impl StatsAccumulator {
 
 const DECAY_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const ARCHIVAL_INTERVAL: Duration = Duration::from_secs(21600); // 6 hours
+const EXPIRATION_INTERVAL: Duration = Duration::from_secs(600); // 10 minutes
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run association decay and pruning (called inside a transaction).
@@ -164,6 +167,52 @@ fn run_archival() {
     if archived > 0 {
         log!(
             "pg_recall worker: archived {archived} dormant memories"
+        );
+    }
+}
+
+/// Archive expired working memories (called inside a transaction).
+fn run_working_memory_expiration() {
+    let expired = Spi::get_one::<i64>(
+        "WITH updated AS ( \
+             UPDATE pg_recall.mnemes \
+             SET state = 'dormant' \
+             WHERE memory_type = 'working' \
+               AND state = 'active' \
+               AND expires_at IS NOT NULL \
+               AND expires_at < now() \
+             RETURNING 1 \
+         ) SELECT count(*) FROM updated",
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if expired > 0 {
+        log!(
+            "pg_recall worker: archived {expired} expired working memories"
+        );
+    }
+}
+
+/// Archive stale state-tier mnemes (called inside a transaction).
+/// State mnemes older than 24 hours with no recent access are archived.
+fn run_state_cleanup() {
+    let cleaned = Spi::get_one::<i64>(
+        "WITH updated AS ( \
+             UPDATE pg_recall.mnemes \
+             SET state = 'dormant' \
+             WHERE tier = 'state' \
+               AND state = 'active' \
+               AND last_access < now() - interval '24 hours' \
+             RETURNING 1 \
+         ) SELECT count(*) FROM updated",
+    )
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if cleaned > 0 {
+        log!(
+            "pg_recall worker: archived {cleaned} stale state-tier mnemes"
         );
     }
 }
@@ -333,8 +382,21 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
         if should_archive {
             BackgroundWorker::transaction(|| {
                 run_archival();
+                run_state_cleanup();
             });
             stats.last_archival_at = Some(Instant::now());
+        }
+
+        // Working memory expiration (every 10 minutes)
+        let should_expire = match stats.last_expiration_at {
+            None => true,
+            Some(last) => last.elapsed() >= EXPIRATION_INTERVAL,
+        };
+        if should_expire {
+            BackgroundWorker::transaction(|| {
+                run_working_memory_expiration();
+            });
+            stats.last_expiration_at = Some(Instant::now());
         }
 
         // Update stats row
