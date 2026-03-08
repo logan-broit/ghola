@@ -295,6 +295,7 @@ fn drain_via_transactions() -> i64 {
 // ---------------------------------------------------------------------------
 
 #[pg_guard]
+#[no_mangle]
 pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     // Attach signal handlers for SIGHUP (config reload) and SIGTERM (shutdown)
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
