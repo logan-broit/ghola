@@ -1,0 +1,7 @@
+comment = 'pg_recall: Cognitive Memory Primitives for Postgres'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_recall'
+relocatable = false
+superuser = true
+schema = 'pg_recall'
+requires = 'vector'
