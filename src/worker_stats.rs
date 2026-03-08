@@ -29,7 +29,7 @@ CREATE TABLE worker_stats (
 );
 
 -- Seed the singleton row so get_worker_stats() never returns empty
-INSERT INTO worker_stats (id) VALUES (1);
+INSERT INTO @extschema@.worker_stats (id) VALUES (1);
 "#,
     name = "create_worker_stats_table",
 );
@@ -63,7 +63,7 @@ CREATE TYPE worker_status AS (
 extension_sql!(
     r#"
 CREATE OR REPLACE FUNCTION get_worker_stats()
-RETURNS worker_status
+RETURNS @extschema@.worker_status
 LANGUAGE sql STABLE
 AS $$
     SELECT
@@ -77,7 +77,7 @@ AS $$
         poll_interval_ms,
         started_at,
         EXTRACT(EPOCH FROM (now() - started_at))::float8 AS uptime_seconds
-    FROM worker_stats
+    FROM @extschema@.worker_stats
     WHERE id = 1;
 $$;
 "#,
@@ -117,12 +117,13 @@ mod tests {
     }
 
     #[pg_test]
+    #[should_panic(expected = "violates check constraint")]
     fn test_worker_stats_singleton_enforced() {
         // Attempting to insert a second row should fail
-        let result = Spi::run(
+        Spi::run(
             "INSERT INTO pg_recall.worker_stats (id) VALUES (2)",
-        );
-        assert!(result.is_err(), "inserting id=2 should violate CHECK constraint");
+        )
+        .expect("should have failed");
     }
 
     #[pg_test]
