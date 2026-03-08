@@ -1,18 +1,18 @@
 replicaCount: 1
 
-# -- Image pull secrets (Zot allows anonymous read; only needed if anonymous read is disabled)
+# -- Image pull secrets for private registries
 imagePullSecrets: []
 
 # Image configuration
 image:
   # -- Container registry
-  registry: registry.switchcraft.pd.internal
+  registry: registry.example.com
   # -- Image repository
   repository: chapterhouse/ch-web
   # -- Image tag (defaults to Chart appVersion)
   tag: ""
   # -- Image pull policy
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 # -- Override the name of the chart
 nameOverride: ""

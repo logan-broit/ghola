@@ -7,7 +7,7 @@ replicaCount: 1
 # Image configuration
 image:
   # -- Container registry
-  registry: registry.switchcraft.pd.internal
+  registry: registry.example.com
   # -- Image repository
   repository: chapterhouse/ch-server
   # -- Image tag (defaults to Chart appVersion)
@@ -15,7 +15,7 @@ image:
   # -- Image pull policy
   pullPolicy: Always
 
-# -- Image pull secrets (Zot allows anonymous read; only needed if anonymous read is disabled)
+# -- Image pull secrets for private registries
 imagePullSecrets: []
 
 # -- Override the name of the chart
@@ -125,7 +125,7 @@ server:
 # Database configuration
 database:
   # -- Database host (CNPG service name)
-  host: chapterhouse-db-rw.ch-system.svc
+  host: memory-db-rw.ch-system.svc
   # -- Database port
   port: 5432
   # -- Database name
@@ -135,7 +135,7 @@ database:
   # -- Minimum connections
   minConns: 5
   # -- Name of the secret containing database credentials (created by CNPG)
-  existingSecret: chapterhouse-db-app
+  existingSecret: memory-db-app
   # -- Key in secret for username
   usernameKey: username
   # -- Key in secret for password
@@ -144,7 +144,7 @@ database:
 # Qdrant vector database configuration
 qdrant:
   # -- Qdrant host
-  host: chapterhouse-qdrant.ch-system.svc
+  host: qdrant.ch-system.svc
   # -- Qdrant gRPC port
   grpcPort: 6334
   # -- Qdrant HTTP port
@@ -165,7 +165,7 @@ embedding:
   # -- API key for the embedding provider
   apiKey: ""
   # -- Name of existing secret containing the API key (alternative to apiKey)
-  existingSecret: chapterhouse-embedding
+  existingSecret: ""
   # -- Key in the existing secret
   secretKey: EMBEDDING_API_KEY
 
@@ -189,8 +189,8 @@ admin:
 
 # CORS configuration
 cors:
-  # -- Allowed origins (comma-separated, empty = no cross-origin allowed)
-  origins: ""
+  # -- Allowed origins (comma-separated)
+  origins: "*"
 
 # =============================================================================
 # Ingress Configuration
@@ -236,14 +236,3 @@ initContainer:
   # -- Enable init container for Qdrant collection setup
   enabled: false
 
-# =============================================================================
-# Prometheus ServiceMonitor Configuration
-# =============================================================================
-
-serviceMonitor:
-  # -- Enable ServiceMonitor for Prometheus scraping
-  enabled: true
-  # -- Scrape interval
-  interval: 30s
-  # -- Metrics path
-  path: /metrics

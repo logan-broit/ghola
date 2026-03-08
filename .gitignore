@@ -1,5 +1,5 @@
-# Reference architecture (not part of this project)
-runcell/
+# CA bundles (corporate MITM proxy artifacts — not needed in homelab)
+ca-bundle.pem
 
 # Binaries
 *.exe

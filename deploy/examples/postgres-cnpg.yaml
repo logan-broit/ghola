@@ -28,5 +28,5 @@ spec:
       postInitSQL:
         - CREATE EXTENSION IF NOT EXISTS pg_trgm;
   storage:
-    storageClass: ceph-rbd
+    storageClass: local-path
     size: 5Gi
