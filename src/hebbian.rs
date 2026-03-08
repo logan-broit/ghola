@@ -263,11 +263,11 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
             client
                 .update(
                     &format!(
-                        "INSERT INTO pg_recall.associations (src_id, dst_id, weight, co_activations, updated_at) \
-                         VALUES ('{src}', '{dst}', \
+                        "INSERT INTO pg_recall.associations (src_id, dst_id, association_type, weight, co_activations, updated_at) \
+                         VALUES ('{src}', '{dst}', 'hebbian', \
                              LEAST(1.0, EXP(LN(0.01) + {signal} * LN(1.01))), \
                              1, now()) \
-                         ON CONFLICT (src_id, dst_id) DO UPDATE SET \
+                         ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
                              weight = LEAST(1.0, EXP(LN(pg_recall.associations.weight) + {signal} * LN(1.01))), \
                              co_activations = pg_recall.associations.co_activations + 1, \
                              updated_at = now()"

@@ -291,14 +291,15 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
             }
 
             // Weaken any Hebbian association between the pair (weight *= 0.1)
-            // Handle both orderings since associations use canonical src < dst
+            // Handle both orderings since hebbian associations use canonical src < dst
             client
                 .update(
                     &format!(
                         "UPDATE pg_recall.associations \
                          SET weight = weight * 0.1, updated_at = now() \
                          WHERE (src_id = LEAST('{mneme_a}'::uuid, '{mneme_b}'::uuid) \
-                            AND dst_id = GREATEST('{mneme_a}'::uuid, '{mneme_b}'::uuid))"
+                            AND dst_id = GREATEST('{mneme_a}'::uuid, '{mneme_b}'::uuid) \
+                            AND association_type = 'hebbian')"
                     ),
                     None,
                     &[],

@@ -47,15 +47,18 @@ CREATE TABLE mnemes (
 
 extension_sql!(
     r#"
--- associations: Hebbian links between mnemes (canonical ordering src < dst)
+-- associations: typed links between mnemes
+-- Undirected types (hebbian, session): canonical ordering maintained by convention (src < dst)
+-- Directed types (contradicts, supersedes, supports): src is subject, dst is object
 CREATE TABLE associations (
-    src_id          uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
-    dst_id          uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
-    weight          double precision NOT NULL DEFAULT 0.01,
-    co_activations  integer NOT NULL DEFAULT 0,
-    updated_at      timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (src_id, dst_id),
-    CHECK (src_id < dst_id)
+    src_id              uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
+    dst_id              uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
+    association_type    text NOT NULL DEFAULT 'hebbian'
+        CHECK (association_type IN ('hebbian', 'contradicts', 'supersedes', 'supports', 'session')),
+    weight              double precision NOT NULL DEFAULT 0.01,
+    co_activations      integer NOT NULL DEFAULT 0,
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (src_id, dst_id, association_type)
 );
 "#,
     name = "create_associations_table",
@@ -381,29 +384,7 @@ mod tests {
     }
 
     #[pg_test]
-    #[should_panic(expected = "violates check constraint")]
-    fn test_associations_check_src_lt_dst() {
-        let emb = zero_embedding_literal();
-        // Insert two mnemes with known UUIDs where id_a > id_b
-        let id_a = "ffffffff-ffff-ffff-ffff-ffffffffffff";
-        let id_b = "00000000-0000-0000-0000-000000000001";
-        Spi::run(&format!(
-            "INSERT INTO pg_recall.mnemes (id, workspace_id, concept, content, embedding)
-             VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'a content', '{emb}'::vector),
-                    ('{id_b}'::uuid, gen_random_uuid(), 'b', 'b content', '{emb}'::vector)"
-        ))
-        .expect("inserting mnemes should succeed");
-
-        // Try to insert association with src_id > dst_id — should fail
-        Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id)
-             VALUES ('{id_a}'::uuid, '{id_b}'::uuid)"
-        ))
-        .expect("should have failed with CHECK violation");
-    }
-
-    #[pg_test]
-    fn test_associations_valid_insert() {
+    fn test_associations_typed_insert() {
         let emb = zero_embedding_literal();
         let id_a = "00000000-0000-0000-0000-000000000001";
         let id_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
@@ -414,12 +395,65 @@ mod tests {
         ))
         .expect("inserting mnemes should succeed");
 
-        // src_id < dst_id — should succeed
+        // Same pair can have multiple association types
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id)
-             VALUES ('{id_a}'::uuid, '{id_b}'::uuid)"
+            "INSERT INTO pg_recall.associations (src_id, dst_id, association_type)
+             VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 'hebbian')"
         ))
-        .expect("inserting association with src < dst should succeed");
+        .expect("hebbian association should succeed");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, association_type)
+             VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 'supports')"
+        ))
+        .expect("supports association for same pair should succeed");
+
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_recall.associations"
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(count, 2, "same pair should have 2 typed associations");
+    }
+
+    #[pg_test]
+    fn test_associations_directional_insert() {
+        let emb = zero_embedding_literal();
+        let id_a = "00000000-0000-0000-0000-000000000001";
+        let id_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (id, workspace_id, concept, content, embedding)
+             VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'a content', '{emb}'::vector),
+                    ('{id_b}'::uuid, gen_random_uuid(), 'b', 'b content', '{emb}'::vector)"
+        ))
+        .expect("inserting mnemes should succeed");
+
+        // Directed: A contradicts B (src > dst is allowed for directed types)
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, association_type)
+             VALUES ('{id_b}'::uuid, '{id_a}'::uuid, 'contradicts')"
+        ))
+        .expect("directed association with src > dst should succeed");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "violates check constraint")]
+    fn test_associations_type_check_invalid() {
+        let emb = zero_embedding_literal();
+        let id_a = "00000000-0000-0000-0000-000000000001";
+        let id_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (id, workspace_id, concept, content, embedding)
+             VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'a content', '{emb}'::vector),
+                    ('{id_b}'::uuid, gen_random_uuid(), 'b', 'b content', '{emb}'::vector)"
+        ))
+        .expect("inserting mnemes should succeed");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, association_type)
+             VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 'invalid_type')"
+        ))
+        .expect("should have failed");
     }
 
     #[pg_test]
