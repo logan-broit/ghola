@@ -12,6 +12,7 @@ A Postgres extension that implements neuroscience-inspired memory primitives as 
 | Ebbinghaus | `ebbinghaus_decay()` | Spacing-aware retention with stability estimation |
 | Hebbian | `process_co_activation_batch()` | Association learning through co-activation |
 | Bayesian | `bayesian_update()` | Confidence tracking with Laplace-smoothed posteriors |
+| Contradiction | `flag_contradictions()` | Detection and flagging of contradicting memories |
 
 ## Requirements
 
@@ -96,12 +97,27 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 | `started_at` | `timestamptz` | Worker start time |
 | `updated_at` | `timestamptz` | Last stats update |
 
+**`pg_recall.contradiction_candidates`** — Flagged contradicting mneme pairs (v0.3)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `bigserial` | Primary key |
+| `workspace_id` | `uuid` | Tenant key |
+| `mneme_a` | `uuid` | First mneme (the newer one when auto-detected) |
+| `mneme_b` | `uuid` | Second mneme |
+| `similarity` | `float8` | Cosine similarity between embeddings |
+| `concept_overlap` | `boolean` | Whether concepts match exactly |
+| `status` | `text` | One of: `pending`, `confirmed`, `dismissed` |
+| `created_at` | `timestamptz` | Detection time |
+| `resolved_at` | `timestamptz` | Resolution time (null if pending) |
+
 ### Indexes
 
 - HNSW index on `mnemes(embedding)` for approximate nearest neighbor search
 - GIN index on `mnemes(search_vector)` for full-text search
 - B-tree on `mnemes(workspace_id, last_access DESC)` for temporal queries
 - B-tree on `associations(dst_id, src_id)` for reverse lookups
+- B-tree on `contradiction_candidates(workspace_id, status)` for pending lookups
 
 ### Composite Types
 
@@ -117,6 +133,20 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 ```sql
 (semantic float8, fts float8, actr_decay float8, hebbian_scale float8)
 -- Defaults: (0.6, 0.4, 0.5, 4.0)
+```
+
+**`pg_recall.contradiction_candidate_result`** — Return type for `check_contradictions()` (v0.3)
+
+```sql
+(candidate_id bigint, mneme_a uuid, mneme_b uuid, similarity float8, concept_overlap boolean)
+```
+
+**`pg_recall.contradiction_detail`** — Return type for `get_pending_contradictions()` (v0.3)
+
+```sql
+(candidate_id bigint, similarity float8, concept_overlap boolean,
+ concept_a text, content_a text, confidence_a float8,
+ concept_b text, content_b text, confidence_b float8, created_at timestamptz)
 ```
 
 ## Usage
@@ -212,6 +242,41 @@ SELECT * FROM pg_recall.get_worker_stats();
 Without `shared_preload_libraries`, the extension works exactly as v0.1 — process
 events manually or via `pg_cron`.
 
+### Contradiction Detection (v0.3)
+
+New mnemes are automatically checked for contradictions via an `AFTER INSERT` trigger.
+When a new mneme has high cosine similarity (≥ 0.85) to an existing active mneme in the
+same workspace, a contradiction candidate is flagged for review.
+
+```sql
+-- Check for contradictions without flagging (read-only)
+SELECT * FROM pg_recall.check_contradictions('mneme-id'::uuid, 0.85);
+
+-- Flag contradictions (inserts into contradiction_candidates)
+SELECT pg_recall.flag_contradictions('mneme-id'::uuid, 0.85);
+
+-- Review pending contradictions with full mneme details
+SELECT * FROM pg_recall.get_pending_contradictions('workspace-id'::uuid);
+
+-- Scan entire workspace for contradictions (batch)
+SELECT pg_recall.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
+```
+
+**Resolving contradictions:**
+
+```sql
+-- Confirm: penalizes the newer mneme (bayesian_update with evidence=0.10)
+-- and weakens any Hebbian association between the pair (weight *= 0.1)
+SELECT pg_recall.resolve_contradiction(candidate_id, 'confirmed');
+
+-- Dismiss: marks as dismissed, no side effects
+SELECT pg_recall.resolve_contradiction(candidate_id, 'dismissed');
+```
+
+The system follows a "burden of proof on the newcomer" principle — established memories
+are defended, and contradicting newcomers must prove their worth through repeated
+confirmation before displacing existing knowledge.
+
 ### Confirming Recall
 
 When a user confirms that recalled memories were useful, strengthen their confidence:
@@ -288,7 +353,7 @@ cargo pgrx run pg18
 
 ## Version
 
-0.2.0
+0.3.0
 
 ## License
 
