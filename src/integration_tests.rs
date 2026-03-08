@@ -137,8 +137,8 @@ mod tests {
 
         // 1. Insert three related mnemes
         let m1 = insert_mneme(WS, "kubernetes", "pod scheduling and orchestration", 0.10);
-        let m2 = insert_mneme(WS, "docker", "container runtime engine for kubernetes", 0.12);
-        let m3 = insert_mneme(WS, "helm", "chart deployment for kubernetes clusters", 0.14);
+        let _m2 = insert_mneme(WS, "docker", "container runtime engine for kubernetes", 0.12);
+        let _m3 = insert_mneme(WS, "helm", "chart deployment for kubernetes clusters", 0.14);
 
         // 2. First recall — should return results with no Hebbian boost yet
         let emb = embedding(0.11);
@@ -409,7 +409,7 @@ mod tests {
         .expect("query failed")
         .expect("null");
 
-        let count_b = Spi::get_one::<i64>(&format!(
+        let _count_b = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_recall.recall( \
                 '{ws_b}'::uuid, 'alpha', '{emb}'::vector(384), 10, 0.0, NULL)"
         ))
@@ -846,11 +846,10 @@ mod tests {
         Spi::run("ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check")
             .expect("disable trigger");
 
-        let m1 = Spi::get_one::<String>(&format!(
+        Spi::run(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'rust speed', 'Rust is slow', '{emb}'::vector(384)) \
-             RETURNING id::text"
-        )).expect("insert 1 failed").expect("null");
+             VALUES ('{ws}', 'rust speed', 'Rust is slow', '{emb}'::vector(384))"
+        )).expect("insert 1 failed");
 
         let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \

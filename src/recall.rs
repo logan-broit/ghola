@@ -467,7 +467,7 @@ mod tests {
 
     #[pg_test]
     fn test_recall_workspace_isolation() {
-        let (ws_id, _) = setup_recall_test_data();
+        let (_ws_id, _) = setup_recall_test_data();
         let emb = make_query_embedding();
 
         // Query with a different workspace_id should return nothing

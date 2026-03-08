@@ -543,7 +543,7 @@ mod tests {
 
         let ws = "c1000000-0000-0000-0000-000000000001";
         // Two mnemes with very similar embeddings but different content
-        let m1 = insert_mneme_no_trigger(ws, "python version", "Python 3.8 is the latest", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "python version", "Python 3.8 is the latest", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "python version", "Python 3.12 is the latest", 0.5);
 
         // Identical embeddings = similarity 1.0, should be found
@@ -562,7 +562,7 @@ mod tests {
 
         let ws = "c2000000-0000-0000-0000-000000000001";
         // Same content = not a contradiction
-        let m1 = insert_mneme_no_trigger(ws, "fact", "the sky is blue", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "fact", "the sky is blue", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "fact", "the sky is blue", 0.5);
 
         let count = Spi::get_one::<i64>(&format!(
@@ -617,7 +617,7 @@ mod tests {
         Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup failed");
 
         let ws = "c4000000-0000-0000-0000-000000000001";
-        let m1 = insert_mneme_no_trigger(ws, "python", "Python 3.8 is latest", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "python", "Python 3.8 is latest", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "python", "Python 3.12 is latest", 0.5);
 
         let flagged = Spi::get_one::<i64>(&format!(
@@ -642,7 +642,7 @@ mod tests {
         Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup failed");
 
         let ws = "c5000000-0000-0000-0000-000000000001";
-        let m1 = insert_mneme_no_trigger(ws, "rust", "Rust is fast", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "rust", "Rust is fast", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "rust", "Rust is slow", 0.5);
 
         // Flag twice
@@ -664,7 +664,7 @@ mod tests {
         Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup failed");
 
         let ws = "c6000000-0000-0000-0000-000000000001";
-        let m1 = insert_mneme_no_trigger(ws, "python version", "Python 3.8", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "python version", "Python 3.8", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "python version", "Python 3.12", 0.5);
 
         Spi::run(&format!(
@@ -836,7 +836,7 @@ mod tests {
         let ws_a = "ca000000-0000-0000-0000-000000000001";
         let ws_b = "ca000000-0000-0000-0000-000000000002";
 
-        let m1 = insert_mneme_no_trigger(ws_a, "fact", "workspace A fact", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws_a, "fact", "workspace A fact", 0.5);
         let m2 = insert_mneme_no_trigger(ws_b, "fact", "workspace B fact", 0.5);
 
         // Checking m2 should not find m1 (different workspace)
@@ -876,7 +876,7 @@ mod tests {
         Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup failed");
 
         let ws = "cc000000-0000-0000-0000-000000000001";
-        let m1 = insert_mneme_no_trigger(ws, "lang", "Go is typed", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "lang", "Go is typed", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "lang", "Go is untyped", 0.5);
 
         Spi::run(&format!(
@@ -898,7 +898,7 @@ mod tests {
 
         let ws = "cd000000-0000-0000-0000-000000000001";
         // Insert first mneme with trigger disabled
-        let m1 = insert_mneme_no_trigger(ws, "db", "PostgreSQL is relational", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "db", "PostgreSQL is relational", 0.5);
 
         // Insert second mneme WITH trigger enabled — should auto-flag
         let emb = embedding(0.5);
@@ -922,7 +922,7 @@ mod tests {
         Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup failed");
 
         let ws = "ce000000-0000-0000-0000-000000000001";
-        let m1 = insert_mneme_no_trigger(ws, "item", "content one", 0.5);
+        let _m1 = insert_mneme_no_trigger(ws, "item", "content one", 0.5);
         let m2 = insert_mneme_no_trigger(ws, "item", "content two", 0.5);
 
         Spi::run(&format!(
