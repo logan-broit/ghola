@@ -164,8 +164,11 @@ Resolves a contradiction candidate. `resolution` must be `'confirmed'` or
   accumulated evidence are not overturned by a single contradicting insertion —
   the newer memory bears the burden of proof. If it is genuinely correct, it
   will recover confidence through use and confirmation. Additionally, weakens
-  any existing Hebbian association between the pair (weight *= 0.1). Sets
-  `status = 'confirmed'` and `resolved_at = now()`.
+  any existing Hebbian association between the pair (weight *= 0.1) and creates
+  a directed `contradicts` association from `mneme_a` to `mneme_b` (weight 1.0).
+  This association feeds into recall scoring as a negative boost (-0.5x),
+  actively demoting contradicted mnemes in results. Sets `status = 'confirmed'`
+  and `resolved_at = now()`.
 - **dismissed**: sets `status = 'dismissed'` and `resolved_at = now()`. No
   confidence change, no association modification.
 
@@ -239,7 +242,10 @@ Caller reviews pending contradictions
     │       ├── bayesian_update(mneme_a.confidence, 0.10)
     │       │   newer mneme's confidence drops (burden of proof)
     │       │
-    │       └── weaken association between pair (weight *= 0.1)
+    │       ├── weaken hebbian association between pair (weight *= 0.1)
+    │       │
+    │       └── create 'contradicts' association (mneme_a → mneme_b, weight 1.0)
+    │           feeds into recall scoring as negative boost (-0.5x)
     │
     └── resolve_contradiction(id, 'dismissed')
             │
@@ -286,7 +292,9 @@ A future enhancement could have the worker periodically run
 
 4. **Association weakening.** On confirmed contradiction, the Hebbian association
    between the pair is weakened (weight *= 0.1), not deleted. This preserves
-   the relational signal while drastically reducing co-activation boost.
+   the relational signal while drastically reducing co-activation boost. A
+   separate `contradicts` typed association is also created, which feeds into
+   recall scoring as a negative boost (see typed-memory-system.md).
 
 ## Future Considerations
 
