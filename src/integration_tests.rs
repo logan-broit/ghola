@@ -110,6 +110,9 @@ mod tests {
             "get_pending_contradictions",
             "scan_workspace_contradictions",
             "configure_dimensions",
+            "mark_supersedes",
+            "mark_supports",
+            "get_typed_associations",
         ];
         for func in &functions {
             let exists = Spi::get_one::<bool>(&format!(
@@ -940,5 +943,234 @@ mod tests {
              WHERE workspace_id = '{ws}'::uuid"
         )).expect("query failed").expect("null");
         assert!(candidates >= 1, "candidates should exist after workspace scan");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v0.4 Integration Tests: Typed memory system
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Helper: insert a mneme with typed columns, triggers disabled.
+    fn insert_typed_mneme(
+        ws: &str, concept: &str, content: &str, fill: f64,
+        memory_type: &str, tier: &str, session_id: Option<&str>,
+    ) -> String {
+        let emb = embedding(fill);
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check"
+        ).expect("disable");
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_session_association"
+        ).expect("disable");
+
+        let session_clause = match session_id {
+            Some(sid) => format!(", '{sid}'::uuid"),
+            None => ", NULL".to_string(),
+        };
+
+        let id = Spi::get_one::<String>(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding, memory_type, tier, session_id) \
+             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(768), \
+                     '{memory_type}', '{tier}'{session_clause}) \
+             RETURNING id::text"
+        ))
+        .expect("insert failed")
+        .expect("null");
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check"
+        ).expect("enable");
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_session_association"
+        ).expect("enable");
+
+        id
+    }
+
+    #[pg_test]
+    fn test_recall_memory_type_filter() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "d0000000-0000-0000-0000-000000000001";
+        let _m_fact = insert_typed_mneme(ws, "fact", "factual content", 0.5, "factual", "index", None);
+        let _m_exp = insert_typed_mneme(ws, "experience", "experiential content", 0.5, "experiential", "index", None);
+        let _m_work = insert_typed_mneme(ws, "working", "working memory", 0.5, "working", "state", None);
+
+        let emb = embedding(0.5);
+
+        // Filter to factual only
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.recall(\
+                '{ws}'::uuid, 'content', '{emb}'::vector(768), \
+                10, 0.0, NULL, 'factual')"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(count, 1, "memory_type filter 'factual' should return 1, got {count}");
+    }
+
+    #[pg_test]
+    fn test_recall_excludes_expired_working_memory() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "d0000000-0000-0000-0000-000000000002";
+        let emb = embedding(0.5);
+
+        // Insert a working memory that's already expired
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check"
+        ).expect("disable");
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_session_association"
+        ).expect("disable");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding, memory_type, expires_at) \
+             VALUES ('{ws}', 'expired', 'should not appear', '{emb}'::vector(768), \
+                     'working', now() - interval '1 hour')"
+        )).expect("insert expired failed");
+
+        // Insert a non-expired mneme
+        let _m_valid = Spi::get_one::<String>(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'valid', 'should appear', '{emb}'::vector(768)) \
+             RETURNING id::text"
+        )).expect("insert failed").expect("null");
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check"
+        ).expect("enable");
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_session_association"
+        ).expect("enable");
+
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.recall(\
+                '{ws}'::uuid, 'content', '{emb}'::vector(768), 10, 0.0, NULL)"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(count, 1, "expired working memory should be excluded, got {count}");
+    }
+
+    #[pg_test]
+    fn test_supersedes_full_lifecycle() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "d0000000-0000-0000-0000-000000000003";
+        let m_old = insert_typed_mneme(ws, "version", "v1.0 release", 0.5, "factual", "index", None);
+        let m_new = insert_typed_mneme(ws, "version", "v2.0 release", 0.5, "factual", "index", None);
+
+        // Mark new as superseding old
+        Spi::run(&format!(
+            "SELECT pg_recall.mark_supersedes('{m_new}'::uuid, '{m_old}'::uuid)"
+        )).expect("supersedes failed");
+
+        // Old should be archived
+        let state = Spi::get_one::<String>(&format!(
+            "SELECT state FROM pg_recall.mnemes WHERE id = '{m_old}'::uuid"
+        )).expect("query failed").expect("null");
+        assert_eq!(state, "archived");
+
+        // Old should not appear in recall
+        let emb = embedding(0.5);
+        let returned = Spi::connect(|client| {
+            let rows = client.select(
+                &format!(
+                    "SELECT (r).mneme_id::text FROM pg_recall.recall(\
+                        '{ws}'::uuid, 'version', '{emb}'::vector(768), 10, 0.0, NULL) AS r"
+                ),
+                None, &[],
+            ).expect("recall failed");
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row.get::<String>(1).expect("err").expect("null"));
+            }
+            ids
+        });
+
+        assert!(!returned.contains(&m_old), "superseded mneme should not appear in recall");
+        assert!(returned.contains(&m_new), "new mneme should appear in recall");
+    }
+
+    #[pg_test]
+    fn test_core_tier_resilience() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "d0000000-0000-0000-0000-000000000004";
+        let m_core = insert_typed_mneme(ws, "core fact", "immutable knowledge", 0.5, "factual", "core", None);
+
+        // Hit it with extremely weak evidence repeatedly
+        for _ in 0..5 {
+            Spi::run(&format!(
+                "SELECT pg_recall.update_confidence('{m_core}'::uuid, 0.01)"
+            )).expect("update failed");
+        }
+
+        let conf = Spi::get_one::<f64>(&format!(
+            "SELECT confidence FROM pg_recall.mnemes WHERE id = '{m_core}'::uuid"
+        )).expect("query failed").expect("null");
+
+        assert!(
+            conf >= 0.30,
+            "core-tier mneme should never drop below 0.30, got {conf}"
+        );
+    }
+
+    #[pg_test]
+    fn test_tag_filtering_in_recall() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "d0000000-0000-0000-0000-000000000005";
+        let emb = embedding(0.5);
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check"
+        ).expect("disable");
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_session_association"
+        ).expect("disable");
+
+        // Insert mnemes with different tags
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding, tags) \
+             VALUES ('{ws}', 'rust', 'rust content', '{emb}'::vector(768), \
+                     ARRAY['language', 'systems'])"
+        )).expect("insert failed");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes \
+             (workspace_id, concept, content, embedding, tags) \
+             VALUES ('{ws}', 'python', 'python content', '{emb}'::vector(768), \
+                     ARRAY['language', 'scripting'])"
+        )).expect("insert failed");
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check"
+        ).expect("enable");
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_session_association"
+        ).expect("enable");
+
+        // Filter to 'systems' tag
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.recall(\
+                '{ws}'::uuid, 'content', '{emb}'::vector(768), \
+                10, 0.0, NULL, NULL, NULL, ARRAY['systems'])"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(count, 1, "tag filter should return 1 result, got {count}");
     }
 }
