@@ -21,6 +21,7 @@ pub mod hebbian;
 pub mod recall;
 pub mod worker_stats;
 pub mod worker;
+pub mod contradiction;
 
 #[cfg(any(test, feature = "pg_test"))]
 pub mod integration_tests;
