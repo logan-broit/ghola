@@ -284,6 +284,41 @@ fn configure_dimensions(dims: i32) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Session association trigger: link mnemes sharing the same session_id
+// ---------------------------------------------------------------------------
+
+extension_sql!(
+    r#"
+CREATE OR REPLACE FUNCTION session_association_trigger()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    -- Only fire when the new mneme has a session_id
+    IF NEW.session_id IS NOT NULL THEN
+        INSERT INTO @extschema@.associations (src_id, dst_id, association_type, weight, co_activations, updated_at)
+        SELECT NEW.id, m.id, 'session', 0.5, 1, now()
+        FROM @extschema@.mnemes m
+        WHERE m.workspace_id = NEW.workspace_id
+          AND m.session_id = NEW.session_id
+          AND m.id != NEW.id
+        ON CONFLICT (src_id, dst_id, association_type) DO NOTHING;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER mneme_session_association
+    AFTER INSERT ON mnemes
+    FOR EACH ROW
+    EXECUTE FUNCTION session_association_trigger();
+"#,
+    name = "create_session_association_trigger",
+    requires = [
+        "create_mnemes_table",
+        "create_associations_table",
+    ],
+);
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -689,5 +724,90 @@ mod tests {
         .expect("query failed")
         .expect("null");
         assert_eq!(dims, "768", "default embedding_dims should be 768");
+    }
+
+    // ── session association trigger ──
+
+    #[pg_test]
+    fn test_session_trigger_creates_associations() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup");
+
+        let ws = "00000000-0000-0000-0000-aaaaaaaaaaaa";
+        let session = "11111111-1111-1111-1111-111111111111";
+        let emb = zero_embedding_literal();
+
+        // Disable contradiction trigger to avoid interference
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check"
+        ).expect("disable trigger");
+
+        // Insert two mnemes with the same session_id
+        let m1 = Spi::get_one::<String>(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding, session_id) \
+             VALUES ('{ws}', 'topic', 'first note', '{emb}'::vector({DIMS}), '{session}'::uuid) \
+             RETURNING id::text"
+        ))
+        .expect("insert failed")
+        .expect("null");
+
+        let m2 = Spi::get_one::<String>(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding, session_id) \
+             VALUES ('{ws}', 'topic', 'second note', '{emb}'::vector({DIMS}), '{session}'::uuid) \
+             RETURNING id::text"
+        ))
+        .expect("insert failed")
+        .expect("null");
+
+        // Should have created a session association m2 → m1
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.associations \
+             WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
+               AND association_type = 'session'"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(count, 1, "session trigger should create association between session peers");
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check"
+        ).expect("enable trigger");
+    }
+
+    #[pg_test]
+    fn test_session_trigger_no_association_without_session_id() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup");
+
+        let ws = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+        let emb = zero_embedding_literal();
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check"
+        ).expect("disable trigger");
+
+        // Insert two mnemes without session_id
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'topic', 'no session 1', '{emb}'::vector({DIMS}))"
+        ))
+        .expect("insert failed");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'topic', 'no session 2', '{emb}'::vector({DIMS}))"
+        ))
+        .expect("insert failed");
+
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_recall.associations WHERE association_type = 'session'",
+        )
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(count, 0, "no session associations without session_id");
+
+        Spi::run(
+            "ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check"
+        ).expect("enable trigger");
     }
 }
