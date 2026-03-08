@@ -248,9 +248,7 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
 
         let num_processed = events.len() as i64;
 
-        // 2. Aggregate pair signals across all events
-        // Key: (smaller_uuid_str, larger_uuid_str), Value: sum of score_i * score_j
-        let mut pair_signals: HashMap<(String, String), f64> = HashMap::new();
+        // 2. Collect all referenced mneme IDs and identify state-tier mnemes to exclude
         let mut all_mneme_ids: HashSet<String> = HashSet::new();
         let mut consumed_ids: Vec<i64> = Vec::new();
 
@@ -259,17 +257,57 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
             for mid in &event.mneme_ids {
                 all_mneme_ids.insert(mid.to_string());
             }
+        }
 
+        // Query state-tier mnemes to exclude from Hebbian learning
+        let state_tier_ids: HashSet<String> = if !all_mneme_ids.is_empty() {
+            let id_list: String = all_mneme_ids
+                .iter()
+                .map(|id| format!("'{id}'::uuid"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let rows = client
+                .select(
+                    &format!(
+                        "SELECT id::text FROM pg_recall.mnemes \
+                         WHERE id IN ({id_list}) AND tier = 'state'"
+                    ),
+                    None,
+                    &[],
+                )
+                .expect("failed to query state-tier mnemes");
+            let mut set = HashSet::new();
+            for row in rows {
+                if let Some(id) = row.get::<String>(1).expect("err") {
+                    set.insert(id);
+                }
+            }
+            set
+        } else {
+            HashSet::new()
+        };
+
+        // Aggregate pair signals across all events, skipping state-tier mnemes
+        // Key: (smaller_uuid_str, larger_uuid_str), Value: sum of score_i * score_j
+        let mut pair_signals: HashMap<(String, String), f64> = HashMap::new();
+
+        for event in &events {
             let n = event.mneme_ids.len();
             for i in 0..n {
+                let a_str = event.mneme_ids[i].to_string();
+                if state_tier_ids.contains(&a_str) {
+                    continue;
+                }
                 for j in (i + 1)..n {
-                    let a_str = event.mneme_ids[i].to_string();
                     let b_str = event.mneme_ids[j].to_string();
+                    if state_tier_ids.contains(&b_str) {
+                        continue;
+                    }
                     // Canonical ordering: smaller UUID string first
                     let (src, dst) = if a_str < b_str {
-                        (a_str, b_str)
+                        (a_str.clone(), b_str)
                     } else {
-                        (b_str, a_str)
+                        (b_str, a_str.clone())
                     };
                     let signal = event.scores[i] * event.scores[j];
                     *pair_signals.entry((src, dst)).or_insert(0.0) += signal;
@@ -1013,5 +1051,65 @@ mod tests {
             "high-score pair should produce stronger association than low-score pair: \
              strong={strong_weight}, weak={weak_weight}"
         );
+    }
+
+    // ── state-tier exclusion from Hebbian learning ──
+
+    #[pg_test]
+    fn test_state_tier_excluded_from_hebbian() {
+        let (ws_id, m1, m2, m3) = setup_test_mnemes();
+
+        // Mark m2 as state-tier
+        Spi::run(&format!(
+            "UPDATE pg_recall.mnemes SET tier = 'state' WHERE id = '{m2}'::uuid"
+        ))
+        .expect("update failed");
+
+        // Co-activate all three
+        Spi::run(&format!(
+            "SELECT pg_recall.record_co_activation(\
+                '{ws_id}'::uuid, \
+                ARRAY['{m1}','{m2}','{m3}']::uuid[], \
+                ARRAY[0.8, 0.8, 0.8]::float8[])"
+        ))
+        .expect("record failed");
+
+        Spi::run("SELECT pg_recall.process_all_pending_co_activations()")
+            .expect("process failed");
+
+        // m1-m3 association should exist (both non-state)
+        let m1_m3 = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.associations \
+             WHERE src_id = LEAST('{m1}'::uuid, '{m3}'::uuid) \
+               AND dst_id = GREATEST('{m1}'::uuid, '{m3}'::uuid) \
+               AND association_type = 'hebbian'"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(m1_m3, 1, "non-state pair m1-m3 should have an association");
+
+        // m1-m2 and m2-m3 associations should NOT exist (m2 is state-tier)
+        let m1_m2 = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.associations \
+             WHERE src_id = LEAST('{m1}'::uuid, '{m2}'::uuid) \
+               AND dst_id = GREATEST('{m1}'::uuid, '{m2}'::uuid) \
+               AND association_type = 'hebbian'"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(m1_m2, 0, "state-tier m2 should be excluded from Hebbian pairs");
+
+        let m2_m3 = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.associations \
+             WHERE src_id = LEAST('{m2}'::uuid, '{m3}'::uuid) \
+               AND dst_id = GREATEST('{m2}'::uuid, '{m3}'::uuid) \
+               AND association_type = 'hebbian'"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(m2_m3, 0, "state-tier m2 should be excluded from Hebbian pairs");
     }
 }
