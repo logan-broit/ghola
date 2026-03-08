@@ -46,7 +46,7 @@ mod tests {
         )
         .expect("query failed")
         .expect("null version");
-        assert_eq!(version, "0.2.0", "extension version should be 0.2.0");
+        assert_eq!(version, "0.3.0", "extension version should be 0.3.0");
     }
 
     #[pg_test]
