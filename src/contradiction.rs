@@ -474,15 +474,15 @@ mod tests {
     use pgrx::prelude::*;
 
     fn embedding(fill: f64) -> String {
-        let elements = vec![format!("{fill}"); 384];
+        let elements = vec![format!("{fill}"); 768];
         format!("[{}]", elements.join(","))
     }
 
     /// Create an embedding with 1.0 in dimensions [start..start+span) and 0.0 elsewhere.
     /// Useful for creating orthogonal vectors that have low cosine similarity.
     fn directional_embedding(start: usize, span: usize) -> String {
-        let mut elements = vec!["0".to_string(); 384];
-        for i in start..(start + span).min(384) {
+        let mut elements = vec!["0".to_string(); 768];
+        for i in start..(start + span).min(768) {
             elements[i] = "1".to_string();
         }
         format!("[{}]", elements.join(","))
@@ -497,7 +497,7 @@ mod tests {
         let emb = embedding(fill);
         let id = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(384)) \
+             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(768)) \
              RETURNING id::text"
         ))
         .expect("insert failed")
@@ -589,13 +589,13 @@ mod tests {
 
         let _m1 = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'topic a', 'content about dogs', '{emb_a}'::vector(384)) \
+             VALUES ('{ws}', 'topic a', 'content about dogs', '{emb_a}'::vector(768)) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
         let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'topic b', 'content about quantum physics', '{emb_b}'::vector(384)) \
+             VALUES ('{ws}', 'topic b', 'content about quantum physics', '{emb_b}'::vector(768)) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
@@ -904,7 +904,7 @@ mod tests {
         let emb = embedding(0.5);
         Spi::run(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector(384))"
+             VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector(768))"
         )).expect("insert with trigger failed");
 
         let count = Spi::get_one::<i64>(&format!(

@@ -20,7 +20,7 @@ CREATE TABLE mnemes (
     workspace_id    uuid NOT NULL,
     concept         text NOT NULL,
     content         text NOT NULL,
-    embedding       vector(384) NOT NULL,
+    embedding       vector(768) NOT NULL,
     search_vector   tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', concept), 'A') ||
         setweight(to_tsvector('english', content), 'B')
@@ -124,6 +124,24 @@ CREATE TYPE contradiction_detail AS (
 );
 
 // ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+extension_sql!(
+    r#"
+-- config: extension configuration (embedding dimensions, etc.)
+CREATE TABLE config (
+    key   text PRIMARY KEY,
+    value text NOT NULL
+);
+
+-- Default embedding dimensions: 768 (BAAI/bge-base-en-v1.5, gte-modernbert-base)
+INSERT INTO config (key, value) VALUES ('embedding_dims', '768');
+"#,
+    name = "create_config_table",
+);
+
+// ---------------------------------------------------------------------------
 // Indexes
 // ---------------------------------------------------------------------------
 
@@ -154,6 +172,90 @@ CREATE INDEX contradiction_candidates_workspace_idx
 );
 
 // ---------------------------------------------------------------------------
+// configure_dimensions: reconfigure embedding dimensions for non-default setups
+// ---------------------------------------------------------------------------
+
+/// Reconfigure the embedding dimension for this pg_recall installation.
+///
+/// Must be called on an empty mnemes table (errors if rows exist).
+/// Drops and recreates the HNSW index with the new dimension.
+///
+/// Example: `SELECT pg_recall.configure_dimensions(3072)` for OpenAI text-embedding-3-large
+#[pg_extern]
+fn configure_dimensions(dims: i32) -> &'static str {
+    if dims <= 0 || dims > 4096 {
+        pgrx::error!("embedding dimensions must be between 1 and 4096, got {dims}");
+    }
+
+    Spi::connect_mut(|client| {
+        // Verify mnemes table is empty
+        let count = client
+            .select(
+                "SELECT count(*) FROM pg_recall.mnemes",
+                None,
+                &[],
+            )
+            .expect("failed to count mnemes")
+            .into_iter()
+            .next()
+            .and_then(|r| r.get::<i64>(1).ok().flatten())
+            .unwrap_or(0);
+
+        if count > 0 {
+            pgrx::error!(
+                "cannot reconfigure dimensions: mnemes table has {count} rows. \
+                 Drop all data first or recreate the extension."
+            );
+        }
+
+        // Drop the HNSW index
+        client
+            .update(
+                "DROP INDEX IF EXISTS pg_recall.mnemes_embedding_hnsw_idx",
+                None,
+                &[],
+            )
+            .expect("failed to drop HNSW index");
+
+        // Alter the column type
+        client
+            .update(
+                &format!(
+                    "ALTER TABLE pg_recall.mnemes \
+                     ALTER COLUMN embedding TYPE vector({dims})"
+                ),
+                None,
+                &[],
+            )
+            .expect("failed to alter embedding column type");
+
+        // Recreate the HNSW index
+        client
+            .update(
+                "CREATE INDEX mnemes_embedding_hnsw_idx \
+                 ON pg_recall.mnemes USING hnsw (embedding vector_cosine_ops)",
+                None,
+                &[],
+            )
+            .expect("failed to recreate HNSW index");
+
+        // Update config
+        client
+            .update(
+                &format!(
+                    "UPDATE pg_recall.config SET value = '{dims}' \
+                     WHERE key = 'embedding_dims'"
+                ),
+                None,
+                &[],
+            )
+            .expect("failed to update config");
+    });
+
+    "ok"
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -162,9 +264,11 @@ CREATE INDEX contradiction_candidates_workspace_idx
 mod tests {
     use pgrx::prelude::*;
 
-    /// Helper: generate a zero-vector literal for 384 dimensions.
+    const DIMS: usize = 768;
+
+    /// Helper: generate a zero-vector literal for DIMS dimensions.
     fn zero_embedding_literal() -> String {
-        let zeros: Vec<String> = (0..384).map(|_| "0".to_string()).collect();
+        let zeros: Vec<String> = (0..DIMS).map(|_| "0".to_string()).collect();
         format!("[{}]", zeros.join(","))
     }
 
@@ -343,12 +447,12 @@ mod tests {
     }
 
     #[pg_test]
-    #[should_panic(expected = "expected 384 dimensions")]
+    #[should_panic(expected = "expected 768 dimensions")]
     fn test_wrong_vector_dimensions_rejected() {
-        // A 3-dim vector should be rejected by the vector(384) column type
+        // A 3-dim vector should be rejected by the vector(768) column type
         Spi::run(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES (gen_random_uuid(), 'test', 'content', '[0.1, 0.2, 0.3]'::vector(384))"
+             VALUES (gen_random_uuid(), 'test', 'content', '[0.1, 0.2, 0.3]'::vector(768))"
         )
         .expect("should have failed");
     }

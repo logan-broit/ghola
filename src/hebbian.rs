@@ -359,7 +359,7 @@ mod tests {
 
         let ws_id = "00000000-0000-0000-0000-000000000001";
 
-        // Insert three test mnemes with dummy 384-dim embeddings
+        // Insert three test mnemes with dummy 768-dim embeddings
         let m1 = insert_test_mneme(ws_id, "kubernetes", "pod scheduling", 0.1);
         let m2 = insert_test_mneme(ws_id, "docker", "container runtime", 0.2);
         let m3 = insert_test_mneme(ws_id, "helm", "chart deployment", 0.3);
@@ -369,12 +369,12 @@ mod tests {
 
     fn insert_test_mneme(ws_id: &str, concept: &str, content: &str, fill_val: f64) -> String {
         // pgvector requires bracket notation: [0.1,0.1,...]
-        let elements = vec![format!("{fill_val}"); 384];
+        let elements = vec![format!("{fill_val}"); 768];
         let vec_literal = format!("[{}]", elements.join(","));
         Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws_id}', '{concept}', '{content}', \
-             '{vec_literal}'::vector(384)) \
+             '{vec_literal}'::vector(768)) \
              RETURNING id::text"
         ))
         .expect("insert failed")

@@ -16,9 +16,9 @@ mod tests {
 
     // ── Helpers ──
 
-    /// Generate a 384-dim embedding literal with a given fill value.
+    /// Generate a 768-dim embedding literal with a given fill value.
     fn embedding(fill: f64) -> String {
-        let elements = vec![format!("{fill}"); 384];
+        let elements = vec![format!("{fill}"); 768];
         format!("[{}]", elements.join(","))
     }
 
@@ -30,7 +30,7 @@ mod tests {
         let emb = embedding(fill);
         Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(384)) \
+             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(768)) \
              RETURNING id::text"
         ))
         .expect("insert failed")
@@ -46,7 +46,7 @@ mod tests {
         )
         .expect("query failed")
         .expect("null version");
-        assert_eq!(version, "0.3.0", "extension version should be 0.3.0");
+        assert_eq!(version, "0.4.0", "extension version should be 0.4.0");
     }
 
     #[pg_test]
@@ -61,7 +61,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_tables_exist() {
-        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates"] {
+        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
                  WHERE table_schema = 'pg_recall' AND table_name = '{table}')"
@@ -109,6 +109,7 @@ mod tests {
             "resolve_contradiction",
             "get_pending_contradictions",
             "scan_workspace_contradictions",
+            "configure_dimensions",
         ];
         for func in &functions {
             let exists = Spi::get_one::<bool>(&format!(
@@ -152,7 +153,7 @@ mod tests {
                                 (r).activation, (r).confidence \
                          FROM pg_recall.recall( \
                              '{WS}'::uuid, 'kubernetes pod scheduling', \
-                             '{emb}'::vector(384), 10, 0.0, NULL \
+                             '{emb}'::vector(768), 10, 0.0, NULL \
                          ) AS r"
                     ),
                     None,
@@ -263,7 +264,7 @@ mod tests {
                         "SELECT (r).mneme_id::text, (r).score, (r).hebbian_boost \
                          FROM pg_recall.recall( \
                              '{WS}'::uuid, 'kubernetes pod scheduling', \
-                             '{emb}'::vector(384), 10, 0.0, NULL \
+                             '{emb}'::vector(768), 10, 0.0, NULL \
                          ) AS r"
                     ),
                     None,
@@ -404,14 +405,14 @@ mod tests {
         // Recall in workspace A should only see workspace A mnemes
         let count_a = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_recall.recall( \
-                '{ws_a}'::uuid, 'alpha', '{emb}'::vector(384), 10, 0.0, NULL)"
+                '{ws_a}'::uuid, 'alpha', '{emb}'::vector(768), 10, 0.0, NULL)"
         ))
         .expect("query failed")
         .expect("null");
 
         let _count_b = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_recall.recall( \
-                '{ws_b}'::uuid, 'alpha', '{emb}'::vector(384), 10, 0.0, NULL)"
+                '{ws_b}'::uuid, 'alpha', '{emb}'::vector(768), 10, 0.0, NULL)"
         ))
         .expect("query failed")
         .expect("null");
@@ -450,7 +451,7 @@ mod tests {
                 .select(
                     &format!(
                         "SELECT (r).mneme_id::text FROM pg_recall.recall( \
-                            '{ws}'::uuid, 'memory', '{emb}'::vector(384), \
+                            '{ws}'::uuid, 'memory', '{emb}'::vector(768), \
                             10, 0.0, NULL) AS r"
                     ),
                     None,
@@ -558,7 +559,7 @@ mod tests {
         // Score with default weights
         let score_default = Spi::get_one::<f64>(&format!(
             "SELECT (r).score FROM pg_recall.recall( \
-                '{ws}'::uuid, 'specific topic', '{emb}'::vector(384), \
+                '{ws}'::uuid, 'specific topic', '{emb}'::vector(768), \
                 1, 0.0, NULL) AS r LIMIT 1"
         ))
         .expect("query failed")
@@ -567,7 +568,7 @@ mod tests {
         // Score with all-semantic weights (no FTS contribution)
         let score_semantic = Spi::get_one::<f64>(&format!(
             "SELECT (r).score FROM pg_recall.recall( \
-                '{ws}'::uuid, 'specific topic', '{emb}'::vector(384), \
+                '{ws}'::uuid, 'specific topic', '{emb}'::vector(768), \
                 1, 0.0, (1.0, 0.0, 0.5, 4.0)::pg_recall.score_weights) AS r LIMIT 1"
         ))
         .expect("query failed")
@@ -817,13 +818,13 @@ mod tests {
         // Insert first mneme (trigger fires but nothing to compare against)
         Spi::run(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'python version', 'Python 3.8 is the latest release', '{emb}'::vector(384))"
+             VALUES ('{ws}', 'python version', 'Python 3.8 is the latest release', '{emb}'::vector(768))"
         )).expect("first insert failed");
 
         // Insert contradicting mneme (trigger should detect and flag)
         Spi::run(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(384))"
+             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(768))"
         )).expect("second insert failed");
 
         let pending = Spi::get_one::<i64>(
@@ -848,12 +849,12 @@ mod tests {
 
         Spi::run(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'rust speed', 'Rust is slow', '{emb}'::vector(384))"
+             VALUES ('{ws}', 'rust speed', 'Rust is slow', '{emb}'::vector(768))"
         )).expect("insert 1 failed");
 
         let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'rust speed', 'Rust is fast', '{emb}'::vector(384)) \
+             VALUES ('{ws}', 'rust speed', 'Rust is fast', '{emb}'::vector(768)) \
              RETURNING id::text"
         )).expect("insert 2 failed").expect("null");
 
@@ -919,7 +920,7 @@ mod tests {
         for i in 1..=4 {
             Spi::run(&format!(
                 "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
-                 VALUES ('{ws}', 'topic {i}', 'similar content variant {i}', '{emb}'::vector(384))"
+                 VALUES ('{ws}', 'topic {i}', 'similar content variant {i}', '{emb}'::vector(768))"
             )).expect("insert failed");
         }
 
