@@ -14,6 +14,7 @@ pub mod scoring;
 pub mod schema;
 pub mod hebbian;
 pub mod recall;
+pub mod worker_stats;
 
 #[cfg(any(test, feature = "pg_test"))]
 pub mod integration_tests;
