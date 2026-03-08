@@ -61,7 +61,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_tables_exist() {
-        for table in &["mnemes", "associations", "co_activation_queue"] {
+        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
                  WHERE table_schema = 'pg_recall' AND table_name = '{table}')"
@@ -74,7 +74,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_types_exist() {
-        for typ in &["recall_result", "score_weights"] {
+        for typ in &["recall_result", "score_weights", "contradiction_candidate_result", "contradiction_detail"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS( \
                     SELECT 1 FROM pg_type t \
@@ -104,6 +104,11 @@ mod tests {
             "process_all_pending_co_activations",
             "recall_inner",
             "recall",
+            "check_contradictions",
+            "flag_contradictions",
+            "resolve_contradiction",
+            "get_pending_contradictions",
+            "scan_workspace_contradictions",
         ];
         for func in &functions {
             let exists = Spi::get_one::<bool>(&format!(
@@ -795,5 +800,145 @@ mod tests {
         .expect("query failed")
         .expect("null");
         assert_eq!(confident_state, "active", "stale but confident memory should remain active");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v0.3 Integration Tests: Contradiction detection end-to-end
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[pg_test]
+    fn test_contradiction_trigger_fires_on_insert() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "a0000000-0000-0000-0000-000000000001";
+        let emb = embedding(0.5);
+
+        // Insert first mneme (trigger fires but nothing to compare against)
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'python version', 'Python 3.8 is the latest release', '{emb}'::vector(384))"
+        )).expect("first insert failed");
+
+        // Insert contradicting mneme (trigger should detect and flag)
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(384))"
+        )).expect("second insert failed");
+
+        let pending = Spi::get_one::<i64>(
+            &format!("SELECT count(*) FROM pg_recall.contradiction_candidates \
+                      WHERE workspace_id = '{ws}'::uuid AND status = 'pending'")
+        ).expect("query failed").expect("null");
+
+        assert!(pending >= 1, "trigger should have flagged a contradiction candidate, got {pending}");
+    }
+
+    #[pg_test]
+    fn test_contradiction_full_lifecycle() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "b0000000-0000-0000-0000-000000000001";
+        let emb = embedding(0.5);
+
+        // Disable trigger for controlled setup
+        Spi::run("ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check")
+            .expect("disable trigger");
+
+        let m1 = Spi::get_one::<String>(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'rust speed', 'Rust is slow', '{emb}'::vector(384)) \
+             RETURNING id::text"
+        )).expect("insert 1 failed").expect("null");
+
+        let m2 = Spi::get_one::<String>(&format!(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'rust speed', 'Rust is fast', '{emb}'::vector(384)) \
+             RETURNING id::text"
+        )).expect("insert 2 failed").expect("null");
+
+        Spi::run("ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check")
+            .expect("enable trigger");
+
+        // Flag contradictions
+        let flagged = Spi::get_one::<i64>(&format!(
+            "SELECT pg_recall.flag_contradictions('{m2}'::uuid, 0.85)"
+        )).expect("flag failed").expect("null");
+        assert!(flagged >= 1, "should flag at least 1 contradiction");
+
+        // Get pending contradictions
+        let pending_count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.get_pending_contradictions('{ws}'::uuid)"
+        )).expect("query failed").expect("null");
+        assert!(pending_count >= 1, "should have pending contradictions");
+
+        // Get candidate ID
+        let candidate_id = Spi::get_one::<i64>(&format!(
+            "SELECT candidate_id FROM pg_recall.get_pending_contradictions('{ws}'::uuid) LIMIT 1"
+        )).expect("query failed").expect("null");
+
+        // Get confidence before resolution
+        let conf_before = Spi::get_one::<f64>(&format!(
+            "SELECT confidence FROM pg_recall.mnemes WHERE id = '{m2}'::uuid"
+        )).expect("query failed").expect("null");
+
+        // Resolve as confirmed — should penalize the newer mneme (m2)
+        Spi::run(&format!(
+            "SELECT pg_recall.resolve_contradiction({candidate_id}, 'confirmed')"
+        )).expect("resolve failed");
+
+        // Verify status changed
+        let status = Spi::get_one::<String>(&format!(
+            "SELECT status FROM pg_recall.contradiction_candidates WHERE id = {candidate_id}"
+        )).expect("query failed").expect("null");
+        assert_eq!(status, "confirmed");
+
+        // Verify confidence was penalized
+        let conf_after = Spi::get_one::<f64>(&format!(
+            "SELECT confidence FROM pg_recall.mnemes WHERE id = '{m2}'::uuid"
+        )).expect("query failed").expect("null");
+        assert!(
+            conf_after < conf_before,
+            "confirmed contradiction should penalize newer mneme confidence: {conf_before} -> {conf_after}"
+        );
+    }
+
+    #[pg_test]
+    fn test_contradiction_workspace_scan() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "c0000000-0000-0000-0000-000000000099";
+        let emb = embedding(0.5);
+
+        // Disable trigger for controlled setup
+        Spi::run("ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check")
+            .expect("disable trigger");
+
+        // Insert several similar mnemes
+        for i in 1..=4 {
+            Spi::run(&format!(
+                "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+                 VALUES ('{ws}', 'topic {i}', 'similar content variant {i}', '{emb}'::vector(384))"
+            )).expect("insert failed");
+        }
+
+        Spi::run("ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check")
+            .expect("enable trigger");
+
+        // Scan workspace for contradictions
+        let flagged = Spi::get_one::<i64>(&format!(
+            "SELECT pg_recall.scan_workspace_contradictions('{ws}'::uuid, 0.85)"
+        )).expect("scan failed").expect("null");
+
+        assert!(flagged >= 1, "workspace scan should flag contradictions among similar mnemes");
+
+        // Verify candidates were actually inserted
+        let candidates = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_recall.contradiction_candidates \
+             WHERE workspace_id = '{ws}'::uuid"
+        )).expect("query failed").expect("null");
+        assert!(candidates >= 1, "candidates should exist after workspace scan");
     }
 }
