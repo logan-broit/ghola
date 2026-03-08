@@ -25,14 +25,7 @@ spec:
     - host: ch.homelab.local
       http:
         paths:
-          # API and MCP endpoints -> ch-server
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: ch-server
-                port:
-                  number: 8080
+          # MCP endpoints -> ch-server (API key auth, no cookies)
           - path: /mcp
             pathType: Prefix
             backend:
@@ -40,6 +33,7 @@ spec:
                 name: ch-server
                 port:
                   number: 8080
+          # Health probes -> ch-server (no auth)
           - path: /health
             pathType: Exact
             backend:
@@ -54,7 +48,7 @@ spec:
                 name: ch-server
                 port:
                   number: 8080
-          # Everything else -> ch-web (admin console)
+          # Everything else -> ch-web (proxies /api/ to ch-server)
           - path: /
             pathType: Prefix
             backend:
