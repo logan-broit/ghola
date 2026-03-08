@@ -15,6 +15,9 @@ pub mod schema;
 pub mod hebbian;
 pub mod recall;
 
+#[cfg(any(test, feature = "pg_test"))]
+pub mod integration_tests;
+
 #[cfg(test)]
 pub mod pg_test {
     pub fn setup(_options: Vec<&str>) {

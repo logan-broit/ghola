@@ -152,7 +152,7 @@ pub fn bayesian_update_inner(prior: f64, evidence: f64) -> f64 {
 // ──────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -353,7 +353,7 @@ mod tests {
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
-mod pg_tests {
+mod tests {
     use pgrx::prelude::*;
 
     #[pg_test]
