@@ -315,39 +315,60 @@ fn enqueue_co_activation(workspace_id: &pgrx::Uuid, results: &[ScoredCandidate])
 mod tests {
     use pgrx::prelude::*;
 
-    /// Helper: create pgvector extension and insert test mnemes in a workspace.
-    /// Returns (workspace_id, mneme_ids) where mneme_ids contains the inserted IDs.
+    /// Create an embedding with 1.0 in dims [start..start+span) and 0.0 elsewhere.
+    /// Produces vectors with known cosine similarity based on dimensional overlap.
+    fn directional_embedding(start: usize, span: usize) -> String {
+        let mut elements = vec!["0".to_string(); 384];
+        for i in start..(start + span).min(384) {
+            elements[i] = "1".to_string();
+        }
+        format!("[{}]", elements.join(","))
+    }
+
+    /// Helper: create pgvector extension and insert test mnemes with directional
+    /// embeddings that have known cosine similarities to each other.
+    ///
+    /// Layout (384 dims):
+    ///   m1 "kubernetes": dims 0..128   — closest to query
+    ///   m2 "docker":     dims 64..192  — partial overlap with query (cos ≈ 0.5)
+    ///   m3 "helm":       dims 192..320 — orthogonal to query (cos = 0.0)
+    ///   query:           dims 0..128   — same direction as m1
     fn setup_recall_test_data() -> (String, Vec<String>) {
         Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
             .expect("failed to create vector extension");
 
         let ws_id = "00000000-0000-0000-0000-000000000099";
 
-        // Insert mnemes with different embeddings and concepts for testability.
-        // We use slightly different fill values so cosine similarity varies.
-        let m1 = insert_mneme(ws_id, "kubernetes", "pod scheduling and orchestration", 0.1);
-        let m2 = insert_mneme(ws_id, "docker", "container runtime engine", 0.2);
-        let m3 = insert_mneme(ws_id, "helm", "chart deployment and packaging", 0.3);
+        let m1 = insert_mneme_with_embedding(
+            ws_id, "kubernetes", "pod scheduling and orchestration",
+            &directional_embedding(0, 128),
+        );
+        let m2 = insert_mneme_with_embedding(
+            ws_id, "docker", "container runtime engine",
+            &directional_embedding(64, 128),
+        );
+        let m3 = insert_mneme_with_embedding(
+            ws_id, "helm", "chart deployment and packaging",
+            &directional_embedding(192, 128),
+        );
 
         (ws_id.to_string(), vec![m1, m2, m3])
     }
 
-    fn insert_mneme(ws_id: &str, concept: &str, content: &str, fill_val: f64) -> String {
-        let elements = vec![format!("{fill_val}"); 384];
-        let vec_literal = format!("[{}]", elements.join(","));
+    fn insert_mneme_with_embedding(ws_id: &str, concept: &str, content: &str, embedding: &str) -> String {
         Spi::get_one::<String>(&format!(
             "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws_id}', '{concept}', '{content}', \
-             '{vec_literal}'::vector(384)) \
+             '{embedding}'::vector(384)) \
              RETURNING id::text"
         ))
         .expect("insert failed")
         .expect("null id")
     }
 
-    fn make_query_embedding(fill_val: f64) -> String {
-        let elements = vec![format!("{fill_val}"); 384];
-        format!("[{}]", elements.join(","))
+    fn make_query_embedding() -> String {
+        // Same direction as m1 in setup_recall_test_data
+        directional_embedding(0, 128)
     }
 
     // ── Basic recall functionality ──
@@ -355,7 +376,7 @@ mod tests {
     #[pg_test]
     fn test_recall_returns_results() {
         let (ws_id, _mneme_ids) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_recall.recall(\
@@ -374,7 +395,7 @@ mod tests {
     #[pg_test]
     fn test_recall_result_fields_populated() {
         let (ws_id, _mneme_ids) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         // Check that all fields of recall_result are accessible
         let score = Spi::get_one::<f64>(&format!(
@@ -391,7 +412,7 @@ mod tests {
     #[pg_test]
     fn test_recall_respects_limit() {
         let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_recall.recall(\
@@ -409,7 +430,7 @@ mod tests {
     #[pg_test]
     fn test_recall_confidence_filter() {
         let (ws_id, mneme_ids) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         // Set one mneme to high confidence, others to low
         Spi::run(&format!(
@@ -447,7 +468,7 @@ mod tests {
     #[pg_test]
     fn test_recall_workspace_isolation() {
         let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         // Query with a different workspace_id should return nothing
         let other_ws = "00000000-0000-0000-0000-000000000042";
@@ -470,7 +491,7 @@ mod tests {
     #[pg_test]
     fn test_recall_enqueues_co_activation() {
         let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         // Clear any existing queue entries
         Spi::run("DELETE FROM pg_recall.co_activation_queue").expect("delete failed");
@@ -500,7 +521,7 @@ mod tests {
             .expect("failed to create vector extension");
 
         let ws_id = "00000000-0000-0000-0000-000000000077";
-        let emb = make_query_embedding(0.5);
+        let emb = make_query_embedding();
 
         Spi::run("DELETE FROM pg_recall.co_activation_queue").expect("delete failed");
 
@@ -523,43 +544,37 @@ mod tests {
         );
     }
 
-    // ── Default weights ──
+    // ── Custom weights change scores ──
 
     #[pg_test]
-    fn test_recall_default_weights() {
+    fn test_recall_custom_weights_affect_scores() {
         let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
-        // Calling with NULL weights should use defaults and not error
-        #[allow(unused_variables)]
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
+        // Score with default weights (semantic=0.6, fts=0.4)
+        let score_default = Spi::get_one::<f64>(&format!(
+            "SELECT (r).score FROM pg_recall.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(384), \
-                10, 0.0, NULL)"
+                1, 0.0, NULL) AS r LIMIT 1"
         ))
         .expect("query failed")
-        .expect("null count");
+        .expect("null score");
 
-        assert!(count >= 0, "default weights should work without error");
-    }
-
-    // ── Custom weights ──
-
-    #[pg_test]
-    fn test_recall_custom_weights() {
-        let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
-
-        // Custom weights: heavier semantic, lighter FTS
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
-                '{ws_id}'::uuid, 'query', '{emb}'::vector(384), \
-                10, 0.0, (0.8, 0.2, 0.5, 2.0)::pg_recall.score_weights)"
+        // Score with semantic-only weights (semantic=1.0, fts=0.0)
+        let score_semantic_only = Spi::get_one::<f64>(&format!(
+            "SELECT (r).score FROM pg_recall.recall(\
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(384), \
+                1, 0.0, (1.0, 0.0, 0.5, 4.0)::pg_recall.score_weights) AS r LIMIT 1"
         ))
         .expect("query failed")
-        .expect("null count");
+        .expect("null score");
 
-        assert!(count >= 0, "custom weights should work without error");
+        // With text 'kubernetes' matching the concept exactly, FTS contributes positively.
+        // Removing FTS weight should change the score.
+        assert!(
+            (score_default - score_semantic_only).abs() > 1e-6,
+            "changing weights should change scores: default={score_default}, semantic_only={score_semantic_only}"
+        );
     }
 
     // ── Hebbian boost effect ──
@@ -567,7 +582,7 @@ mod tests {
     #[pg_test]
     fn test_recall_hebbian_boost_visible() {
         let (ws_id, mneme_ids) = setup_recall_test_data();
-        let emb = make_query_embedding(0.15);
+        let emb = make_query_embedding();
 
         // Create a strong association between m1 and m2
         let (m1, m2) = (&mneme_ids[0], &mneme_ids[1]);
@@ -597,39 +612,37 @@ mod tests {
         );
     }
 
-    // ── Custom actr_decay affects scoring ──
+    // ── recall does not mutate access_count ──
 
     #[pg_test]
-    fn test_recall_custom_actr_decay() {
-        let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+    fn test_recall_does_not_mutate_access_count() {
+        let (ws_id, mneme_ids) = setup_recall_test_data();
+        let emb = make_query_embedding();
 
-        // Higher actr_decay should penalize older memories more
-        // With our test mnemes all freshly inserted (very recent), the effect
-        // may be subtle, but the query should succeed without error
-        let score_default = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_recall.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(384), \
-                1, 0.0, (0.6, 0.4, 0.5, 4.0)::pg_recall.score_weights) AS r \
-            LIMIT 1"
+        let before = Spi::get_one::<i32>(&format!(
+            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{}'::uuid",
+            mneme_ids[0]
         ))
         .expect("query failed")
-        .expect("null score");
+        .expect("null");
 
-        let score_high_decay = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_recall.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(384), \
-                1, 0.0, (0.6, 0.4, 0.8, 4.0)::pg_recall.score_weights) AS r \
-            LIMIT 1"
+        // Execute recall
+        Spi::run(&format!(
+            "SELECT * FROM pg_recall.recall(\
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(384), 10, 0.0, NULL)"
+        ))
+        .expect("recall failed");
+
+        let after = Spi::get_one::<i32>(&format!(
+            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{}'::uuid",
+            mneme_ids[0]
         ))
         .expect("query failed")
-        .expect("null score");
+        .expect("null");
 
-        // Both should be valid positive scores (exact comparison depends on timing)
-        assert!(score_default > 0.0, "default decay score should be positive");
-        assert!(
-            score_high_decay > 0.0,
-            "high decay score should be positive"
+        assert_eq!(
+            before, after,
+            "recall should NOT mutate access_count (batch processing does that)"
         );
     }
 
@@ -638,7 +651,7 @@ mod tests {
     #[pg_test]
     fn test_recall_ordered_by_score_desc() {
         let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         let scores = Spi::connect(|client| {
             let rows = client
@@ -672,12 +685,74 @@ mod tests {
         }
     }
 
+    // ── Ranking quality: vector similarity drives ranking ──
+
+    #[pg_test]
+    fn test_recall_ranks_by_vector_similarity() {
+        // This is the core behavioral test: mnemes with higher cosine similarity
+        // to the query embedding should rank higher, all else being equal.
+        //
+        // Setup creates 3 mnemes with known similarity to query (dims 0..128):
+        //   m1 "kubernetes" (dims 0..128):  cosine ≈ 1.0  — highest
+        //   m2 "docker"     (dims 64..192): cosine ≈ 0.5  — medium
+        //   m3 "helm"       (dims 192..320): cosine = 0.0  — lowest
+        let (ws_id, mneme_ids) = setup_recall_test_data();
+        let emb = make_query_embedding();
+
+        let ranked_ids = Spi::connect(|client| {
+            let rows = client
+                .select(
+                    &format!(
+                        "SELECT (r).mneme_id::text, (r).score, (r).content_match \
+                         FROM pg_recall.recall( \
+                             '{ws_id}'::uuid, 'query', '{emb}'::vector(384), \
+                             10, 0.0, NULL \
+                         ) AS r"
+                    ),
+                    None,
+                    &[],
+                )
+                .expect("recall query failed");
+
+            let mut results = Vec::new();
+            for row in rows {
+                let id: String = row.get::<String>(1).expect("err").expect("null");
+                let score: f64 = row.get::<f64>(2).expect("err").expect("null");
+                let cm: f64 = row.get::<f64>(3).expect("err").expect("null");
+                results.push((id, score, cm));
+            }
+            results
+        });
+
+        assert!(
+            ranked_ids.len() >= 2,
+            "should return at least 2 results, got {}",
+            ranked_ids.len()
+        );
+
+        // m1 (kubernetes, exact match) should be ranked first
+        assert_eq!(
+            ranked_ids[0].0, mneme_ids[0],
+            "m1 (closest embedding) should be ranked first. \
+             Got: {:?}",
+            ranked_ids.iter().map(|(id, s, cm)| format!("{id}: score={s:.4}, cm={cm:.4}")).collect::<Vec<_>>()
+        );
+
+        // First result should have higher content_match than second
+        assert!(
+            ranked_ids[0].2 > ranked_ids[1].2,
+            "closest mneme should have higher content_match: {:.4} > {:.4}",
+            ranked_ids[0].2,
+            ranked_ids[1].2
+        );
+    }
+
     // ── Only active mnemes returned ──
 
     #[pg_test]
     fn test_recall_excludes_non_active() {
         let (ws_id, mneme_ids) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
+        let emb = make_query_embedding();
 
         // Archive one mneme
         Spi::run(&format!(
@@ -703,36 +778,4 @@ mod tests {
 
     // ── recall does NOT update access_count or last_access directly ──
 
-    #[pg_test]
-    fn test_recall_does_not_update_access_tracking() {
-        let (ws_id, mneme_ids) = setup_recall_test_data();
-        let emb = make_query_embedding(0.1);
-
-        let before = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{}'::uuid",
-            mneme_ids[0]
-        ))
-        .expect("query failed")
-        .expect("null");
-
-        // Execute recall
-        Spi::run(&format!(
-            "SELECT * FROM pg_recall.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(384), \
-                10, 0.0, NULL)"
-        ))
-        .expect("recall failed");
-
-        let after = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{}'::uuid",
-            mneme_ids[0]
-        ))
-        .expect("query failed")
-        .expect("null");
-
-        assert_eq!(
-            before, after,
-            "recall should NOT update access_count directly"
-        );
-    }
 }

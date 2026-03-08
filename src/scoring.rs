@@ -351,95 +351,19 @@ mod unit_tests {
 // pgrx integration tests (require Postgres)
 // ──────────────────────────────────────────────
 
+// Integration tests: only test behavior that requires real Postgres timestamps,
+// since pure math is fully covered by unit_tests above.
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
     use pgrx::prelude::*;
 
     #[pg_test]
-    fn test_softplus_sql() {
-        let result = Spi::get_one::<f64>("SELECT pg_recall.softplus(0.0)")
-            .expect("query failed")
-            .expect("null result");
-        assert!((result - 0.6931).abs() < 0.001);
-    }
-
-    #[pg_test]
-    fn test_softplus_negative_sql() {
-        let result = Spi::get_one::<f64>("SELECT pg_recall.softplus(-5.0)")
-            .expect("query failed")
-            .expect("null result");
-        assert!((result - 0.0067).abs() < 0.001);
-    }
-
-    #[pg_test]
-    fn test_softplus_overflow_guard_sql() {
-        let result = Spi::get_one::<f64>("SELECT pg_recall.softplus(25.0)")
-            .expect("query failed")
-            .expect("null result");
-        assert_eq!(result, 25.0);
-    }
-
-    #[pg_test]
-    fn test_bayesian_update_sql() {
-        let result = Spi::get_one::<f64>("SELECT pg_recall.bayesian_update(0.5, 0.95)")
-            .expect("query failed")
-            .expect("null result");
-        assert!((result - 0.925).abs() < 0.01);
-    }
-
-    #[pg_test]
-    fn test_bayesian_contradiction_sql() {
-        let result = Spi::get_one::<f64>("SELECT pg_recall.bayesian_update(0.8, 0.10)")
-            .expect("query failed")
-            .expect("null result");
-        assert!((result - 0.32).abs() < 0.02);
-    }
-
-    #[pg_test]
-    fn test_bayesian_bounds_sql() {
-        let low = Spi::get_one::<f64>("SELECT pg_recall.bayesian_update(0.001, 0.001)")
-            .expect("query failed")
-            .expect("null result");
-        assert!(low >= 0.025);
-
-        let high = Spi::get_one::<f64>("SELECT pg_recall.bayesian_update(0.999, 0.999)")
-            .expect("query failed")
-            .expect("null result");
-        assert!(high <= 0.975);
-    }
-
-    #[pg_test]
-    fn test_actr_activation_sql() {
-        // Frequently accessed, moderate age -> positive, high activation
-        let result = Spi::get_one::<f64>(
-            "SELECT pg_recall.actr_activation(13, now() - interval '10 days')",
-        )
-        .expect("query failed")
-        .expect("null result");
-        assert!(
-            result > 2.0,
-            "actr_activation(13, 10d) should be > 2.0, got {result}"
-        );
-    }
-
-    #[pg_test]
-    fn test_actr_activation_old_sql() {
-        // Never re-accessed, very old -> negative activation
-        let result = Spi::get_one::<f64>(
-            "SELECT pg_recall.actr_activation(0, now() - interval '1400 days')",
-        )
-        .expect("query failed")
-        .expect("null result");
-        assert!(
-            result < -2.0,
-            "actr_activation(0, 1400d) should be negative, got {result}"
-        );
-    }
-
-    #[pg_test]
-    fn test_actr_activation_recent_sql() {
-        // Very recent access should have very high activation (age clamped to 1/1440)
+    fn test_actr_timestamp_age_clamping() {
+        // Very recent access (10 seconds) should be clamped to one-minute floor,
+        // producing very high activation. This tests the timestamptz→days conversion
+        // path that unit tests can't exercise.
         let result = Spi::get_one::<f64>(
             "SELECT pg_recall.actr_activation(5, now() - interval '10 seconds')",
         )
@@ -447,28 +371,14 @@ mod tests {
         .expect("null result");
         assert!(
             result > 5.0,
-            "very recent access should have high activation, got {result}"
+            "very recent access should have high activation (age clamping), got {result}"
         );
     }
 
     #[pg_test]
-    fn test_ebbinghaus_decay_sql() {
-        // Well-spaced access -> moderate-high retention
-        let result = Spi::get_one::<f64>(
-            "SELECT pg_recall.ebbinghaus_decay(\
-                now() - interval '30 days', 50, now() - interval '180 days')",
-        )
-        .expect("query failed")
-        .expect("null result");
-        assert!(
-            result > 0.5 && result < 1.0,
-            "ebbinghaus_decay(30d, 50, 180d) = {result}"
-        );
-    }
-
-    #[pg_test]
-    fn test_ebbinghaus_crammed_sql() {
-        // Crammed access -> lower retention than well-spaced
+    fn test_ebbinghaus_spacing_effect_via_timestamps() {
+        // Crammed vs well-spaced via real timestamps — tests the timestamp
+        // conversion path: same days_since, different lifespans.
         let crammed = Spi::get_one::<f64>(
             "SELECT pg_recall.ebbinghaus_decay(\
                 now() - interval '30 days', 50, now() - interval '1 day')",
@@ -483,7 +393,39 @@ mod tests {
         .expect("null result");
         assert!(
             crammed < spaced,
-            "crammed ({crammed}) should decay faster than spaced ({spaced})"
+            "crammed ({crammed}) should retain less than spaced ({spaced})"
+        );
+    }
+
+    #[pg_test]
+    fn test_bayesian_chained_updates_stay_bounded() {
+        // Apply 20 rounds of contradicting evidence via SQL and verify bounds hold.
+        // Tests that floating-point accumulation doesn't break Laplace bounds.
+        let mut conf = 0.5_f64;
+        for _ in 0..20 {
+            conf = Spi::get_one::<f64>(&format!(
+                "SELECT pg_recall.bayesian_update({conf}, 0.05)"
+            ))
+            .expect("query failed")
+            .expect("null");
+        }
+        assert!(
+            conf >= 0.025,
+            "20 rounds of contradicting evidence should stay above floor: {conf}"
+        );
+
+        // Now 20 rounds of confirming evidence
+        conf = 0.5;
+        for _ in 0..20 {
+            conf = Spi::get_one::<f64>(&format!(
+                "SELECT pg_recall.bayesian_update({conf}, 0.99)"
+            ))
+            .expect("query failed")
+            .expect("null");
+        }
+        assert!(
+            conf <= 0.975,
+            "20 rounds of confirming evidence should stay below ceiling: {conf}"
         );
     }
 }

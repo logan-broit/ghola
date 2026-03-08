@@ -341,4 +341,63 @@ mod tests {
 
         assert_eq!(row, "0.5|0|active", "defaults should be confidence=0.5, access_count=0, state='active'");
     }
+
+    #[pg_test]
+    #[should_panic(expected = "expected 384 dimensions")]
+    fn test_wrong_vector_dimensions_rejected() {
+        // A 3-dim vector should be rejected by the vector(384) column type
+        Spi::run(
+            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+             VALUES (gen_random_uuid(), 'test', 'content', '[0.1, 0.2, 0.3]'::vector(384))"
+        )
+        .expect("should have failed");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "violates foreign key constraint")]
+    fn test_association_fk_rejects_nonexistent_mneme() {
+        // Associations referencing non-existent mneme IDs should fail
+        let fake_a = "00000000-0000-0000-0000-000000000001";
+        let fake_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+             VALUES ('{fake_a}'::uuid, '{fake_b}'::uuid, 0.5)"
+        ))
+        .expect("should have failed with FK violation");
+    }
+
+    #[pg_test]
+    fn test_cascade_delete_cleans_associations() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup");
+        let emb = zero_embedding_literal();
+
+        let id_a = "00000000-0000-0000-0000-00000000aa01";
+        let id_b = "ffffffff-ffff-ffff-ffff-ffffffaa0002";
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.mnemes (id, workspace_id, concept, content, embedding) \
+             VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'content', '{emb}'::vector),
+                    ('{id_b}'::uuid, gen_random_uuid(), 'b', 'content', '{emb}'::vector)"
+        ))
+        .expect("insert mnemes");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+             VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 0.5)"
+        ))
+        .expect("insert assoc");
+
+        // Delete one mneme — association should cascade-delete
+        Spi::run(&format!(
+            "DELETE FROM pg_recall.mnemes WHERE id = '{id_a}'::uuid"
+        ))
+        .expect("delete mneme");
+
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_recall.associations"
+        )
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(count, 0, "association should be cascade-deleted when mneme is deleted");
+    }
 }

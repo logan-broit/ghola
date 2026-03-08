@@ -815,4 +815,133 @@ mod tests {
 
         assert_eq!(total, 0, "empty queue should return 0");
     }
+
+    // ── Weight saturation: LEAST(1.0, ...) cap is enforced ──
+
+    #[pg_test]
+    fn test_weight_capped_at_one() {
+        let (_ws_id, m1, m2, ..) = setup_test_mnemes();
+
+        // Manually set weight to 0.99 and process one more co-activation
+        // to verify LEAST(1.0, ...) prevents exceeding 1.0
+        let (src, dst) = if m1 < m2 {
+            (&m1, &m2)
+        } else {
+            (&m2, &m1)
+        };
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, weight, co_activations) \
+             VALUES ('{src}'::uuid, '{dst}'::uuid, 0.99, 100)"
+        ))
+        .expect("insert failed");
+
+        // Process a high-signal co-activation that would push weight past 1.0
+        // weight = LEAST(1.0, exp(ln(0.99) + 0.81 * ln(1.01))) ≈ LEAST(1.0, 0.998)
+        // Even with many rounds, it should never exceed 1.0
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.co_activation_queue (workspace_id, mneme_ids, scores) \
+             VALUES (gen_random_uuid(), ARRAY['{src}','{dst}']::uuid[], ARRAY[0.99, 0.99]::float8[])"
+        ))
+        .expect("enqueue failed");
+        Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+            .expect("process failed");
+
+        let weight = Spi::get_one::<f64>(
+            "SELECT weight FROM pg_recall.associations LIMIT 1",
+        )
+        .expect("query failed")
+        .expect("null");
+
+        assert!(
+            weight <= 1.0,
+            "weight must never exceed 1.0 even when near saturation, got {weight}"
+        );
+        assert!(
+            weight > 0.98,
+            "weight near 1.0 should stay near 1.0 after reinforcement, got {weight}"
+        );
+    }
+
+    // ── co_activations counter increments correctly ──
+
+    #[pg_test]
+    fn test_co_activations_counter_increments() {
+        let (ws_id, m1, m2, ..) = setup_test_mnemes();
+
+        // Process 3 co-activation events for the same pair
+        for _ in 0..3 {
+            Spi::run(&format!(
+                "SELECT pg_recall.record_co_activation(\
+                    '{ws_id}'::uuid, \
+                    ARRAY['{m1}','{m2}']::uuid[], \
+                    ARRAY[0.8, 0.7]::float8[])"
+            ))
+            .expect("record failed");
+            Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+                .expect("process failed");
+        }
+
+        let co_acts = Spi::get_one::<i32>(
+            "SELECT co_activations FROM pg_recall.associations LIMIT 1",
+        )
+        .expect("query failed")
+        .expect("null");
+
+        assert_eq!(
+            co_acts, 3,
+            "co_activations counter should be 3 after 3 events, got {co_acts}"
+        );
+    }
+
+    // ── Pair signal computation: verify score_i * score_j ──
+
+    #[pg_test]
+    fn test_pair_signal_determines_reinforcement_strength() {
+        let (ws_id, m1, m2, m3) = setup_test_mnemes();
+
+        // Strong pair: scores [0.9, 0.9] → signal = 0.81
+        // Weak pair:   scores [0.1, 0.1] → signal = 0.01
+        // Process one event with m1,m2 at high scores and m1,m3 at low scores
+        Spi::run(&format!(
+            "SELECT pg_recall.record_co_activation(\
+                '{ws_id}'::uuid, \
+                ARRAY['{m1}','{m2}']::uuid[], \
+                ARRAY[0.9, 0.9]::float8[])"
+        ))
+        .expect("record failed");
+
+        Spi::run(&format!(
+            "SELECT pg_recall.record_co_activation(\
+                '{ws_id}'::uuid, \
+                ARRAY['{m1}','{m3}']::uuid[], \
+                ARRAY[0.1, 0.1]::float8[])"
+        ))
+        .expect("record failed");
+
+        Spi::run("SELECT pg_recall.process_all_pending_co_activations()")
+            .expect("process failed");
+
+        // Get both association weights
+        let strong_weight = Spi::get_one::<f64>(&format!(
+            "SELECT weight FROM pg_recall.associations \
+             WHERE (src_id = LEAST('{m1}'::uuid, '{m2}'::uuid) \
+                AND dst_id = GREATEST('{m1}'::uuid, '{m2}'::uuid))"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        let weak_weight = Spi::get_one::<f64>(&format!(
+            "SELECT weight FROM pg_recall.associations \
+             WHERE (src_id = LEAST('{m1}'::uuid, '{m3}'::uuid) \
+                AND dst_id = GREATEST('{m1}'::uuid, '{m3}'::uuid))"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert!(
+            strong_weight > weak_weight,
+            "high-score pair should produce stronger association than low-score pair: \
+             strong={strong_weight}, weak={weak_weight}"
+        );
+    }
 }
