@@ -135,7 +135,7 @@ database:
   # -- Minimum connections
   minConns: 5
   # -- Name of the secret containing database credentials (created by CNPG)
-  existingSecret: memory-db-app
+  existingSecret: memory-db-credentials
   # -- Key in secret for username
   usernameKey: username
   # -- Key in secret for password

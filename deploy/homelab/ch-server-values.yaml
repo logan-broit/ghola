@@ -31,7 +31,7 @@ database:
   name: memories
   maxConns: 10
   minConns: 2
-  existingSecret: memory-db-app
+  existingSecret: memory-db-credentials
   usernameKey: username
   passwordKey: password
 
