@@ -22,7 +22,7 @@ resources:
     memory: 256Mi
 
 config:
-  environment: homelab
+  environment: local
   logLevel: debug
 
 database:
