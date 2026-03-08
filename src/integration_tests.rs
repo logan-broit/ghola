@@ -577,4 +577,223 @@ mod tests {
         //  but with matching text it should contribute something)
         // We just verify both are valid; exact ordering depends on the query
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v0.2 Integration Tests: Worker stats, decay, pruning, archival
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[pg_test]
+    fn test_worker_stats_table_in_schema() {
+        let exists = Spi::get_one::<bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'pg_recall' AND table_name = 'worker_stats'
+            )",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(exists, "worker_stats table should exist in pg_recall schema");
+    }
+
+    #[pg_test]
+    fn test_worker_status_type_in_schema() {
+        let exists = Spi::get_one::<bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM pg_type t
+                JOIN pg_namespace n ON t.typnamespace = n.oid
+                WHERE n.nspname = 'pg_recall' AND t.typname = 'worker_status'
+            )",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(exists, "worker_status type should exist in pg_recall schema");
+    }
+
+    #[pg_test]
+    fn test_get_worker_stats_returns_initial_state() {
+        let state = Spi::get_one::<String>(
+            "SELECT (s).state FROM pg_recall.get_worker_stats() AS s",
+        )
+        .expect("query failed")
+        .expect("null result");
+        assert_eq!(state, "stopped", "initial worker state should be 'stopped'");
+    }
+
+    #[pg_test]
+    fn test_decay_reduces_stale_association_weights() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "70000000-0000-0000-0000-000000000001";
+        let m1 = insert_mneme(ws, "decay test a", "content a", 0.1);
+        let m2 = insert_mneme(ws, "decay test b", "content b", 0.2);
+
+        // Insert an association with a known weight, backdated > 1 day
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, weight, updated_at) \
+             SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
+                    GREATEST('{m1}'::uuid, '{m2}'::uuid), \
+                    0.5, now() - interval '2 days'"
+        ))
+        .expect("insert association failed");
+
+        let weight_before = Spi::get_one::<f64>(
+            "SELECT weight FROM pg_recall.associations LIMIT 1",
+        )
+        .expect("query failed")
+        .expect("null");
+
+        // Run the decay SQL directly (same as worker runs)
+        Spi::run(
+            "UPDATE pg_recall.associations \
+             SET weight = weight * 0.999 \
+             WHERE updated_at < now() - interval '1 day'",
+        )
+        .expect("decay failed");
+
+        let weight_after = Spi::get_one::<f64>(
+            "SELECT weight FROM pg_recall.associations LIMIT 1",
+        )
+        .expect("query failed")
+        .expect("null");
+
+        assert!(
+            weight_after < weight_before,
+            "decay should reduce weight: {weight_before} -> {weight_after}"
+        );
+        assert!(
+            (weight_after - weight_before * 0.999).abs() < 1e-9,
+            "decay should be exactly 0.1%: expected {}, got {weight_after}",
+            weight_before * 0.999
+        );
+    }
+
+    #[pg_test]
+    fn test_pruning_removes_sub_threshold_associations() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "80000000-0000-0000-0000-000000000001";
+        let m1 = insert_mneme(ws, "prune test a", "content a", 0.1);
+        let m2 = insert_mneme(ws, "prune test b", "content b", 0.2);
+        let m3 = insert_mneme(ws, "prune test c", "content c", 0.3);
+
+        // Insert one strong association and one below threshold
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+             SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
+                    GREATEST('{m1}'::uuid, '{m2}'::uuid), 0.5"
+        ))
+        .expect("insert strong assoc failed");
+
+        Spi::run(&format!(
+            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+             SELECT LEAST('{m1}'::uuid, '{m3}'::uuid), \
+                    GREATEST('{m1}'::uuid, '{m3}'::uuid), 0.0005"
+        ))
+        .expect("insert weak assoc failed");
+
+        let count_before = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_recall.associations",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(count_before, 2);
+
+        // Run pruning SQL (same as worker runs)
+        Spi::run(
+            "DELETE FROM pg_recall.associations WHERE weight < 0.001",
+        )
+        .expect("prune failed");
+
+        let count_after = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_recall.associations",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(count_after, 1, "pruning should remove sub-threshold association");
+
+        // The strong association should survive
+        let remaining_weight = Spi::get_one::<f64>(
+            "SELECT weight FROM pg_recall.associations LIMIT 1",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert!(
+            (remaining_weight - 0.5).abs() < 1e-9,
+            "strong association should survive pruning"
+        );
+    }
+
+    #[pg_test]
+    fn test_dormant_archival_transitions_stale_low_confidence() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "90000000-0000-0000-0000-000000000001";
+        let m_stale = insert_mneme(ws, "stale memory", "old and uncertain", 0.1);
+        let m_fresh = insert_mneme(ws, "fresh memory", "recent and confident", 0.2);
+        let m_stale_confident = insert_mneme(ws, "stale confident", "old but sure", 0.3);
+
+        // Set up: stale + low confidence -> should be archived
+        Spi::run(&format!(
+            "UPDATE pg_recall.mnemes SET \
+                 last_access = now() - interval '100 days', \
+                 confidence = 0.2 \
+             WHERE id = '{m_stale}'::uuid"
+        ))
+        .expect("update stale failed");
+
+        // Set up: fresh + high confidence -> should NOT be archived
+        Spi::run(&format!(
+            "UPDATE pg_recall.mnemes SET \
+                 last_access = now() - interval '1 day', \
+                 confidence = 0.9 \
+             WHERE id = '{m_fresh}'::uuid"
+        ))
+        .expect("update fresh failed");
+
+        // Set up: stale + high confidence -> should NOT be archived
+        Spi::run(&format!(
+            "UPDATE pg_recall.mnemes SET \
+                 last_access = now() - interval '100 days', \
+                 confidence = 0.8 \
+             WHERE id = '{m_stale_confident}'::uuid"
+        ))
+        .expect("update stale confident failed");
+
+        // Run archival SQL (same as worker runs)
+        Spi::run(
+            "UPDATE pg_recall.mnemes \
+             SET state = 'dormant' \
+             WHERE state = 'active' \
+               AND last_access < now() - interval '90 days' \
+               AND confidence < 0.3",
+        )
+        .expect("archival failed");
+
+        // Verify: stale + low confidence should be dormant
+        let stale_state = Spi::get_one::<String>(&format!(
+            "SELECT state FROM pg_recall.mnemes WHERE id = '{m_stale}'::uuid",
+        ))
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(stale_state, "dormant", "stale low-confidence should be archived to dormant");
+
+        // Verify: fresh should still be active
+        let fresh_state = Spi::get_one::<String>(&format!(
+            "SELECT state FROM pg_recall.mnemes WHERE id = '{m_fresh}'::uuid",
+        ))
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(fresh_state, "active", "fresh memory should remain active");
+
+        // Verify: stale but confident should still be active
+        let confident_state = Spi::get_one::<String>(&format!(
+            "SELECT state FROM pg_recall.mnemes WHERE id = '{m_stale_confident}'::uuid",
+        ))
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(confident_state, "active", "stale but confident memory should remain active");
+    }
 }
