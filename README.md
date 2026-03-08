@@ -80,6 +80,22 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 | `scores` | `float8[]` | Corresponding recall scores |
 | `created_at` | `timestamptz` | Event time |
 
+**`pg_recall.worker_stats`** — Background worker operational state (singleton)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `int` | Always 1 (enforced by CHECK) |
+| `state` | `text` | Worker state: `stopped`, `active`, `idle`, `dormant`, `shutdown` |
+| `queue_depth` | `bigint` | Current co-activation queue depth |
+| `batches_processed` | `bigint` | Total batches processed since start |
+| `rows_processed` | `bigint` | Total queue rows processed |
+| `pairs_updated` | `bigint` | Total association pairs updated |
+| `last_batch_at` | `timestamptz` | Last batch processing time |
+| `last_decay_at` | `timestamptz` | Last decay/pruning cycle time |
+| `poll_interval_ms` | `int` | Current polling interval |
+| `started_at` | `timestamptz` | Worker start time |
+| `updated_at` | `timestamptz` | Last stats update |
+
 ### Indexes
 
 - HNSW index on `mnemes(embedding)` for approximate nearest neighbor search
@@ -147,7 +163,8 @@ SELECT * FROM pg_recall.recall(
 
 ### Processing Hebbian Learning
 
-Each `recall()` call automatically enqueues a co-activation event. Process these to form/strengthen associations:
+Each `recall()` call automatically enqueues a co-activation event. In v0.2, the
+background worker processes these automatically. You can also process them manually:
 
 ```sql
 -- Process a batch of pending events
@@ -157,12 +174,43 @@ SELECT pg_recall.process_co_activation_batch(100);
 SELECT pg_recall.process_all_pending_co_activations();
 ```
 
-Schedule with `pg_cron` for automatic processing:
+#### Background Worker (v0.2)
+
+The background worker automatically drains the co-activation queue, runs periodic
+association decay/pruning, and archives dormant memories. To enable it:
+
+```
+# postgresql.conf
+shared_preload_libraries = 'pg_recall'
+pg_recall.database = 'memories'          # database where extension is installed
+```
+
+Restart PostgreSQL after changing `shared_preload_libraries`. The worker adapts its
+polling interval based on queue activity:
+
+| State | Poll Interval | Transition |
+|-------|--------------|------------|
+| Active | 100ms | No rows for 30s → Idle |
+| Idle | 1s | No rows for 5min → Dormant |
+| Dormant | 5s | Rows found → Active |
+
+**Periodic maintenance** (runs inside the worker):
+
+- **Association decay** (hourly): 0.1% weight reduction on stale associations (>1 day old)
+- **Association pruning** (hourly): removes associations below 0.001
+- **Dormant archival** (every 6h): archives memories with 90+ days inactive and confidence < 0.3
+
+**Monitoring the worker:**
 
 ```sql
-SELECT cron.schedule('hebbian-learning', '*/5 * * * *',
-    'SELECT pg_recall.process_all_pending_co_activations()');
+SELECT * FROM pg_recall.get_worker_stats();
+-- Returns: state, queue_depth, batches_processed, rows_processed,
+--          pairs_updated, last_batch_at, last_decay_at, poll_interval_ms,
+--          started_at, uptime_seconds
 ```
+
+Without `shared_preload_libraries`, the extension works exactly as v0.1 — process
+events manually or via `pg_cron`.
 
 ### Confirming Recall
 
@@ -240,7 +288,7 @@ cargo pgrx run pg18
 
 ## Version
 
-0.1.0
+0.2.0
 
 ## License
 
