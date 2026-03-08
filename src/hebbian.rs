@@ -87,11 +87,11 @@ fn get_associations(
 #[pg_extern]
 fn update_confidence(mneme_id: pgrx::Uuid, evidence: f64) -> f64 {
     Spi::connect_mut(|client| {
-        // Read current confidence with row lock
+        // Read current confidence and tier with row lock
         let tup_table = client
             .select(
                 &format!(
-                    "SELECT confidence FROM pg_recall.mnemes WHERE id = '{mneme_id}' FOR UPDATE"
+                    "SELECT confidence, tier FROM pg_recall.mnemes WHERE id = '{mneme_id}' FOR UPDATE"
                 ),
                 None,
                 &[],
@@ -108,23 +108,38 @@ fn update_confidence(mneme_id: pgrx::Uuid, evidence: f64) -> f64 {
                     .get::<f64>(1)
                     .expect("failed to get confidence")
                     .expect("null confidence");
+                let tier: String = r
+                    .get::<String>(2)
+                    .expect("failed to get tier")
+                    .expect("null tier");
 
                 let posterior = bayesian_update_inner(prior, evidence);
+                let floor = tier_confidence_floor(&tier);
+                let clamped = posterior.max(floor);
 
                 client
                     .update(
                         &format!(
-                            "UPDATE pg_recall.mnemes SET confidence = {posterior} WHERE id = '{mneme_id}'"
+                            "UPDATE pg_recall.mnemes SET confidence = {clamped} WHERE id = '{mneme_id}'"
                         ),
                         None,
                         &[],
                     )
                     .expect("failed to update confidence");
 
-                posterior
+                clamped
             }
         }
     })
+}
+
+/// Returns the confidence floor for a given tier.
+/// Core memories never drop below 0.30; index and state use the Laplace bound (0.025).
+fn tier_confidence_floor(tier: &str) -> f64 {
+    match tier {
+        "core" => 0.30,
+        _ => 0.025,
+    }
 }
 
 /// Confirm recall for multiple mnemes by applying evidence=0.95 to each.
@@ -135,7 +150,7 @@ fn confirm_recall(mneme_ids: Vec<pgrx::Uuid>) -> &'static str {
             let tup_table = client
                 .select(
                     &format!(
-                        "SELECT confidence FROM pg_recall.mnemes WHERE id = '{id}' FOR UPDATE"
+                        "SELECT confidence, tier FROM pg_recall.mnemes WHERE id = '{id}' FOR UPDATE"
                     ),
                     None,
                     &[],
@@ -152,13 +167,19 @@ fn confirm_recall(mneme_ids: Vec<pgrx::Uuid>) -> &'static str {
                         .get::<f64>(1)
                         .expect("failed to get confidence")
                         .expect("null confidence");
+                    let tier: String = r
+                        .get::<String>(2)
+                        .expect("failed to get tier")
+                        .expect("null tier");
 
                     let posterior = bayesian_update_inner(prior, 0.95);
+                    let floor = tier_confidence_floor(&tier);
+                    let clamped = posterior.max(floor);
 
                     client
                         .update(
                             &format!(
-                                "UPDATE pg_recall.mnemes SET confidence = {posterior} WHERE id = '{id}'"
+                                "UPDATE pg_recall.mnemes SET confidence = {clamped} WHERE id = '{id}'"
                             ),
                             None,
                             &[],
@@ -609,6 +630,55 @@ mod tests {
                 "mneme {mid} confidence should be ~0.925 after confirm_recall, got {conf}"
             );
         }
+    }
+
+    // ── tier-aware confidence floor ──
+
+    #[pg_test]
+    fn test_core_tier_confidence_floor() {
+        let (_ws_id, m1, ..) = setup_test_mnemes();
+
+        // Set mneme to core tier with moderate confidence
+        Spi::run(&format!(
+            "UPDATE pg_recall.mnemes SET tier = 'core', confidence = 0.5 WHERE id = '{m1}'::uuid"
+        ))
+        .expect("update failed");
+
+        // Apply very weak evidence — bayesian_update(0.5, 0.05) ≈ 0.072
+        // But core floor is 0.30, so result should be clamped to 0.30
+        let new_conf = Spi::get_one::<f64>(&format!(
+            "SELECT pg_recall.update_confidence('{m1}'::uuid, 0.05)"
+        ))
+        .expect("query failed")
+        .expect("null result");
+
+        assert!(
+            (new_conf - 0.30).abs() < 0.01,
+            "core tier should clamp confidence to floor 0.30, got {new_conf}"
+        );
+    }
+
+    #[pg_test]
+    fn test_index_tier_no_elevated_floor() {
+        let (_ws_id, m1, ..) = setup_test_mnemes();
+
+        // Default tier is 'index', confidence 0.5
+        // Apply weak evidence — bayesian_update(0.5, 0.05) ≈ 0.072
+        // Index floor is 0.025, so no clamping
+        let new_conf = Spi::get_one::<f64>(&format!(
+            "SELECT pg_recall.update_confidence('{m1}'::uuid, 0.05)"
+        ))
+        .expect("query failed")
+        .expect("null result");
+
+        assert!(
+            new_conf < 0.10,
+            "index tier should allow confidence to drop below 0.10, got {new_conf}"
+        );
+        assert!(
+            new_conf >= 0.025,
+            "index tier should not drop below Laplace bound 0.025, got {new_conf}"
+        );
     }
 
     // ── process_co_activation_batch ──
