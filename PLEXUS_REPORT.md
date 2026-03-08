@@ -1,11 +1,13 @@
 # Plexus Orchestration Report
 
-**Spec:** spec
-**Branch:** `plex/orch/spec`
-**Date:** 2026-03-07 16:07 (45m 48s)
-**Agent:** claude
-**Model:** claude-opus-4-6
-**Concurrency:** 3
+| | |
+|---|---|
+| **Spec** | spec |
+| **Branch** | `plex/orch/spec` |
+| **Date** | 2026-03-07 16:07 (45m 48s) |
+| **Coordinator** | Claude · claude-opus-4-6 |
+| **Build agents** | Claude · claude-opus-4-6 |
+| **Concurrency** | 3 |
 
 ---
 
