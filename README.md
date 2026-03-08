@@ -2,7 +2,7 @@
 
 Cognitive Memory Primitives for Postgres.
 
-A Postgres extension that implements neuroscience-inspired memory primitives as composable SQL functions over pgvector-enabled tables. Memories decay with time, strengthen through use, form associations automatically through co-activation, and track confidence via Bayesian updating.
+A Postgres extension that implements neuroscience-inspired memory primitives as composable SQL functions over pgvector-enabled tables. Memories decay with time, strengthen through use, form associations automatically through co-activation, and track confidence via Bayesian updating. A typed memory system classifies memories and associations to influence cognitive scoring — working memories decay faster, core memories resist erosion, contradictions apply negative boost, and session context provides episodic recall.
 
 ## Cognitive Models
 
@@ -39,6 +39,9 @@ Then in PostgreSQL:
 ```sql
 CREATE EXTENSION vector;       -- pgvector must be installed first
 CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
+
+-- Optional: configure embedding dimensions (default 768, must be called before inserting data)
+SELECT pg_recall.configure_dimensions(3072);  -- e.g. for OpenAI text-embedding-3-large
 ```
 
 ## Schema
@@ -53,23 +56,32 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 | `workspace_id` | `uuid` | Tenant isolation key |
 | `concept` | `text` | Short label for the memory |
 | `content` | `text` | Full memory content |
-| `embedding` | `vector(384)` | Semantic embedding |
+| `embedding` | `vector(768)` | Semantic embedding (dimension configurable) |
 | `search_vector` | `tsvector` | Auto-generated from concept (weight A) + content (weight B) |
 | `confidence` | `float8` | Bayesian confidence, default 0.5 |
 | `access_count` | `int` | Number of retrievals, default 0 |
 | `last_access` | `timestamptz` | Last retrieval time |
 | `created_at` | `timestamptz` | Creation time |
 | `state` | `text` | One of: `active`, `archived`, `dormant` |
+| `memory_type` | `text` | One of: `factual`, `experiential`, `working` |
+| `scope` | `text` | One of: `personal`, `org` |
+| `tier` | `text` | One of: `core`, `index`, `state` |
+| `tags` | `text[]` | Free-form tags for filtering |
+| `session_id` | `uuid` | Episodic session grouping |
+| `expires_at` | `timestamptz` | Expiration time (working memories) |
 
-**`pg_recall.associations`** — Hebbian links between mnemes
+**`pg_recall.associations`** — Typed links between mnemes
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `src_id` | `uuid` | Source mneme (canonical: src_id < dst_id) |
+| `src_id` | `uuid` | Source mneme |
 | `dst_id` | `uuid` | Destination mneme |
+| `association_type` | `text` | One of: `hebbian`, `contradicts`, `supersedes`, `supports`, `session` |
 | `weight` | `float8` | Association strength [0, 1] |
 | `co_activations` | `int` | Number of co-activation events |
 | `updated_at` | `timestamptz` | Last update time |
+
+Primary key: `(src_id, dst_id, association_type)` — the same pair can have multiple typed relationships.
 
 **`pg_recall.co_activation_queue`** — Pending Hebbian processing events
 
@@ -80,6 +92,29 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 | `mneme_ids` | `uuid[]` | Co-activated mneme IDs |
 | `scores` | `float8[]` | Corresponding recall scores |
 | `created_at` | `timestamptz` | Event time |
+
+**`pg_recall.config`** — Extension configuration
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `key` | `text` | Configuration key (primary key) |
+| `value` | `text` | Configuration value |
+
+Default entry: `embedding_dims = '768'`.
+
+**`pg_recall.contradiction_candidates`** — Flagged contradicting mneme pairs
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `bigserial` | Primary key |
+| `workspace_id` | `uuid` | Tenant key |
+| `mneme_a` | `uuid` | Newer mneme (the one that triggered detection) |
+| `mneme_b` | `uuid` | Existing mneme |
+| `similarity` | `float8` | Cosine similarity between embeddings |
+| `concept_overlap` | `boolean` | Whether concepts match exactly |
+| `status` | `text` | One of: `pending`, `confirmed`, `dismissed` |
+| `created_at` | `timestamptz` | Detection time |
+| `resolved_at` | `timestamptz` | Resolution time (null if pending) |
 
 **`pg_recall.worker_stats`** — Background worker operational state (singleton)
 
@@ -97,25 +132,15 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 | `started_at` | `timestamptz` | Worker start time |
 | `updated_at` | `timestamptz` | Last stats update |
 
-**`pg_recall.contradiction_candidates`** — Flagged contradicting mneme pairs (v0.3)
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `bigserial` | Primary key |
-| `workspace_id` | `uuid` | Tenant key |
-| `mneme_a` | `uuid` | First mneme (the newer one when auto-detected) |
-| `mneme_b` | `uuid` | Second mneme |
-| `similarity` | `float8` | Cosine similarity between embeddings |
-| `concept_overlap` | `boolean` | Whether concepts match exactly |
-| `status` | `text` | One of: `pending`, `confirmed`, `dismissed` |
-| `created_at` | `timestamptz` | Detection time |
-| `resolved_at` | `timestamptz` | Resolution time (null if pending) |
-
 ### Indexes
 
 - HNSW index on `mnemes(embedding)` for approximate nearest neighbor search
 - GIN index on `mnemes(search_vector)` for full-text search
 - B-tree on `mnemes(workspace_id, last_access DESC)` for temporal queries
+- B-tree on `mnemes(workspace_id, memory_type)` for type-filtered queries
+- B-tree on `mnemes(session_id)` (partial: where not null)
+- GIN on `mnemes(tags)` for tag containment queries
+- B-tree on `mnemes(expires_at)` (partial: where not null)
 - B-tree on `associations(dst_id, src_id)` for reverse lookups
 - B-tree on `contradiction_candidates(workspace_id, status)` for pending lookups
 
@@ -135,13 +160,13 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 -- Defaults: (0.6, 0.4, 0.5, 4.0)
 ```
 
-**`pg_recall.contradiction_candidate_result`** — Return type for `check_contradictions()` (v0.3)
+**`pg_recall.contradiction_candidate_result`** — Return type for `check_contradictions()`
 
 ```sql
 (candidate_id bigint, mneme_a uuid, mneme_b uuid, similarity float8, concept_overlap boolean)
 ```
 
-**`pg_recall.contradiction_detail`** — Return type for `get_pending_contradictions()` (v0.3)
+**`pg_recall.contradiction_detail`** — Return type for `get_pending_contradictions()`
 
 ```sql
 (candidate_id bigint, similarity float8, concept_overlap boolean,
@@ -154,14 +179,21 @@ CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
 ### Inserting Memories
 
 ```sql
-INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding)
+INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding,
+                              memory_type, tier, tags, session_id)
 VALUES (
     'your-workspace-uuid',
     'kubernetes',
     'Pod scheduling uses the kube-scheduler to assign pods to nodes',
-    '[0.1, 0.2, ...]'::vector(384)  -- 384-dim embedding from your model
+    '[0.1, 0.2, ...]'::vector(768),  -- embedding from your model
+    'factual',                         -- memory type
+    'index',                           -- tier
+    ARRAY['k8s', 'scheduling'],        -- tags
+    'session-uuid'                     -- optional session grouping
 );
 ```
+
+When a mneme is inserted with a `session_id`, a trigger automatically creates `session` associations to other mnemes in the same workspace and session. A separate trigger flags potential contradictions with existing mnemes.
 
 ### Recalling Memories
 
@@ -171,30 +203,71 @@ The `recall()` function fuses vector similarity, full-text search, temporal acti
 SELECT * FROM pg_recall.recall(
     'your-workspace-uuid'::uuid,    -- workspace filter
     'how does pod scheduling work',  -- query text (for FTS)
-    '[0.1, 0.2, ...]'::vector(384), -- query embedding (for vector search)
+    '[0.1, 0.2, ...]'::vector(768), -- query embedding (for vector search)
     10,                              -- limit
     0.0,                             -- min_confidence threshold
     NULL                             -- use default weights
 );
 ```
 
-With custom weights:
+With filters and session context:
 
 ```sql
 SELECT * FROM pg_recall.recall(
     'your-workspace-uuid'::uuid,
     'pod scheduling',
-    '[0.1, 0.2, ...]'::vector(384),
+    '[0.1, 0.2, ...]'::vector(768),
     10,
     0.0,
-    (0.8, 0.2, 0.5, 2.0)::pg_recall.score_weights  -- heavier semantic, lighter FTS
+    NULL,                           -- default weights
+    'factual',                      -- memory_type filter
+    'personal',                     -- scope filter
+    ARRAY['k8s'],                   -- tag filter (AND semantics)
+    'session-uuid'::uuid            -- session filter + boost
 );
+```
+
+When `session_id` is provided, mnemes from that session receive a +0.3 scoring boost.
+
+### Typed Memory Behavior
+
+Memory types influence cognitive scoring beyond simple filtering:
+
+| Type | Scoring Effect |
+|------|---------------|
+| `working` | 2x ACT-R decay exponent — fades from results faster |
+| `core` tier | Confidence never drops below 0.30, even under contradiction |
+| `state` tier | Excluded from Hebbian association learning |
+| Expired (`expires_at < now()`) | Excluded from all recall results |
+
+### Association Types
+
+| Type | Direction | Scoring Influence | Created By |
+|------|-----------|-------------------|------------|
+| `hebbian` | Undirected | Full weight (1.0x) | Co-activation batch processing |
+| `supports` | Directed | Moderate boost (0.5x) | `mark_supports()` |
+| `session` | Undirected | Mild boost (0.3x) | Auto-trigger on insert |
+| `contradicts` | Directed | Negative boost (-0.5x) | `resolve_contradiction('confirmed')` |
+| `supersedes` | Directed | No scoring; archives older mneme | `mark_supersedes()` |
+
+### Managing Associations
+
+```sql
+-- Mark a newer mneme as superseding an older one (archives the older mneme)
+SELECT pg_recall.mark_supersedes('newer-id'::uuid, 'older-id'::uuid);
+
+-- Mark supporting evidence (boosts supported mneme's confidence)
+SELECT pg_recall.mark_supports('evidence-id'::uuid, 'claim-id'::uuid);
+
+-- Query typed associations for a mneme
+SELECT * FROM pg_recall.get_typed_associations('mneme-id'::uuid);
+SELECT * FROM pg_recall.get_typed_associations('mneme-id'::uuid, 'supports');
+SELECT * FROM pg_recall.get_typed_associations('mneme-id'::uuid, NULL, 0.1);
 ```
 
 ### Processing Hebbian Learning
 
-Each `recall()` call automatically enqueues a co-activation event. In v0.2, the
-background worker processes these automatically. You can also process them manually:
+Each `recall()` call automatically enqueues a co-activation event. The background worker processes these automatically; you can also process them manually:
 
 ```sql
 -- Process a batch of pending events
@@ -204,10 +277,12 @@ SELECT pg_recall.process_co_activation_batch(100);
 SELECT pg_recall.process_all_pending_co_activations();
 ```
 
-#### Background Worker (v0.2)
+State-tier mnemes are excluded from Hebbian pair generation — they appear in recall results but do not form associations.
+
+#### Background Worker
 
 The background worker automatically drains the co-activation queue, runs periodic
-association decay/pruning, and archives dormant memories. To enable it:
+maintenance, and archives stale memories. To enable it:
 
 ```
 # postgresql.conf
@@ -224,28 +299,28 @@ polling interval based on queue activity:
 | Idle | 1s | No rows for 5min → Dormant |
 | Dormant | 5s | Rows found → Active |
 
-**Periodic maintenance** (runs inside the worker):
+**Periodic maintenance:**
 
-- **Association decay** (hourly): 0.1% weight reduction on stale associations (>1 day old)
-- **Association pruning** (hourly): removes associations below 0.001
-- **Dormant archival** (every 6h): archives memories with 90+ days inactive and confidence < 0.3
+| Job | Interval | Action |
+|-----|----------|--------|
+| Association decay | 1 hour | 0.1% weight reduction on stale associations (>1 day old) |
+| Association pruning | 1 hour | Remove associations with weight < 0.001 |
+| Dormant archival | 6 hours | Archive active mnemes with 90+ days inactive and confidence < 0.3 |
+| State cleanup | 6 hours | Archive state-tier mnemes with >24 hours inactive |
+| Working memory expiration | 10 minutes | Archive working mnemes past their `expires_at` |
 
-**Monitoring the worker:**
+**Monitoring:**
 
 ```sql
 SELECT * FROM pg_recall.get_worker_stats();
--- Returns: state, queue_depth, batches_processed, rows_processed,
---          pairs_updated, last_batch_at, last_decay_at, poll_interval_ms,
---          started_at, uptime_seconds
 ```
 
-Without `shared_preload_libraries`, the extension works exactly as v0.1 — process
-events manually or via `pg_cron`.
+Without `shared_preload_libraries`, the extension works fully — process events manually or via `pg_cron`.
 
-### Contradiction Detection (v0.3)
+### Contradiction Detection
 
 New mnemes are automatically checked for contradictions via an `AFTER INSERT` trigger.
-When a new mneme has high cosine similarity (≥ 0.85) to an existing active mneme in the
+When a new mneme has high cosine similarity (>= 0.85) to an existing active mneme in the
 same workspace, a contradiction candidate is flagged for review.
 
 ```sql
@@ -265,17 +340,13 @@ SELECT pg_recall.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
 **Resolving contradictions:**
 
 ```sql
--- Confirm: penalizes the newer mneme (bayesian_update with evidence=0.10)
--- and weakens any Hebbian association between the pair (weight *= 0.1)
+-- Confirm: penalizes the newer mneme, weakens Hebbian association,
+-- and creates a 'contradicts' typed association (negative recall boost)
 SELECT pg_recall.resolve_contradiction(candidate_id, 'confirmed');
 
 -- Dismiss: marks as dismissed, no side effects
 SELECT pg_recall.resolve_contradiction(candidate_id, 'dismissed');
 ```
-
-The system follows a "burden of proof on the newcomer" principle — established memories
-are defended, and contradicting newcomers must prove their worth through repeated
-confirmation before displacing existing knowledge.
 
 ### Confirming Recall
 
@@ -285,35 +356,46 @@ When a user confirms that recalled memories were useful, strengthen their confid
 SELECT pg_recall.confirm_recall(ARRAY['mneme-id-1', 'mneme-id-2']::uuid[]);
 ```
 
-### Inspecting Associations
+### Configuring Embedding Dimensions
+
+The default embedding dimension is 768. To use a different model, call `configure_dimensions()` before inserting any data:
 
 ```sql
-SELECT * FROM pg_recall.get_associations('mneme-id'::uuid, 0.01);
+SELECT pg_recall.configure_dimensions(3072);  -- for text-embedding-3-large
 ```
+
+This alters the embedding column type, recreates the HNSW index, and updates the config table. Cannot be called once data exists.
 
 ### Individual Scoring Functions
 
-All scoring primitives are available as standalone SQL functions for custom retrieval pipelines:
+All scoring primitives are available as standalone SQL functions:
 
 ```sql
--- Smooth activation function (overflow-safe)
-SELECT pg_recall.softplus(2.0);  -- ~2.13
+SELECT pg_recall.softplus(2.0);                                    -- ~2.13
+SELECT pg_recall.actr_activation(10, now() - interval '5 days');   -- temporal activation
+SELECT pg_recall.ebbinghaus_decay(                                 -- spacing-aware decay
+    now() - interval '30 days', 50, now() - interval '180 days');
+SELECT pg_recall.bayesian_update(0.5, 0.95);                       -- ~0.925
+SELECT pg_recall.update_confidence('mneme-id'::uuid, 0.95);        -- update and persist
+```
 
--- ACT-R temporal activation
-SELECT pg_recall.actr_activation(10, now() - interval '5 days');
+## Scoring Formula
 
--- Ebbinghaus spacing-aware decay
-SELECT pg_recall.ebbinghaus_decay(
-    now() - interval '30 days',   -- last_access
-    50,                            -- access_count
-    now() - interval '180 days'   -- created_at
-);
+The composite recall score is computed as:
 
--- Bayesian confidence update
-SELECT pg_recall.bayesian_update(0.5, 0.95);  -- ~0.925
+```
+content_match   = semantic_weight * cosine_similarity + fts_weight * tanh(fts_rank)
+effective_decay = actr_decay * 2.0 if memory_type = 'working', else actr_decay
+activation      = actr_activation(access_count, last_access, effective_decay)
 
--- Update a mneme's confidence directly
-SELECT pg_recall.update_confidence('mneme-id'::uuid, 0.95);
+hebbian_boost   = sum(weight * 1.0  where type = 'hebbian')
+                + sum(weight * 0.5  where type = 'supports')
+                + sum(weight * 0.3  where type = 'session')
+                - sum(weight * 0.5  where type = 'contradicts')
+                + 0.3 if candidate.session_id matches requested session_id
+
+temporal_weight = softplus(activation + hebbian_scale * hebbian_boost) / (1 + softplus(0))
+score           = content_match * temporal_weight * confidence
 ```
 
 ## Multi-Tenancy
@@ -324,18 +406,6 @@ All tables include a `workspace_id` column. The extension does not enforce Row-L
 ALTER TABLE pg_recall.mnemes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON pg_recall.mnemes
     USING (workspace_id = current_setting('app.workspace_id')::uuid);
-```
-
-## Scoring Formula
-
-The composite recall score is computed as:
-
-```
-content_match  = semantic_weight * cosine_similarity + fts_weight * tanh(fts_rank)
-activation     = actr_activation(access_count, last_access, decay_exponent)
-hebbian_boost  = sum of association weights to other candidates
-temporal_weight = softplus(activation + hebbian_scale * hebbian_boost) / (1 + softplus(0))
-score          = content_match * temporal_weight * confidence
 ```
 
 ## Development
@@ -351,9 +421,14 @@ cargo pgrx schema pg18
 cargo pgrx run pg18
 ```
 
+## Documentation
+
+- [Typed Memory System](docs/typed-memory-system.md) — typed mnemes, typed associations, type-aware scoring
+- [Contradiction Detection](docs/contradiction-detection.md) — detection strategy, resolution flow, Bayesian integration
+
 ## Version
 
-0.3.0
+0.4.0
 
 ## License
 
