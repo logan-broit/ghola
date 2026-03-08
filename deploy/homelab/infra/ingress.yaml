@@ -4,7 +4,7 @@ metadata:
   name: chapterhouse
   namespace: ch-system
   annotations:
-    cert-manager.io/cluster-issuer: selfsigned-issuer
+    cert-manager.io/cluster-issuer: homelab-ca-issuer
     haproxy.org/ssl-redirect: "false"
     haproxy.org/timeout-http-request: "30s"
     haproxy.org/timeout-connect: "10s"
