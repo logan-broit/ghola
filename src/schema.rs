@@ -68,6 +68,62 @@ CREATE TABLE co_activation_queue (
 );
 
 // ---------------------------------------------------------------------------
+// Contradiction detection
+// ---------------------------------------------------------------------------
+
+extension_sql!(
+    r#"
+-- contradiction_candidates: flagged pairs of potentially contradicting mnemes
+CREATE TABLE contradiction_candidates (
+    id              bigserial PRIMARY KEY,
+    workspace_id    uuid NOT NULL,
+    mneme_a         uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
+    mneme_b         uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
+    similarity      double precision NOT NULL,
+    concept_overlap boolean NOT NULL DEFAULT false,
+    status          text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'confirmed', 'dismissed')),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    resolved_at     timestamptz,
+    UNIQUE (mneme_a, mneme_b)
+);
+"#,
+    name = "create_contradiction_candidates_table",
+    requires = ["create_mnemes_table"],
+);
+
+extension_sql!(
+    r#"
+CREATE TYPE contradiction_candidate_result AS (
+    candidate_id    bigint,
+    mneme_a         uuid,
+    mneme_b         uuid,
+    similarity      float8,
+    concept_overlap boolean
+);
+"#,
+    name = "create_type_contradiction_candidate_result",
+);
+
+extension_sql!(
+    r#"
+CREATE TYPE contradiction_detail AS (
+    candidate_id    bigint,
+    similarity      float8,
+    concept_overlap boolean,
+    concept_a       text,
+    content_a       text,
+    confidence_a    float8,
+    concept_b       text,
+    content_b       text,
+    confidence_b    float8,
+    created_at      timestamptz
+);
+"#,
+    name = "create_type_contradiction_detail",
+);
+
+// ---------------------------------------------------------------------------
 // Indexes
 // ---------------------------------------------------------------------------
 
@@ -88,9 +144,13 @@ CREATE INDEX mnemes_workspace_last_access_idx
 -- B-tree index for reverse association lookups (dst -> src)
 CREATE INDEX associations_dst_src_idx
     ON associations (dst_id, src_id);
+
+-- B-tree index for pending contradiction lookups by workspace
+CREATE INDEX contradiction_candidates_workspace_idx
+    ON contradiction_candidates (workspace_id, status);
 "#,
     name = "create_indexes",
-    requires = ["create_mnemes_table", "create_associations_table"],
+    requires = ["create_mnemes_table", "create_associations_table", "create_contradiction_candidates_table"],
 );
 
 // ---------------------------------------------------------------------------
