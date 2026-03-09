@@ -141,17 +141,6 @@ database:
   # -- Key in secret for password
   passwordKey: password
 
-# Qdrant vector database configuration
-qdrant:
-  # -- Qdrant host
-  host: qdrant.ch-system.svc
-  # -- Qdrant gRPC port
-  grpcPort: 6334
-  # -- Qdrant HTTP port
-  httpPort: 6333
-  # -- Collection name
-  collection: memories
-
 # Embedding service configuration
 embedding:
   # -- Embedding provider (any OpenAI-compatible API: Together.ai, vLLM, OpenAI, etc.)
@@ -233,6 +222,6 @@ virtualService:
 
 # Init container configuration
 initContainer:
-  # -- Enable init container for Qdrant collection setup
+  # -- Enable init container for pg_recall extension verification
   enabled: false
 

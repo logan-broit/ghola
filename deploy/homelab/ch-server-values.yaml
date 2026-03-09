@@ -35,12 +35,6 @@ database:
   usernameKey: username
   passwordKey: password
 
-qdrant:
-  host: qdrant.ch-system.svc
-  grpcPort: 6334
-  httpPort: 6333
-  collection: memories
-
 embedding:
   provider: openai
   url: "https://api.together.xyz"
