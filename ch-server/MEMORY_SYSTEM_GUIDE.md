@@ -61,7 +61,7 @@ Generic infrastructure/standards should use descriptive tags without project nam
 
 Examples:
 - "Docker builds must use --platform linux/amd64"
-- "CA bundle must be embedded for MITM proxy"
+- "Helm charts must use ghcr.io registry prefix"
 - "Helm charts must include security contexts"
 
 ### Why This Matters

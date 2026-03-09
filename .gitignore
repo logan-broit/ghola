@@ -1,4 +1,4 @@
-# CA bundles (corporate MITM proxy artifacts — not needed in homelab)
+# CA bundles
 ca-bundle.pem
 
 # Binaries

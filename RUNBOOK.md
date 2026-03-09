@@ -15,9 +15,8 @@ Operational guide for deploying Chapterhouse to a Kubernetes cluster.
 9. [Verification](#verification)
 10. [Rollback Procedures](#rollback-procedures)
 11. [Troubleshooting](#troubleshooting)
-12. [Corporate Air-Gapped Environment](#corporate-air-gapped-environment)
 
-**Related docs**: [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md) | [SECURITY_STATEMENT.md](SECURITY_STATEMENT.md)
+**Related docs**: [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md)
 
 ---
 
@@ -29,20 +28,18 @@ Operational guide for deploying Chapterhouse to a Kubernetes cluster.
 |------|---------|---------|
 | kubectl | 1.28+ | Kubernetes CLI |
 | helm | 3.12+ | Helm chart deployment |
-| docker | 27+ | Container image building (buildx required) |
+| podman or docker | latest | Container image building |
 | Go | 1.24+ | Building from source |
-| glab | latest | GitLab CLI |
 
 ### Cluster Requirements
 
 - Kubernetes cluster with [CloudNativePG](https://cloudnative-pg.io/) operator installed
-- Istio service mesh (for VirtualService routing)
-- Prometheus Operator (for ServiceMonitor)
-- StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
+- StorageClass available (e.g., `local-path` for K3s)
+- PostgreSQL 18 with pgvector and pg_recall extensions
 
 ### Container Registry
 
-Images and Helm charts are stored in the Zot OCI registry at `registry.switchcraft.pd.internal/chapterhouse`. Zot allows anonymous read, so no imagePullSecret is needed. See `BUILD_AND_RELEASE.md` for build instructions.
+Images are stored at `ghcr.io/thinkwright/chapterhouse`. See `BUILD_AND_RELEASE.md` for build instructions.
 
 ---
 
@@ -74,7 +71,7 @@ kubectl create secret generic ch-admin-bootstrap \
   --from-literal=ADMIN_PASSWORD="$(openssl rand -base64 16)"
 ```
 
-**Embedding API key** (if using a hosted provider like Together.ai):
+**Embedding API key** (if using a hosted provider):
 
 ```bash
 kubectl create secret generic together-api-key \
@@ -84,19 +81,26 @@ kubectl create secret generic together-api-key \
 
 ### 3. Deploy PostgreSQL (CNPG)
 
-See `deploy/examples/postgres-cnpg.yaml` for the CNPG Cluster manifest.
+See `deploy/examples/postgres-cnpg.yaml` for the CNPG Cluster manifest. For the homelab, use `deploy/homelab/infra/postgres-cluster.yaml` which includes the custom CNPG image with pgvector and pg_recall baked in.
 
 Key points:
-- StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
 - Bootstrap references the `chapterhouse-db-credentials` secret
 - Database name: `memories`, owner: `memory_api`
-- CNPG auto-creates a `chapterhouse-db-app` secret with credentials
+- Custom image includes `shared_preload_libraries: [pg_recall]`
 
 ```bash
-kubectl apply -f deploy/examples/postgres-cnpg.yaml
+kubectl apply -f deploy/homelab/infra/postgres-cluster.yaml
 kubectl wait --for=condition=Ready \
-  clusters.postgresql.cnpg.io/chapterhouse-db \
+  clusters.postgresql.cnpg.io/memory-db \
   -n ch-system --timeout=300s
+```
+
+### 4. Deploy Embeddings (TEI)
+
+Self-hosted embeddings using HuggingFace Text Embeddings Inference with `Alibaba-NLP/gte-modernbert-base` (768 dims, 8K context):
+
+```bash
+kubectl apply -f deploy/homelab/infra/tei.yaml
 ```
 
 ---
@@ -105,34 +109,47 @@ kubectl wait --for=condition=Ready \
 
 Migrations must be applied manually after the CNPG cluster is ready. Run them as the `postgres` superuser, then grant privileges to the application user.
 
+### Enable pg_recall Extension
+
+```bash
+kubectl exec -i memory-db-1 -n ch-system -- psql -U postgres -d memories -c "
+  SET allow_system_table_mods = on;
+  CREATE EXTENSION IF NOT EXISTS vector;
+  CREATE EXTENSION IF NOT EXISTS pg_recall;
+  SELECT pg_recall.configure_dimensions(768);
+"
+```
+
 ### Apply All Migrations
 
 ```bash
-# Run each migration in order
-for f in 001_initial_schema.sql 002_admin_auth.sql 003_add_memory_type.sql \
-         004_add_scope_and_org.sql 005_is_current_and_search.sql 006_add_tags_column.sql; do
-  echo "--- Applying $f ---"
-  kubectl exec -i chapterhouse-db-1 -n ch-system -- \
-    psql -U postgres -d memories < ch-server/db/migrations/$f
+for f in ch-server/db/migrations/*.sql; do
+  echo "--- Applying $(basename $f) ---"
+  kubectl exec -i memory-db-1 -n ch-system -- \
+    psql -U postgres -d memories < "$f"
 done
 ```
 
 ### Grant Privileges
 
 ```bash
-kubectl exec -i chapterhouse-db-1 -n ch-system -- psql -U postgres -d memories -c "
+kubectl exec -i memory-db-1 -n ch-system -- psql -U postgres -d memories -c "
   GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO memory_api;
   GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO memory_api;
   GRANT USAGE ON SCHEMA public TO memory_api;
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO memory_api;
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO memory_api;
+  GRANT USAGE ON SCHEMA pg_recall TO memory_api;
+  GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA pg_recall TO memory_api;
+  GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA pg_recall TO memory_api;
+  GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pg_recall TO memory_api;
 "
 ```
 
 ### Verify
 
 ```bash
-kubectl exec chapterhouse-db-1 -n ch-system -- psql -U memory_api -d memories -c '\dt'
+kubectl exec memory-db-1 -n ch-system -- psql -U memory_api -d memories -c '\dt'
 ```
 
 Expected tables: `users`, `audit_log`, `api_keys`, `admin_sessions` (memory data is stored in `pg_recall.mnemes`)
@@ -141,91 +158,52 @@ Expected tables: `users`, `audit_log`, `api_keys`, `admin_sessions` (memory data
 
 ## Building Container Images
 
-Production builds are driven through **GitLab CI** — see `BUILD_AND_RELEASE.md` for the full workflow. For local builds:
+For local builds using podman:
 
 ```bash
-docker login registry.switchcraft.pd.internal
-make server   # Build + push ch-server
-make web      # Build + push ch-web
-make images   # Build + push both
+podman build --platform linux/amd64 -t ghcr.io/thinkwright/chapterhouse/ch-server:latest ch-server/
+podman build --platform linux/amd64 -t ghcr.io/thinkwright/chapterhouse/ch-web:latest ch-web/
+podman push ghcr.io/thinkwright/chapterhouse/ch-server:latest
+podman push ghcr.io/thinkwright/chapterhouse/ch-web:latest
+```
+
+Or use the deploy script:
+
+```bash
+./deploy/homelab/deploy.sh --tag latest
 ```
 
 ---
 
 ## Deploying with Helm
 
-Each component has a Helm chart under its `charts/` directory. Both charts default to the Zot registry at `registry.switchcraft.pd.internal`.
+Each component has a Helm chart under its `charts/` directory.
 
-### ch-server (ovas-ai-prod)
+### Homelab Deployment
 
-```bash
-export KUBECONFIG=~/.kube/ovas-ai-prod.yaml
-
-helm upgrade --install ch-server ch-server/charts/ch-server \
-  --namespace ch-system \
-  --set image.tag=0.3.0 \
-  --set virtualService.enabled=true \
-  --set virtualService.gateway=istio-ingress/switch-wildcard-ingress \
-  --set virtualService.host=chapterhouse.switchcraft.pd.internal
-```
-
-### ch-web (ovas-ai-prod)
-
-```bash
-helm upgrade --install ch-web ch-web/charts/ch-web \
-  --namespace ch-system \
-  --set image.tag=0.3.0
-```
-
-### Homelab Overrides
-
-For local K3s development, use the homelab values files which disable Istio, imagePullSecrets, and use local registry:
+Use the homelab values files which configure GHCR registry, TEI embeddings, and homelab-sized resources:
 
 ```bash
 helm upgrade --install ch-server ch-server/charts/ch-server \
   --namespace ch-system \
-  -f ch-server/charts/ch-server/values-homelab.yaml
+  -f deploy/homelab/ch-server-values.yaml
 
 helm upgrade --install ch-web ch-web/charts/ch-web \
   --namespace ch-system \
-  -f ch-web/charts/ch-web/values-homelab.yaml
+  -f deploy/homelab/ch-web-values.yaml
 ```
 
 ---
 
 ## Ingress Configuration
 
-### Istio VirtualService (ovas-ai-prod)
-
-The ch-server Helm chart includes a VirtualService template. When enabled, it routes traffic by path:
-
-| Path | Destination |
-|------|-------------|
-| `/api/*` | ch-server:8080 |
-| `/mcp`, `/mcp/*` | ch-server:8080 |
-| `/health`, `/ready`, `/metrics` | ch-server:8080 |
-| `/*` (everything else) | ch-web:80 |
-
-Production settings for ovas-ai-prod:
-
-```yaml
-virtualService:
-  enabled: true
-  gateway: istio-ingress/switch-wildcard-ingress
-  host: chapterhouse.switchcraft.pd.internal
-```
-
-### Kubernetes Ingress (homelab)
-
-For clusters without Istio, use a standard Ingress resource. Set `ingress.enabled: true` in ch-server values and configure `className`, `hosts`, and `tls` as needed.
+Use a Kubernetes Ingress resource. Set `ingress.enabled: true` in ch-server values and configure `className`, `hosts`, and `tls` as needed.
 
 ### TLS Considerations
 
-**With trusted certificates** (Let's Encrypt, corporate CA): The default configuration works — secure cookies and the Clipboard API function correctly.
+**With trusted certificates** (Let's Encrypt, internal CA): The default configuration works — secure cookies and the Clipboard API function correctly.
 
-**With self-signed certificates**: Set `ENVIRONMENT` to anything other than `production` in your values. This disables the `Secure` flag on session cookies. The admin console includes a clipboard fallback for non-secure contexts.
-
-**No TLS**: Same as self-signed — use a non-production environment value.
+**With self-signed certificates**: Set `ENVIRONMENT` to `local` or `development`. This disables the `Secure` flag on session cookies. The admin console includes a clipboard fallback for non-secure contexts.
 
 ---
 
@@ -241,7 +219,7 @@ ADMIN_PASS=$(kubectl get secret ch-admin-bootstrap -n ch-system \
 Insert the admin user with a bcrypt-hashed password:
 
 ```bash
-kubectl exec -i chapterhouse-db-1 -n ch-system -- psql -U postgres -d memories -c "
+kubectl exec -i memory-db-1 -n ch-system -- psql -U postgres -d memories -c "
   INSERT INTO users (id, username, email, display_name, password_hash, is_admin)
   VALUES (
     '00000000-0000-0000-0000-000000000001',
@@ -272,17 +250,15 @@ Always install globally with `-s user` so the MCP server is available across all
 
 ```bash
 claude mcp add -s user --transport http \
-  chapterhouse https://chapterhouse.switchcraft.pd.internal/mcp/stateless \
+  chapterhouse https://your-host/mcp \
   --header "Authorization: Bearer ch_k1_YOUR_KEY"
 ```
 
-Use the `/mcp/stateless` endpoint — it authenticates per-request and survives server restarts. The session-based `/mcp` endpoint loses state on restart.
-
-Flags before the name, URL as the second positional argument, `--header` after.
+Use the `/mcp` endpoint for full session lifecycle support (list_sessions, session_summary, session_context).
 
 ### 3. Verify
 
-Start a new Claude Code session. The Chapterhouse tools should appear: `remember`, `recall`, `forget`, `list_memories`, `share_memory`, `export_memories`.
+Start a new Claude Code session. The Chapterhouse tools should appear: `remember`, `recall`, `forget`, `list_memories`, `share_memory`, `export_memories`, `list_sessions`, `session_summary`, `session_context`.
 
 ---
 
@@ -291,17 +267,17 @@ Start a new Claude Code session. The Chapterhouse tools should appear: `remember
 ### Health and Readiness
 
 ```bash
-curl -sk https://chapterhouse.switchcraft.pd.internal/health
+curl -sk https://your-host/health
 # {"status":"ok","timestamp":"..."}
 
-curl -sk https://chapterhouse.switchcraft.pd.internal/ready
+curl -sk https://your-host/ready
 # {"status":"ok","checks":{"database":"healthy"}}
 ```
 
 ### Admin Login
 
 ```bash
-curl -sk -X POST https://chapterhouse.switchcraft.pd.internal/api/v1/admin/login \
+curl -sk -X POST https://your-host/api/v1/admin/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"YOUR_PASSWORD"}' \
   -c /tmp/ch-cookies.txt
@@ -310,7 +286,7 @@ curl -sk -X POST https://chapterhouse.switchcraft.pd.internal/api/v1/admin/login
 ### MCP Tools
 
 ```bash
-curl -sk -X POST https://chapterhouse.switchcraft.pd.internal/mcp/stateless \
+curl -sk -X POST https://your-host/mcp/stateless \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer ch_k1_YOUR_KEY' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -340,7 +316,7 @@ kubectl rollout undo deployment/ch-web -n ch-system
 Always backup before schema changes:
 
 ```bash
-kubectl exec chapterhouse-db-1 -n ch-system -- \
+kubectl exec memory-db-1 -n ch-system -- \
   pg_dump -U postgres memories > backup-$(date +%Y%m%d-%H%M%S).sql
 ```
 
@@ -354,7 +330,7 @@ kubectl exec chapterhouse-db-1 -n ch-system -- \
 
 **Cause**: The `Secure` flag on session cookies requires a trusted TLS context. Self-signed certificates don't qualify — browsers silently discard the cookie.
 
-**Fix**: Set `ENVIRONMENT` to anything other than `production` (e.g., `homelab`, `staging`, `development`). Only `production` enforces secure cookies.
+**Fix**: Set `ENVIRONMENT` to `local` or `development`. Only `production` enforces secure cookies.
 
 ### Clipboard Copy Fails
 
@@ -382,7 +358,15 @@ kubectl get storageclass
 
 **Cause**: When you provide your own bootstrap secret to CNPG, it uses that secret directly instead of creating a separate `-app` secret.
 
-**Fix**: Set `database.existingSecret` in your values file to match the bootstrap secret name (e.g., `chapterhouse-db-credentials`), not `chapterhouse-db-app`.
+**Fix**: Set `database.existingSecret` in your values file to match the bootstrap secret name (e.g., `memory-db-credentials`), not `memory-db-app`.
+
+### pg_recall Extension Creation Fails
+
+**Symptom**: `ERROR: unacceptable schema name "pg_recall"` when running `CREATE EXTENSION pg_recall`.
+
+**Cause**: PostgreSQL 18 blocks extensions using the `pg_` schema prefix by default.
+
+**Fix**: Run `SET allow_system_table_mods = on;` before `CREATE EXTENSION pg_recall;`.
 
 ### Partial Index Migration Error
 
@@ -396,7 +380,7 @@ kubectl get storageclass
 
 **Symptom**: `helm upgrade` fails with `another operation (install/upgrade/rollback) is in progress`.
 
-**Cause**: A previous deploy was interrupted (e.g., CI timeout, network issue), leaving a Helm release in `pending-upgrade` or `pending-install` state.
+**Cause**: A previous deploy was interrupted, leaving a Helm release in `pending-upgrade` or `pending-install` state.
 
 **Fix**: Roll back to the last successful revision:
 
@@ -412,109 +396,5 @@ Then retry the deploy.
 ```bash
 kubectl logs -l app.kubernetes.io/name=ch-server -n ch-system --tail=50
 kubectl logs -l app.kubernetes.io/name=ch-web -n ch-system --tail=50
-kubectl logs -l cnpg.io/cluster=chapterhouse-db -n ch-system --tail=50
+kubectl logs -l cnpg.io/cluster=memory-db -n ch-system --tail=50
 ```
-
----
-
-## Corporate Air-Gapped Environment
-
-This section covers deployment to the corporate air-gapped Kubernetes cluster (Rancher on Oxide compute).
-
-### CA Bundle Requirements
-
-The corporate network uses a MITM TLS proxy. All outbound HTTPS traffic (including `go mod download`, Docker pulls, and Helm operations) requires the corporate CA bundle.
-
-The `ca-bundle.pem` file at the repository root contains the required certificates (ATL-Palo, LAS-Palo). This file is:
-- Copied into Docker build stages before any network operations
-- Injected in every GitLab CI stage via `before_script`
-- Required for `docker build` to succeed in the air-gapped environment
-
-**Updating the CA bundle**: If certificates rotate, replace `ca-bundle.pem` at the repo root. The Dockerfiles and CI pipeline reference it by path.
-
-### Zot OCI Registry
-
-Images and Helm charts are stored in the Zot OCI registry:
-
-| Artifact | Full Path |
-|----------|-----------|
-| ch-server image | `registry.switchcraft.pd.internal/chapterhouse/ch-server` |
-| ch-web image | `registry.switchcraft.pd.internal/chapterhouse/ch-web` |
-| ch-server chart | `oci://registry.switchcraft.pd.internal/charts/ch-server` |
-| ch-web chart | `oci://registry.switchcraft.pd.internal/charts/ch-web` |
-
-Zot allows anonymous read — no imagePullSecret is needed for pulling images. Push access requires credentials (`ZOT_USER` / `ZOT_PASSWORD`).
-
-#### Manual Push
-
-```bash
-docker login registry.switchcraft.pd.internal
-make server   # builds + pushes ch-server
-make web      # builds + pushes ch-web
-```
-
-### Istio VirtualService Routing
-
-When Istio is enabled (`virtualService.enabled: true` in ch-server values), traffic is routed by path:
-
-| Path | Destination |
-|------|-------------|
-| `/api/*` | ch-server:8080 |
-| `/mcp`, `/mcp/*` | ch-server:8080 |
-| `/health`, `/ready`, `/metrics` | ch-server:8080 |
-| `/*` (everything else) | ch-web:80 |
-
-Configure the hostname and gateway in `values.yaml` or via `--set`:
-
-```yaml
-virtualService:
-  enabled: true
-  gateway: istio-ingress/switch-wildcard-ingress
-  host: chapterhouse.switchcraft.pd.internal
-```
-
-### GitLab CI Pipeline
-
-The `.gitlab-ci.yml` pipeline has four stages: `test` → `build` → `publish` → `deploy`.
-
-#### Required CI Variables
-
-| Variable | Description |
-|----------|-------------|
-| `ZOT_USER` | Zot registry username |
-| `ZOT_PASSWORD` | Zot registry password |
-| `KUBE_CONFIG_OVAS` | Base64-encoded kubeconfig for ovas-ai-prod |
-
-Generate the kubeconfig variable:
-
-```bash
-base64 -i ~/.kube/ovas-ai-prod.yaml | tr -d '\n'
-```
-
-Add all three as CI/CD variables under **Settings > CI/CD > Variables** (masked, protected).
-
-#### Runner Tags
-
-Build jobs use the `docker` and `amd64` runner tags. The runner must have Docker-in-Docker capability and network access to `registry.switchcraft.pd.internal`.
-
-### Storage Class
-
-The corporate cluster uses `ceph-rbd` for persistent storage. This is set in the deploy examples:
-- `deploy/examples/postgres-cnpg.yaml` — CNPG cluster storage
-For homelab/K3s deployments, override with `local-path` or your cluster's default StorageClass.
-
-### Version Management
-
-The `VERSION` file at the repo root is the single source of truth. It is consumed by:
-- `Makefile` — image tags and chart packaging
-- GitLab CI — image tags (falls back to commit SHA for non-tag builds)
-- `Chart.yaml` files — `version` and `appVersion` (stamped by `make release`)
-
-Release workflow:
-
-```bash
-make release-dry-run VERSION=0.3.0   # preview changes
-make release VERSION=0.3.0           # stamp, commit, tag, push
-```
-
-The CI pipeline builds and deploys automatically from tags.
