@@ -28,16 +28,34 @@ pub mod associations;
 pub mod integration_tests;
 
 // ---------------------------------------------------------------------------
-// _PG_init: background worker registration
+// GUC: pg_recall.database
 // ---------------------------------------------------------------------------
 
 use pgrx::prelude::*;
+use pgrx::guc::*;
+use std::ffi::CString;
+
+pub static PG_RECALL_DATABASE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
+// ---------------------------------------------------------------------------
+// _PG_init: GUC registration + background worker
+// ---------------------------------------------------------------------------
 
 #[allow(non_snake_case)]
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     use pgrx::bgworkers::*;
     use std::time::Duration;
+
+    GucRegistry::define_string_guc(
+        c"pg_recall.database",
+        c"Target database for the pg_recall background worker.",
+        c"The background worker will connect to this database for Hebbian processing.",
+        &PG_RECALL_DATABASE,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
 
     BackgroundWorkerBuilder::new("pg_recall Hebbian Worker")
         .set_function("worker_main")

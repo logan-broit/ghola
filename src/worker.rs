@@ -13,6 +13,8 @@ use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::time::{Duration, Instant};
 
+use crate::PG_RECALL_DATABASE;
+
 // ---------------------------------------------------------------------------
 // Adaptive polling state machine
 // ---------------------------------------------------------------------------
@@ -300,16 +302,15 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     // Attach signal handlers for SIGHUP (config reload) and SIGTERM (shutdown)
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
-    // Read the target database from GUC, defaulting to "postgres"
-    let db_name = BackgroundWorker::transaction(|| {
-        Spi::get_one::<String>(
-            "SELECT COALESCE(current_setting('pg_recall.database', true), 'postgres')",
-        )
-        .unwrap_or(Some("postgres".to_string()))
-        .unwrap_or_else(|| "postgres".to_string())
-    });
+    // Read the target database name from the GUC.
+    // We must connect to SPI before calling transaction(), so we first connect
+    // to the configured database. The GUC pg_recall.database is set in
+    // postgresql.conf and read via the static GUC variable.
+    let db_name = PG_RECALL_DATABASE
+        .get()
+        .and_then(|cs| cs.to_str().ok().map(|s| s.to_string()))
+        .unwrap_or_else(|| "memories".to_string());
 
-    // Connect to the target database
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     log!(
