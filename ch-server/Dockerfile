@@ -14,7 +14,6 @@ COPY . .
 
 # Build binaries
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ch-server ./cmd/api
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ch-reindex ./cmd/reindex
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ch-init ./cmd/init
 
 # Runtime stage
@@ -26,7 +25,6 @@ WORKDIR /app
 
 # Copy binaries and migrations
 COPY --from=builder /build/ch-server /app/ch-server
-COPY --from=builder /build/ch-reindex /app/ch-reindex
 COPY --from=builder /build/ch-init /app/ch-init
 COPY --from=builder /build/db/migrations /app/db/migrations
 
