@@ -37,11 +37,10 @@ database:
 
 embedding:
   provider: openai
-  url: "https://api.together.xyz"
+  url: "http://tei.ch-system.svc"
   model: Alibaba-NLP/gte-modernbert-base
   dimensions: 768
-  existingSecret: together-api-key
-  secretKey: TOGETHER_API_KEY
+  apiKey: "not-needed"
 
 auth:
   provider: default
