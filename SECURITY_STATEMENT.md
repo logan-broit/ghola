@@ -44,8 +44,9 @@ vulnerable to dictionary attacks.
 ### Passwords
 
 - **Algorithm**: bcrypt with Go's default cost (10)
-- **Access**: Password hashes are only loaded via a dedicated `GetByEmailForAuth()`
-  query -- they are excluded from general user listing queries
+- **Access**: Password hashes are only loaded via a dedicated
+  `GetUserByUsernameForAuth()` query -- they are excluded from general user
+  listing queries
 - **Source**: `ch-server/internal/handler/admin.go`
 
 ### Sessions
@@ -131,7 +132,7 @@ IP; the MCP limiter keys on authenticated user ID.
 
 - All JSON requests are parsed with `DisallowUnknownFields()` to reject
   unexpected fields (mass assignment prevention)
-- Pagination is bounded: 1--100 items per request
+- Pagination is bounded: 1--100 for user/MCP routes, up to 1000 for admin routes
 - Session tool `limit` parameter is bounded to 1--100
 - `session_id` arguments are validated as UUID format before any database query
 - Memory type and scope values are validated at the handler level
@@ -248,7 +249,7 @@ created the session. Unauthenticated session deletion is not permitted.
 ### Cleanup
 
 Sessions expire after 30 minutes and are cleaned up every 5 minutes by a
-background goroutine. The MCP request body is limited to 1 MB via
+background goroutine. The MCP request body is limited to 1 MiB via
 `io.LimitReader`.
 
 **Source**: `ch-server/internal/mcp/transport.go`
@@ -341,7 +342,7 @@ All responses include:
 | Secure cookies | (auto) | `true` in production | HTTPS-only session cookies |
 | Login rate limit | (code) | 5 req/min per IP | Brute-force protection |
 | MCP rate limit | (code) | 10 req/sec, burst 50 | Per-user API abuse protection |
-| MCP body limit | (code) | 1 MB | Maximum MCP request body size |
+| MCP body limit | (code) | 1 MiB | Maximum MCP request body size |
 
 ---
 
