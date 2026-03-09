@@ -1,0 +1,85 @@
+# Text Embeddings Inference (TEI) — CPU inference for gte-modernbert-base
+# Serves OpenAI-compatible /v1/embeddings endpoint
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tei
+  namespace: ch-system
+  labels:
+    app.kubernetes.io/name: tei
+    app.kubernetes.io/component: embedding
+    app.kubernetes.io/part-of: chapterhouse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tei
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tei
+        app.kubernetes.io/component: embedding
+        app.kubernetes.io/part-of: chapterhouse
+    spec:
+      containers:
+        - name: tei
+          image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+          args:
+            - --model-id
+            - Alibaba-NLP/gte-modernbert-base
+            - --port
+            - "80"
+            - --dtype
+            - float32
+            - --max-batch-tokens
+            - "4096"
+          ports:
+            - containerPort: 80
+              name: http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: model-cache
+              mountPath: /data
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tei
+  namespace: ch-system
+  labels:
+    app.kubernetes.io/name: tei
+    app.kubernetes.io/component: embedding
+    app.kubernetes.io/part-of: chapterhouse
+spec:
+  selector:
+    app.kubernetes.io/name: tei
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http

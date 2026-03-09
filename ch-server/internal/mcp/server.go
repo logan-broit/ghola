@@ -10,10 +10,9 @@ import (
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/mneme"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/secrets"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -34,57 +33,29 @@ var sessionSummaryDescription string
 //go:embed descriptions/session_context.txt
 var sessionContextDescription string
 
-// MemoryQuerier defines the database operations needed by the MCP server.
-type MemoryQuerier interface {
-	GetNextMemoryBlockVersion(ctx context.Context, arg sqlc.GetNextMemoryBlockVersionParams) (int32, error)
-	CreateMemoryBlock(ctx context.Context, arg sqlc.CreateMemoryBlockParams) (sqlc.MemoryBlock, error)
-	GetCurrentMemoryBlocks(ctx context.Context, userID uuid.UUID) ([]sqlc.CurrentMemoryBlock, error)
-	GetCurrentMemoryBlocksByType(ctx context.Context, arg sqlc.GetCurrentMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error)
-	GetAccessibleMemoryBlocks(ctx context.Context, userID uuid.UUID) ([]sqlc.CurrentMemoryBlock, error)
-	GetAccessibleMemoryBlocksByType(ctx context.Context, arg sqlc.GetAccessibleMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error)
-	DeleteMemoryBlock(ctx context.Context, arg sqlc.DeleteMemoryBlockParams) error
+// AuditQuerier defines the minimal database operations still needed by the MCP server.
+type AuditQuerier interface {
 	CreateAuditLog(ctx context.Context, arg sqlc.CreateAuditLogParams) (sqlc.AuditLog, error)
-	GetMemoryBlockByID(ctx context.Context, arg sqlc.GetMemoryBlockByIDParams) (sqlc.MemoryBlock, error)
-	GetMemoryBlockByGUID(ctx context.Context, arg sqlc.GetMemoryBlockByGUIDParams) (sqlc.MemoryBlock, error)
-	UpdateMemoryBlockScope(ctx context.Context, arg sqlc.UpdateMemoryBlockScopeParams) (sqlc.MemoryBlock, error)
-	ExportMemories(ctx context.Context, userID uuid.UUID) ([]sqlc.ExportMemoriesRow, error)
-	SearchAccessibleMemoryBlocks(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksParams) ([]sqlc.CurrentMemoryBlock, error)
-	SearchAccessibleMemoryBlocksByType(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error)
-	SearchAccessibleMemoryBlocksByTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTagsParams) ([]sqlc.CurrentMemoryBlock, error)
-	SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]sqlc.CurrentMemoryBlock, error)
-	IncrementRecallCount(ctx context.Context, arg sqlc.IncrementRecallCountParams) error
-	ListUserSessions(ctx context.Context, arg sqlc.ListUserSessionsParams) ([]sqlc.ListUserSessionsRow, error)
-	GetSessionMemories(ctx context.Context, arg sqlc.GetSessionMemoriesParams) ([]sqlc.CurrentMemoryBlock, error)
-}
-
-// VectorDB defines the vector database operations needed by the MCP server.
-type VectorDB interface {
-	Upsert(ctx context.Context, point vector.Point) error
-	Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vec []float32, limit uint64, filter *vector.SearchFilter) ([]vector.SearchResult, error)
-	Delete(ctx context.Context, pointID string) error
 }
 
 type Server struct {
-	queries  MemoryQuerier
-	logger   *slog.Logger
-	embedder embedding.Provider
-	vectorDB VectorDB
-	scanner  *secrets.Scanner
-	wg       sync.WaitGroup
+	store   *mneme.Store
+	audit   AuditQuerier
+	logger  *slog.Logger
+	scanner *secrets.Scanner
+	wg      sync.WaitGroup
 }
 
-func NewServer(queries MemoryQuerier, logger *slog.Logger, embedder embedding.Provider, vectorDB VectorDB) *Server {
+func NewServer(store *mneme.Store, audit AuditQuerier, logger *slog.Logger) *Server {
 	return &Server{
-		queries:  queries,
-		logger:   logger,
-		embedder: embedder,
-		vectorDB: vectorDB,
-		scanner:  secrets.New(),
+		store:   store,
+		audit:   audit,
+		logger:  logger,
+		scanner: secrets.New(),
 	}
 }
 
-// Wait blocks until all in-flight background operations (vector upserts,
-// deletes, audit logs) have completed. Call this during graceful shutdown.
+// Wait blocks until all in-flight background operations have completed.
 func (s *Server) Wait() {
 	s.wg.Wait()
 }
@@ -141,8 +112,8 @@ func (s *Server) Tools() []Tool {
 				Type: "object",
 				Properties: map[string]Property{
 					"fact_id": {
-						Type:        "integer",
-						Description: "The ID of the memory to change scope for",
+						Type:        "string",
+						Description: "The UUID of the memory to change scope for",
 					},
 					"scope": {
 						Type:        "string",
@@ -192,13 +163,13 @@ func (s *Server) Tools() []Tool {
 		},
 		{
 			Name:        "forget",
-			Description: "Remove a fact from memory by its ID.",
+			Description: "Remove a fact from memory by its UUID.",
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]Property{
 					"fact_id": {
-						Type:        "integer",
-						Description: "The ID of the fact to remove.",
+						Type:        "string",
+						Description: "The UUID of the fact to remove.",
 					},
 				},
 				Required: []string{"fact_id"},
@@ -337,7 +308,7 @@ func (s *Server) handleInitialize(req Request) Response {
 			},
 			ServerInfo: ServerInfo{
 				Name:    "chapterhouse",
-				Version: "0.1.0",
+				Version: "0.2.0",
 			},
 		},
 	}
@@ -450,8 +421,8 @@ func (s *Server) createAuditLog(authCtx *auth.Context, params CallToolParams, re
 			details["mode"] = mode
 		}
 	case "forget":
-		if factID, ok := params.Arguments["fact_id"].(float64); ok {
-			details["fact_id"] = int64(factID)
+		if factID, ok := params.Arguments["fact_id"].(string); ok {
+			details["fact_id"] = factID
 		}
 	case "list_memories":
 		if tags, ok := params.Arguments["tags"].([]any); ok {
@@ -478,7 +449,7 @@ func (s *Server) createAuditLog(authCtx *auth.Context, params CallToolParams, re
 		action += ".error"
 	}
 
-	_, err = s.queries.CreateAuditLog(ctx, sqlc.CreateAuditLogParams{
+	_, err = s.audit.CreateAuditLog(ctx, sqlc.CreateAuditLogParams{
 		UserID:       pgtype.UUID{Bytes: authCtx.UserID, Valid: true},
 		Action:       action,
 		ResourceType: "memory",

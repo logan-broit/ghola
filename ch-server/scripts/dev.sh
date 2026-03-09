@@ -37,12 +37,6 @@ check_prereqs() {
         exit 1
     fi
 
-    # Check if Qdrant is ready
-    if ! kubectl get pod -n "$NAMESPACE" -l app=chapterhouse-qdrant -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q "Running"; then
-        log_error "Qdrant is not running"
-        exit 1
-    fi
-
     # Verify NodePort services exist
     if ! kubectl get svc -n "$NAMESPACE" chapterhouse-db-nodeport &> /dev/null; then
         log_warn "NodePort services not found, creating..."
@@ -61,21 +55,6 @@ verify_services() {
     else
         log_error "  PostgreSQL: localhost:30432 unreachable"
         exit 1
-    fi
-
-    # Test Qdrant HTTP
-    if curl -s --connect-timeout 2 http://localhost:30333/ > /dev/null 2>&1; then
-        log_info "  Qdrant HTTP: localhost:30333"
-    else
-        log_error "  Qdrant HTTP: localhost:30333 unreachable"
-        exit 1
-    fi
-
-    # Test Qdrant gRPC
-    if nc -z localhost 30334 2>/dev/null; then
-        log_info "  Qdrant gRPC: localhost:30334"
-    else
-        log_warn "  Qdrant gRPC: localhost:30334 (cannot verify)"
     fi
 }
 
@@ -101,10 +80,6 @@ run_api() {
     export DATABASE_USER="memory_api"
     export DATABASE_PASSWORD="$DB_PASSWORD"
     export DATABASE_SSL_MODE="disable"
-    export QDRANT_HOST="localhost"
-    export QDRANT_HTTP_PORT="30333"
-    export QDRANT_GRPC_PORT="30334"
-    export QDRANT_COLLECTION="memories"
     export AUTH_PROVIDER="default"
     export AUTH_DEFAULT_USER="00000000-0000-0000-0000-000000000000"
     export EMBEDDING_PROVIDER="openai"
@@ -136,8 +111,6 @@ show_help() {
     echo ""
     echo "Service Ports (via NodePort):"
     echo "  PostgreSQL: localhost:30432"
-    echo "  Qdrant HTTP: localhost:30333"
-    echo "  Qdrant gRPC: localhost:30334"
 }
 
 deploy_infra() {
@@ -148,7 +121,6 @@ deploy_infra() {
 
     # Apply base manifests
     kubectl apply -f "$PROJECT_DIR/deploy/k8s/base/postgres-cluster.yaml"
-    kubectl apply -f "$PROJECT_DIR/deploy/k8s/base/qdrant.yaml"
 
     # Apply local development resources
     kubectl apply -f "$PROJECT_DIR/deploy/k8s/local/services.yaml"
@@ -156,9 +128,6 @@ deploy_infra() {
 
     log_info "Waiting for PostgreSQL to be ready..."
     kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l cnpg.io/cluster=chapterhouse-db --timeout=120s || true
-
-    log_info "Waiting for Qdrant to be ready..."
-    kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l app=chapterhouse-qdrant --timeout=60s || true
 
     log_info "Infrastructure deployed!"
 }
@@ -183,9 +152,6 @@ case "${1:-start}" in
         echo "export DATABASE_USER=memory_api"
         echo "export DATABASE_PASSWORD='$DB_PASSWORD'"
         echo "export DATABASE_SSL_MODE=disable"
-        echo "export QDRANT_HOST=localhost"
-        echo "export QDRANT_HTTP_PORT=30333"
-        echo "export QDRANT_GRPC_PORT=30334"
         echo "export EMBEDDING_URL=http://localhost:11434"
         ;;
     password)

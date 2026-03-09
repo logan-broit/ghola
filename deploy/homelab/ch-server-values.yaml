@@ -35,19 +35,12 @@ database:
   usernameKey: username
   passwordKey: password
 
-qdrant:
-  host: qdrant.ch-system.svc
-  grpcPort: 6334
-  httpPort: 6333
-  collection: memories
-
 embedding:
   provider: openai
-  url: "https://api.together.xyz"
-  model: BAAI/bge-base-en-v1.5
+  url: "http://tei.ch-system.svc"
+  model: Alibaba-NLP/gte-modernbert-base
   dimensions: 768
-  existingSecret: together-api-key
-  secretKey: TOGETHER_API_KEY
+  apiKey: "not-needed"
 
 auth:
   provider: default

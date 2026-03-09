@@ -14,7 +14,6 @@ type Config struct {
 	Environment string
 	Server      ServerConfig
 	Database    DatabaseConfig
-	Qdrant      QdrantConfig
 	Embedding   EmbeddingConfig
 	Auth        AuthConfig
 	CORSOrigins []string
@@ -49,16 +48,6 @@ func (c DatabaseConfig) DSN() string {
 		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		c.User, c.Password, c.Host, c.Port, c.Name, c.SSLMode,
 	)
-}
-
-// QdrantConfig holds Qdrant vector database configuration.
-type QdrantConfig struct {
-	Host       string
-	HTTPPort   int
-	GRPCPort   int
-	APIKey     string
-	UseTLS     bool
-	Collection string
 }
 
 // EmbeddingConfig holds embedding provider configuration.
@@ -104,14 +93,6 @@ func Load() (*Config, error) {
 			MinConns:        getEnvInt("DATABASE_MIN_CONNS", 5),
 			MaxConnLifetime: getEnvDuration("DATABASE_MAX_CONN_LIFETIME", time.Hour),
 			MaxConnIdleTime: getEnvDuration("DATABASE_MAX_CONN_IDLE_TIME", 30*time.Minute),
-		},
-		Qdrant: QdrantConfig{
-			Host:       getEnv("QDRANT_HOST", "localhost"),
-			HTTPPort:   getEnvInt("QDRANT_HTTP_PORT", 6333),
-			GRPCPort:   getEnvInt("QDRANT_GRPC_PORT", 6334),
-			APIKey:     getEnv("QDRANT_API_KEY", ""),
-			UseTLS:     getEnvBool("QDRANT_TLS", false),
-			Collection: getEnv("QDRANT_COLLECTION", "memories"),
 		},
 		Embedding: EmbeddingConfig{
 			Provider:    getEnv("EMBEDDING_PROVIDER", "openai"),

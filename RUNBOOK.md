@@ -99,19 +99,6 @@ kubectl wait --for=condition=Ready \
   -n ch-system --timeout=300s
 ```
 
-### 4. Deploy Qdrant
-
-See `deploy/examples/qdrant.yaml` for the manifest.
-
-Key points:
-- Use `strategy: Recreate` for single-replica deployments with RWO PVCs
-- StorageClass: `ceph-rbd` (ovas-ai-prod) or `local-path` (homelab K3s)
-
-```bash
-kubectl apply -f deploy/examples/qdrant.yaml
-kubectl rollout status deployment/qdrant -n ch-system --timeout=120s
-```
-
 ---
 
 ## Database Migrations
@@ -148,7 +135,7 @@ kubectl exec -i chapterhouse-db-1 -n ch-system -- psql -U postgres -d memories -
 kubectl exec chapterhouse-db-1 -n ch-system -- psql -U memory_api -d memories -c '\dt'
 ```
 
-Expected tables: `users`, `memory_blocks`, `journal`, `git_commits`, `audit_log`, `api_keys`, `admin_sessions`
+Expected tables: `users`, `audit_log`, `api_keys`, `admin_sessions` (memory data is stored in `pg_recall.mnemes`)
 
 ---
 
@@ -308,7 +295,7 @@ curl -sk https://chapterhouse.switchcraft.pd.internal/health
 # {"status":"ok","timestamp":"..."}
 
 curl -sk https://chapterhouse.switchcraft.pd.internal/ready
-# {"status":"ok","checks":{"database":"healthy","qdrant":"healthy"}}
+# {"status":"ok","checks":{"database":"healthy"}}
 ```
 
 ### Admin Login
@@ -379,7 +366,7 @@ kubectl exec chapterhouse-db-1 -n ch-system -- \
 
 ### PVC Stuck Pending
 
-**Symptom**: Qdrant or PostgreSQL pod stuck in Pending, PVC not binding.
+**Symptom**: PostgreSQL pod stuck in Pending, PVC not binding.
 
 **Cause**: StorageClass mismatch. Check what's available:
 
@@ -388,14 +375,6 @@ kubectl get storageclass
 ```
 
 **Fix**: Update the `storageClassName` in your manifests to match an available StorageClass (e.g., `local-path` for K3s).
-
-### Qdrant RWO PVC Deadlock on Update
-
-**Symptom**: New Qdrant pod stuck Pending during rolling update, old pod still running.
-
-**Cause**: `RollingUpdate` strategy tries to start the new pod before terminating the old one, but both need the same RWO PVC.
-
-**Fix**: Use `strategy: Recreate` in the Qdrant Deployment.
 
 ### CNPG Secret Naming
 
@@ -434,7 +413,6 @@ Then retry the deploy.
 kubectl logs -l app.kubernetes.io/name=ch-server -n ch-system --tail=50
 kubectl logs -l app.kubernetes.io/name=ch-web -n ch-system --tail=50
 kubectl logs -l cnpg.io/cluster=chapterhouse-db -n ch-system --tail=50
-kubectl logs -l app=chapterhouse-qdrant -n ch-system --tail=50
 ```
 
 ---
@@ -523,8 +501,6 @@ Build jobs use the `docker` and `amd64` runner tags. The runner must have Docker
 
 The corporate cluster uses `ceph-rbd` for persistent storage. This is set in the deploy examples:
 - `deploy/examples/postgres-cnpg.yaml` — CNPG cluster storage
-- `deploy/examples/qdrant.yaml` — Qdrant PVC
-
 For homelab/K3s deployments, override with `local-path` or your cluster's default StorageClass.
 
 ### Version Management

@@ -241,20 +241,6 @@
                 `);
             }
 
-            if (sys.qdrant) {
-                sections.push(`
-                    <div class="health-section">
-                        <div class="health-section-title">Qdrant</div>
-                        <div class="health-pairs">
-                            <div class="health-pair"><div class="health-pair-label">Vectors</div><div class="health-pair-value">${sys.qdrant.points_count.toLocaleString()}</div></div>
-                            <div class="health-pair"><div class="health-pair-label">Segments</div><div class="health-pair-value">${sys.qdrant.segments_count}</div></div>
-                            <div class="health-pair"><div class="health-pair-label">Status</div><div class="health-pair-value">${sys.qdrant.status}</div></div>
-                            <div class="health-pair"><div class="health-pair-label">RAM</div><div class="health-pair-value">${ch.formatBytes(sys.qdrant.ram_data_size_kb * 1024)}</div></div>
-                        </div>
-                    </div>
-                `);
-            }
-
             if (sys.memory) {
                 sections.push(`
                     <div class="health-section">
