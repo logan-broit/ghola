@@ -551,14 +551,6 @@ const mockData = {
             empty_acquire_count: 12,
             canceled_acquire_count: 0,
         },
-        qdrant: {
-            vectors_count: 1500,
-            points_count: 1500,
-            segments_count: 3,
-            status: 'green',
-            disk_data_size_kb: 5120,
-            ram_data_size_kb: 2048,
-        },
         memory: {
             users_with_memories: 18,
             total_memory_blocks: 342,

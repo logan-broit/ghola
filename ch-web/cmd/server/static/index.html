@@ -1177,8 +1177,8 @@
             <div class="step-card" data-animate data-animate-delay="2">
                 <div class="step-number">2</div>
                 <div class="step-title">Store &amp; Embed</div>
-                <div class="step-desc">The memory is stored in PostgreSQL. A vector embedding is generated and indexed in Qdrant for search.</div>
-                <div class="step-example"><span class="hl">fact</span> &rarr; PostgreSQL<br><span class="hl">embedding</span> &rarr; Qdrant<br><span class="hl">tags</span> &rarr; indexed &amp; filterable</div>
+                <div class="step-desc">The memory is embedded and stored in PostgreSQL via pg_recall. Full-text search, semantic vectors, and Hebbian scoring are all unified.</div>
+                <div class="step-example"><span class="hl">fact</span> &rarr; pg_recall.mnemes<br><span class="hl">embedding</span> &rarr; pgvector<br><span class="hl">tags</span> &rarr; indexed &amp; filterable</div>
             </div>
             <div class="step-card" data-animate data-animate-delay="3">
                 <div class="step-number">3</div>
@@ -1317,7 +1317,7 @@
         <div class="section-header" data-animate>
             <div class="section-label">Architecture</div>
             <h2 class="section-title">Built for production</h2>
-            <p class="section-subtitle">PostgreSQL for durability. Qdrant for semantic speed. Your choice of embedding provider.</p>
+            <p class="section-subtitle">PostgreSQL with pg_recall for unified storage and cognitive scoring. Your choice of embedding provider.</p>
         </div>
         <div class="arch-diagram" data-animate>
             <div class="arch-node">
@@ -1356,13 +1356,13 @@
                     <div class="arch-node-icon" style="background: rgba(167, 139, 250, 0.12);">
                         <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></svg>
                     </div>
-                    <div class="arch-node-title">Qdrant</div>
-                    <div class="arch-node-sub">Vector search engine</div>
+                    <div class="arch-node-title">pg_recall</div>
+                    <div class="arch-node-sub">Cognitive memory extension</div>
                     <ul class="arch-node-features">
-                        <li>Semantic similarity search</li>
-                        <li>gRPC high-performance client</li>
-                        <li>Automatic collection setup</li>
-                        <li>Idempotent point upserts</li>
+                        <li>Unified semantic + FTS recall</li>
+                        <li>Hebbian confidence scoring</li>
+                        <li>Supersession &amp; associations</li>
+                        <li>ACT-R temporal activation</li>
                     </ul>
                 </div>
                 <div class="arch-node arch-node-accent" style="border-left-color: var(--accent-orange);">
