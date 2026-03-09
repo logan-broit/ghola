@@ -51,7 +51,7 @@ Chapterhouse-specific memories should use only the `"ch"` tag:
 Examples:
 - "Chapterhouse is deployed in ch-system namespace"
 - "Chapterhouse uses two repos: ch-server (backend) and ch-web (frontend)"
-- "Chapterhouse backend is Go with PostgreSQL and Qdrant"
+- "Chapterhouse backend is Go with PostgreSQL and pg_recall"
 
 Generic infrastructure/standards should use descriptive tags without project names:
 ```

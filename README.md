@@ -22,8 +22,8 @@ Claude Code / AI Assistant
     │  MCP (HTTP + Bearer token)
     ▼
 ┌──────────────┐     ┌───────────────┐     ┌──────────┐
-│  ch-server   │────▶│  PostgreSQL   │     │  Ollama  │
-│  (Go API)    │────▶│  (Qdrant)     │     │ (embed)  │
+│  ch-server   │────▶│  PostgreSQL   │     │ Embedding│
+│  (Go API)    │     │  + pg_recall  │     │ Provider │
 └──────────────┘     └───────────────┘     └──────────┘
     ▲
     │  HTTP proxy
@@ -33,7 +33,7 @@ Claude Code / AI Assistant
 └──────────────┘
 ```
 
-**ch-server** — Go API and MCP server. Handles memory storage, semantic search, user management, API keys, and audit logging.
+**ch-server** — Go API and MCP server. Handles memory storage, semantic search, user management, API keys, and audit logging. Uses [pg_recall](https://github.com/thinkwright/pg_recall) for unified content + vector + scoring storage.
 
 **ch-web** — Vanilla JS admin console. User management, API key management, audit logs, and system health. Zero npm dependencies — just HTML, CSS, JS served by a Go binary.
 
@@ -58,9 +58,8 @@ Session lifecycle: memories can be grouped by session ID, enabling temporal quer
 ## Prerequisites
 
 - Go 1.24+
-- PostgreSQL 16
-- [Qdrant](https://qdrant.tech/) vector database
-- Embedding provider: [Ollama](https://ollama.com/) with `nomic-embed-text` (or vLLM)
+- PostgreSQL 17+ with [pgvector](https://github.com/pgvector/pgvector) and [pg_recall](https://github.com/thinkwright/pg_recall) extensions
+- Embedding provider: any OpenAI-compatible API (Together.ai, OpenAI, Ollama, vLLM)
 - Kubernetes cluster (for Helm deployment)
 
 ## Quick start
@@ -78,7 +77,7 @@ cd ch-web && go build -o bin/ch-web ./cmd/server
 ### Run locally
 
 ```bash
-# Start ch-server (needs PostgreSQL, Qdrant, Ollama running)
+# Start ch-server (needs PostgreSQL with pg_recall, embedding provider)
 DATABASE_PASSWORD=secret ./bin/ch-server
 
 # Start ch-web (proxies API to ch-server)
@@ -105,15 +104,14 @@ helm upgrade --install ch-web ch-web/charts/ch-web -n ch-system
 chapterhouse/
 ├── ch-server/
 │   ├── cmd/api/              # API server entrypoint
-│   ├── cmd/init/             # Init container (DB ping + Qdrant collection setup)
-│   ├── cmd/mcp-server/       # Standalone MCP server
-│   ├── cmd/reindex/          # Reindex all memories in Qdrant
+│   ├── cmd/init/             # Init container (pg_recall extension verification)
+│   ├── cmd/mcp-server/       # Standalone MCP server (stdio proxy)
 │   ├── internal/
 │   │   ├── auth/             # API key, session, JWT, composite auth
 │   │   ├── mcp/              # MCP protocol implementation
+│   │   ├── mneme/            # pg_recall storage adapter
 │   │   ├── handler/          # HTTP handlers
-│   │   ├── embedding/        # Embedding providers (Ollama, OpenAI-compatible)
-│   │   └── vector/           # Qdrant client
+│   │   └── embedding/        # Embedding providers (OpenAI-compatible)
 │   ├── db/migrations/        # SQL schema migrations
 │   ├── charts/ch-server/     # Helm chart
 │   └── Dockerfile
@@ -123,7 +121,7 @@ chapterhouse/
 │   │   └── static/           # HTML, CSS, JS (zero build tools)
 │   ├── charts/ch-web/        # Helm chart
 │   └── Dockerfile
-├── deploy/examples/          # Example Kubernetes manifests (CNPG, Qdrant)
+├── deploy/examples/          # Example Kubernetes manifests (CNPG)
 ├── Makefile                  # Build, test, deploy targets
 ├── LICENSE                   # Apache 2.0
 └── README.md
@@ -141,12 +139,11 @@ chapterhouse/
 | `DATABASE_NAME` | `memories` | Database name |
 | `DATABASE_USER` | `memory_api` | Database user |
 | `DATABASE_PASSWORD` | — | Database password (required) |
-| `QDRANT_HOST` | `localhost` | Qdrant host |
-| `QDRANT_GRPC_PORT` | `6334` | Qdrant gRPC port |
-| `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` (any OpenAI-compatible API) |
-| `EMBEDDING_URL` | `http://localhost:11434` | Embedding service URL |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
-| `EMBEDDING_API_KEY` | — | API key for OpenAI-compatible providers |
+| `EMBEDDING_PROVIDER` | `openai` | `openai` (any OpenAI-compatible API) |
+| `EMBEDDING_URL` | `https://api.openai.com` | Embedding service URL |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model name |
+| `EMBEDDING_DIMENSIONS` | `768` | Embedding vector dimensions |
+| `EMBEDDING_API_KEY` | — | API key for the embedding provider |
 
 ### ch-web
 
@@ -169,23 +166,17 @@ Chapterhouse uses vector embeddings for semantic memory search. Any **OpenAI-com
 | Model | Dimensions | Provider |
 |-------|-----------|----------|
 | `BAAI/bge-base-en-v1.5` | 768 | Together.ai, Ollama, vLLM |
+| `Alibaba-NLP/gte-modernbert-base` | 768 | Together.ai |
 | `nomic-embed-text` | 768 | Ollama |
 | `text-embedding-3-small` | 1536 | OpenAI |
 
-### Dimension mismatch warning
+### Dimension configuration
 
-The embedding dimensions configured in Chapterhouse **must match** the Qdrant collection dimensions exactly. If you change embedding models with different dimensions:
+Embedding dimensions are configured both in Chapterhouse (`EMBEDDING_DIMENSIONS`) and in pg_recall (`SELECT pg_recall.configure_dimensions(768)`). These must match. If you change embedding models with different dimensions:
 
 1. Update `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` in your configuration
-2. **Drop and recreate** the Qdrant collection (dimensions are set at creation time)
-3. Run a full reindex to regenerate all vectors
-
-```bash
-# Example: reindex after changing embedding model
-kubectl exec -n ch-system deploy/ch-server -- /app/ch-reindex
-```
-
-Failure to match dimensions will cause indexing errors. There is no automatic migration -- changing dimensions requires a full reindex.
+2. Run `SELECT pg_recall.configure_dimensions(<new_dims>)` in PostgreSQL (requires empty mnemes table)
+3. Re-embed existing memories if migrating
 
 ## License
 

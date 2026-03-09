@@ -27,9 +27,8 @@ chapterhouse/
 ├── conversion-recipe.md        # Air-gap conversion plan and status
 ├── ch-server/                  # Go API + MCP server
 │   ├── cmd/api/                # Server entrypoint
-│   ├── cmd/reindex/            # Reindex tool
-│   ├── cmd/init/               # Init container
-│   ├── internal/               # Auth, handlers, MCP, config, embedding, vector
+│   ├── cmd/init/               # Init container (pg_recall extension verification)
+│   ├── internal/               # Auth, handlers, MCP, config, embedding, mneme
 │   ├── db/migrations/          # SQL schema migrations (6 files)
 │   ├── charts/ch-server/       # Helm chart
 │   ├── ca-bundle.pem           # CA bundle (build context copy)
@@ -43,7 +42,7 @@ chapterhouse/
 │   ├── ca-bundle.pem           # CA bundle (build context copy)
 │   └── Dockerfile
 ├── deploy/
-│   └── examples/               # CNPG and Qdrant manifests
+│   └── examples/               # CNPG manifests
 ├── README.md
 ├── RUNBOOK.md                  # Deployment operations guide
 ├── SECURITY_STATEMENT.md       # Security posture and design decisions
@@ -101,7 +100,7 @@ These are tracked in git. If certificates rotate, replace the root copy and upda
 cd ch-server
 go build -o bin/ch-server ./cmd/api
 
-# Run locally (requires PostgreSQL, Qdrant, and an embedding provider)
+# Run locally (requires PostgreSQL with pg_recall and an embedding provider)
 DATABASE_PASSWORD=secret ./bin/ch-server
 
 # Or use the dev script (connects to K8s services via NodePort)
@@ -360,7 +359,6 @@ Build jobs use the `docker` and `amd64` runner tags. The runner must have Docker
 | `make charts` | Package both Helm charts to `dist/` |
 | `make deploy-server` | Deploy ch-server via Helm |
 | `make deploy-web` | Deploy ch-web via Helm |
-| `make reindex` | Run reindex via kubectl exec |
 | `make clean` | Remove local built images |
 | `make release VERSION=X.Y.Z` | Stamp, commit, tag, push |
 | `make release-dry-run VERSION=X.Y.Z` | Preview release changes |
