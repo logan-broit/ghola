@@ -12,22 +12,16 @@ import (
 
 // HealthHandler provides health and readiness endpoints.
 type HealthHandler struct {
-	db         *pgxpool.Pool
-	qdrantURL  string
-	httpClient *http.Client
+	db *pgxpool.Pool
 
 	mu    sync.RWMutex
 	ready bool
 }
 
 // NewHealthHandler creates a new health handler.
-func NewHealthHandler(db *pgxpool.Pool, qdrantURL string) *HealthHandler {
+func NewHealthHandler(db *pgxpool.Pool) *HealthHandler {
 	return &HealthHandler{
-		db:        db,
-		qdrantURL: qdrantURL,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
-		},
+		db:    db,
 		ready: false,
 	}
 }
@@ -86,16 +80,6 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 		checks["database"] = "healthy"
 	}
 
-	// Check Qdrant if configured
-	if h.qdrantURL != "" {
-		if err := h.checkQdrant(ctx); err != nil {
-			checks["qdrant"] = "unhealthy: " + err.Error()
-			allHealthy = false
-		} else {
-			checks["qdrant"] = "healthy"
-		}
-	}
-
 	status := "ok"
 	statusCode := http.StatusOK
 	if !allHealthy {
@@ -112,23 +96,4 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func (h *HealthHandler) checkQdrant(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.qdrantURL+"/", nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := h.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return http.ErrNotSupported
-	}
-
-	return nil
 }

@@ -1,11 +1,9 @@
 package handler
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 	"github.com/thinkwright/chapterhouse/ch-server/pkg/apierror"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,15 +12,13 @@ import (
 // SystemStatsHandler handles system infrastructure statistics.
 type SystemStatsHandler struct {
 	pool    *pgxpool.Pool
-	qdrant  *vector.Client
 	queries *sqlc.Queries
 }
 
 // NewSystemStatsHandler creates a new system stats handler.
-func NewSystemStatsHandler(pool *pgxpool.Pool, qdrant *vector.Client, queries *sqlc.Queries) *SystemStatsHandler {
+func NewSystemStatsHandler(pool *pgxpool.Pool, queries *sqlc.Queries) *SystemStatsHandler {
 	return &SystemStatsHandler{
 		pool:    pool,
-		qdrant:  qdrant,
 		queries: queries,
 	}
 }
@@ -36,16 +32,6 @@ type PostgresStats struct {
 	AcquireCount         int64 `json:"acquire_count"`
 	EmptyAcquireCount    int64 `json:"empty_acquire_count"`
 	CanceledAcquireCount int64 `json:"canceled_acquire_count"`
-}
-
-// QdrantStats holds Qdrant vector database statistics.
-type QdrantStats struct {
-	VectorsCount   uint64 `json:"vectors_count"`
-	PointsCount    uint64 `json:"points_count"`
-	SegmentsCount  uint64 `json:"segments_count"`
-	Status         string `json:"status"`
-	DiskDataSizeKB uint64 `json:"disk_data_size_kb"`
-	RAMDataSizeKB  uint64 `json:"ram_data_size_kb"`
 }
 
 // MemoryStats holds memory block statistics.
@@ -77,7 +63,6 @@ type MemoryScopeDistribution struct {
 // SystemStatsResponse represents the full system statistics.
 type SystemStatsResponse struct {
 	Postgres *PostgresStats `json:"postgres"`
-	Qdrant   *QdrantStats   `json:"qdrant,omitempty"`
 	Memory   *MemoryStats   `json:"memory,omitempty"`
 }
 
@@ -95,20 +80,6 @@ func (h *SystemStatsHandler) GetSystemStats(w http.ResponseWriter, r *http.Reque
 			AcquireCount:         poolStats.AcquireCount(),
 			EmptyAcquireCount:    poolStats.EmptyAcquireCount(),
 			CanceledAcquireCount: poolStats.CanceledAcquireCount(),
-		}
-	}
-
-	if h.qdrant != nil {
-		qdrantStats, err := h.qdrant.GetCollectionStats(context.Background())
-		if err == nil {
-			resp.Qdrant = &QdrantStats{
-				VectorsCount:   qdrantStats.VectorsCount,
-				PointsCount:    qdrantStats.PointsCount,
-				SegmentsCount:  qdrantStats.SegmentsCount,
-				Status:         qdrantStats.Status,
-				DiskDataSizeKB: qdrantStats.DiskDataSizeKB,
-				RAMDataSizeKB:  qdrantStats.RAMDataSizeKB,
-			}
 		}
 	}
 

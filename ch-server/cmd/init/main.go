@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/config"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -53,27 +52,13 @@ func run() error {
 	}
 	logger.Info("database connectivity verified")
 
-	// Ensure Qdrant collection exists
-	vectorDB, err := vector.NewClient(vector.Config{
-		Host:       cfg.Qdrant.Host,
-		GRPCPort:   cfg.Qdrant.GRPCPort,
-		APIKey:     cfg.Qdrant.APIKey,
-		Collection: cfg.Qdrant.Collection,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
+	// Verify pg_recall extension is available
+	var extVersion string
+	err = pool.QueryRow(ctx, "SELECT extversion FROM pg_extension WHERE extname = 'pg_recall'").Scan(&extVersion)
 	if err != nil {
-		return fmt.Errorf("failed to connect to Qdrant: %w", err)
+		return fmt.Errorf("pg_recall extension not found — ensure the custom CNPG image includes pg_recall: %w", err)
 	}
-	defer vectorDB.Close()
-
-	if err := vectorDB.EnsureCollection(ctx); err != nil {
-		return fmt.Errorf("failed to ensure Qdrant collection: %w", err)
-	}
-	logger.Info("Qdrant collection ready",
-		slog.String("host", cfg.Qdrant.Host),
-		slog.String("collection", cfg.Qdrant.Collection),
-		slog.Int("dimensions", cfg.Embedding.Dimensions),
-	)
+	logger.Info("pg_recall extension verified", slog.String("version", extVersion))
 
 	logger.Info("init complete")
 	return nil

@@ -9,7 +9,6 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -79,57 +78,6 @@ func (e *ErrorEmbeddingProvider) Dimensions() int { return 384 }
 func (e *ErrorEmbeddingProvider) Name() string     { return "error-mock" }
 
 var _ embedding.Provider = (*ErrorEmbeddingProvider)(nil)
-
-// MockVectorDB implements a simple in-memory vector store for testing.
-type MockVectorDB struct {
-	Mu       sync.Mutex
-	Points   map[string]vector.Point
-	Searches []MockSearchCall
-}
-
-type MockSearchCall struct {
-	UserID uuid.UUID
-	OrgID  uuid.UUID
-	Vector []float32
-	Limit  uint64
-}
-
-func NewMockVectorDB() *MockVectorDB {
-	return &MockVectorDB{Points: make(map[string]vector.Point)}
-}
-
-func (m *MockVectorDB) Upsert(ctx context.Context, point vector.Point) error {
-	m.Mu.Lock()
-	defer m.Mu.Unlock()
-	m.Points[point.ID] = point
-	return nil
-}
-
-func (m *MockVectorDB) Search(ctx context.Context, userID uuid.UUID, orgID uuid.UUID, vec []float32, limit uint64, filter *vector.SearchFilter) ([]vector.SearchResult, error) {
-	m.Mu.Lock()
-	defer m.Mu.Unlock()
-
-	m.Searches = append(m.Searches, MockSearchCall{UserID: userID, OrgID: orgID, Vector: vec, Limit: limit})
-
-	var results []vector.SearchResult
-	for _, p := range m.Points {
-		if p.UserID == userID {
-			results = append(results, vector.SearchResult{BlockID: p.BlockID, Score: 0.85, Text: p.Text})
-			if uint64(len(results)) >= limit {
-				break
-			}
-		}
-	}
-	return results, nil
-}
-
-func (m *MockVectorDB) Delete(ctx context.Context, pointID string) error {
-	m.Mu.Lock()
-	defer m.Mu.Unlock()
-
-	delete(m.Points, pointID)
-	return nil
-}
 
 // MockQueries implements sqlc.Querier for testing.
 // Embeds NoopQueries for all methods that don't need real logic.
@@ -412,27 +360,5 @@ func CreateMemoryBlockParams(userID uuid.UUID, name, value string) sqlc.CreateMe
 		Value:     pgtype.Text{String: value, Valid: true},
 		Version:   1,
 		SortOrder: 0,
-	}
-}
-
-func MockVectorPoint(userID uuid.UUID, blockID int64, text string) vector.Point {
-	return vector.Point{
-		ID:      uuid.New().String(),
-		UserID:  userID,
-		BlockID: blockID,
-		Text:    text,
-		Scope:   "personal",
-		Vector:  make([]float32, 384),
-	}
-}
-
-func MockVectorPointWithScope(userID uuid.UUID, blockID int64, text, scope string) vector.Point {
-	return vector.Point{
-		ID:      uuid.New().String(),
-		UserID:  userID,
-		BlockID: blockID,
-		Text:    text,
-		Scope:   scope,
-		Vector:  make([]float32, 384),
 	}
 }

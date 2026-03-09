@@ -9,18 +9,11 @@ import (
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/mneme"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/secrets"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
-
-// nearDuplicateThreshold is the cosine similarity threshold above which a
-// memory is considered a near-duplicate during store. The memory is still
-// stored — the notice lets the agent decide whether to forget the old one.
-const nearDuplicateThreshold = 0.92
 
 // Enum validation sets, shared across handlers.
 var (
@@ -35,25 +28,7 @@ var (
 	}
 )
 
-// sessionToPgUUID converts an auth.Context SessionID to a pgtype.UUID.
-// Returns an invalid pgtype.UUID when the session is uuid.Nil (stateless transport).
-func sessionToPgUUID(id uuid.UUID) pgtype.UUID {
-	if id == uuid.Nil {
-		return pgtype.UUID{}
-	}
-	return pgtype.UUID{Bytes: id, Valid: true}
-}
-
-// sessionToString returns the session UUID as a string, or "" for uuid.Nil.
-func sessionToString(id uuid.UUID) string {
-	if id == uuid.Nil {
-		return ""
-	}
-	return id.String()
-}
-
 // parseSessionIDArg validates an optional session_id argument string.
-// Returns the parsed UUID string and any validation error.
 func parseSessionIDArg(args map[string]any) (string, error) {
 	raw, _ := args["session_id"].(string)
 	if raw == "" {
@@ -64,6 +39,35 @@ func parseSessionIDArg(args map[string]any) (string, error) {
 		return "", fmt.Errorf("invalid session_id: must be a valid UUID")
 	}
 	return parsed.String(), nil
+}
+
+// parseSessionIDPtr returns a *uuid.UUID from an optional session_id arg.
+func parseSessionIDPtr(args map[string]any) (*uuid.UUID, error) {
+	raw, _ := args["session_id"].(string)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session_id: must be a valid UUID")
+	}
+	return &parsed, nil
+}
+
+// resolveSessionID returns the explicit arg session, or falls back to transport session.
+func resolveSessionID(authCtx *auth.Context, args map[string]any) (*uuid.UUID, error) {
+	ptr, err := parseSessionIDPtr(args)
+	if err != nil {
+		return nil, err
+	}
+	if ptr != nil {
+		return ptr, nil
+	}
+	if authCtx.SessionID != uuid.Nil {
+		id := authCtx.SessionID
+		return &id, nil
+	}
+	return nil, nil
 }
 
 // truncateText shortens a string to maxLen characters, appending "..." if truncated.
@@ -104,16 +108,6 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 		return toolError("scope must be 'personal' or 'org'")
 	}
 
-	var expiresAt pgtype.Timestamptz
-	if memoryType == "working" {
-		expiresAt = pgtype.Timestamptz{
-			Time:  time.Now().Add(7 * 24 * time.Hour),
-			Valid: true,
-		}
-	}
-
-	name := sanitizeName(fact)
-
 	var tagStrs []string
 	if tags, ok := args["tags"].([]any); ok && len(tags) > 0 {
 		for _, t := range tags {
@@ -123,109 +117,26 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 		}
 	}
 
-	// Determine session_id: prefer client-provided arg, fall back to transport session.
-	sessionID := sessionToPgUUID(authCtx.SessionID)
-	sessionIDStr := sessionToString(authCtx.SessionID)
-	if clientSID, err := parseSessionIDArg(args); err != nil {
+	sessionID, err := resolveSessionID(authCtx, args)
+	if err != nil {
 		return toolError(err.Error())
-	} else if clientSID != "" {
-		parsed, _ := uuid.Parse(clientSID)
-		sessionID = pgtype.UUID{Bytes: parsed, Valid: true}
-		sessionIDStr = clientSID
 	}
 
 	ctx := auth.WithContext(context.Background(), authCtx)
-	nextVersion, err := s.queries.GetNextMemoryBlockVersion(ctx, sqlc.GetNextMemoryBlockVersionParams{
-		UserID: authCtx.UserID,
-		Name:   name,
-	})
-	if err != nil {
-		return toolError(fmt.Sprintf("Error: %v", err))
-	}
-
-	block, err := s.queries.CreateMemoryBlock(ctx, sqlc.CreateMemoryBlockParams{
-		UserID:     authCtx.UserID,
-		Name:       name,
-		Tier:       "index",
-		Value:      pgtype.Text{String: fact, Valid: true},
-		MemoryType: memoryType,
-		Scope:      scope,
-		ExpiresAt:  expiresAt,
-		Version:    nextVersion,
-		SortOrder:  0,
-		Tags:       tagStrs,
-		SessionID:  sessionID,
-	})
+	m, dup, err := s.store.Remember(ctx, authCtx.UserID, authCtx.OrgID, fact, memoryType, scope, "index", tagStrs, sessionID)
 	if err != nil {
 		return toolError(fmt.Sprintf("Error: %v", err))
 	}
 
 	var nearDuplicateNotice string
-	if s.embedder != nil && s.vectorDB != nil {
-		embedCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		vec, err := s.embedder.Embed(embedCtx, fact)
-		cancel()
-
-		if err != nil {
-			s.logger.Warn("failed to generate embedding",
-				"error", err.Error(),
-				"block_id", block.ID,
-			)
-		} else {
-			// Check for near-duplicates before upserting
-			similar, searchErr := s.vectorDB.Search(ctx, authCtx.UserID, authCtx.OrgID, vec, 3, nil)
-			if searchErr != nil {
-				s.logger.Warn("near-duplicate check failed",
-					"error", searchErr.Error(),
-					"block_id", block.ID,
-				)
-			} else {
-				for _, r := range similar {
-					if r.Score >= nearDuplicateThreshold && r.BlockID != block.ID {
-						nearDuplicateNotice = fmt.Sprintf(
-							"\n\nNote: Similar memory exists (id=%d, similarity=%.0f%%): %s",
-							r.BlockID, r.Score*100, truncateText(r.Text, 120),
-						)
-						break
-					}
-				}
-			}
-
-			// Upsert vector in background
-			point := vector.Point{
-				ID:         vector.MemoryPointID(authCtx.UserID, name),
-				UserID:     authCtx.UserID,
-				OrgID:      authCtx.OrgID,
-				BlockID:    block.ID,
-				Text:       fact,
-				Scope:      scope,
-				MemoryType: memoryType,
-				Tags:       tagStrs,
-				SessionID:  sessionIDStr,
-				Vector:     vec,
-			}
-			s.goBackground(func() {
-				upsertCtx, upsertCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer upsertCancel()
-				if err := s.vectorDB.Upsert(upsertCtx, point); err != nil {
-					s.logger.Warn("failed to store embedding",
-						"error", err.Error(),
-						"block_id", block.ID,
-					)
-				}
-			})
-		}
+	if dup != nil {
+		nearDuplicateNotice = fmt.Sprintf(
+			"\n\nNote: Similar memory exists (id=%s, similarity=%.0f%%): %s",
+			dup.ID, dup.Similarity*100, truncateText(dup.Content, 120),
+		)
 	}
 
-	return toolResult(fmt.Sprintf("Remembered (id=%d): %s%s", block.ID, fact, nearDuplicateNotice))
-}
-
-// rankedResult holds a single search result with its source for RRF fusion.
-type rankedResult struct {
-	blockID int64
-	scope   string
-	text    string
-	source  string // "semantic" or "keyword"
+	return toolResult(fmt.Sprintf("Remembered (id=%s): %s%s", m.ID, fact, nearDuplicateNotice))
 }
 
 func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallToolResult {
@@ -243,16 +154,8 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 		limit = int(l)
 	}
 
-	ctx := auth.WithContext(context.Background(), authCtx)
 	memoryType, _ := args["memory_type"].(string)
 
-	// Parse optional session_id filter
-	sessionFilter, err := parseSessionIDArg(args)
-	if err != nil {
-		return toolError(err.Error())
-	}
-
-	// Parse tag filters
 	var tagFilter []string
 	if tags, ok := args["tags"].([]any); ok {
 		for _, t := range tags {
@@ -262,152 +165,36 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 		}
 	}
 
-	var semanticResults []rankedResult
-	var keywordResults []rankedResult
-
-	// Semantic search via vector DB
-	if (mode == "semantic" || mode == "hybrid") && s.embedder != nil && s.vectorDB != nil {
-		embedCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-
-		// Build vector search filter from memory_type, tags, and session_id
-		var searchFilter *vector.SearchFilter
-		if memoryType != "" || len(tagFilter) > 0 || sessionFilter != "" {
-			searchFilter = &vector.SearchFilter{
-				MemoryType: memoryType,
-				Tags:       tagFilter,
-				SessionID:  sessionFilter,
-			}
-		}
-
-		queryVec, err := s.embedder.Embed(embedCtx, query)
-		if err != nil {
-			s.logger.Warn("failed to generate query embedding",
-				"error", err.Error(),
-			)
-		} else {
-			results, err := s.vectorDB.Search(embedCtx, authCtx.UserID, authCtx.OrgID, queryVec, uint64(limit), searchFilter)
-			if err != nil {
-				s.logger.Warn("vector search failed",
-					"error", err.Error(),
-				)
-			} else {
-				for _, r := range results {
-					semanticResults = append(semanticResults, rankedResult{
-						blockID: r.BlockID,
-						scope:   r.Scope,
-						text:    r.Text,
-						source:  "semantic",
-					})
-				}
-			}
-		}
+	sessionID, err := parseSessionIDPtr(args)
+	if err != nil {
+		return toolError(err.Error())
 	}
 
-	// Keyword search via PostgreSQL ILIKE + full-text search
-	if mode == "keyword" || mode == "hybrid" {
-		searchLimit := int32(limit)
-
-		var blocks []sqlc.CurrentMemoryBlock
-		var err error
-
-		hasType := memoryType != ""
-		hasTags := len(tagFilter) > 0
-
-		switch {
-		case hasType && hasTags:
-			blocks, err = s.queries.SearchAccessibleMemoryBlocksByTypeAndTags(ctx, sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams{
-				UserID:      authCtx.UserID,
-				Query:       pgtype.Text{String: query, Valid: true},
-				MemoryType:  memoryType,
-				FilterTags:  tagFilter,
-				SearchLimit: searchLimit,
-			})
-		case hasType:
-			blocks, err = s.queries.SearchAccessibleMemoryBlocksByType(ctx, sqlc.SearchAccessibleMemoryBlocksByTypeParams{
-				UserID:      authCtx.UserID,
-				Query:       pgtype.Text{String: query, Valid: true},
-				MemoryType:  memoryType,
-				SearchLimit: searchLimit,
-			})
-		case hasTags:
-			blocks, err = s.queries.SearchAccessibleMemoryBlocksByTags(ctx, sqlc.SearchAccessibleMemoryBlocksByTagsParams{
-				UserID:      authCtx.UserID,
-				Query:       pgtype.Text{String: query, Valid: true},
-				FilterTags:  tagFilter,
-				SearchLimit: searchLimit,
-			})
-		default:
-			blocks, err = s.queries.SearchAccessibleMemoryBlocks(ctx, sqlc.SearchAccessibleMemoryBlocksParams{
-				UserID:      authCtx.UserID,
-				Query:       pgtype.Text{String: query, Valid: true},
-				SearchLimit: searchLimit,
-			})
-		}
-
-		if err != nil {
-			return toolError(fmt.Sprintf("Error: %v", err))
-		}
-
-		for _, block := range blocks {
-			// App-side session_id filter for keyword results
-			if sessionFilter != "" {
-				if !block.SessionID.Valid || uuid.UUID(block.SessionID.Bytes).String() != sessionFilter {
-					continue
-				}
-			}
-
-			value := ""
-			if block.Value.Valid {
-				value = block.Value.String
-			}
-			keywordResults = append(keywordResults, rankedResult{
-				blockID: block.ID,
-				scope:   block.Scope,
-				text:    value,
-				source:  "keyword",
-			})
-		}
+	ctx := auth.WithContext(context.Background(), authCtx)
+	results, err := s.store.Recall(ctx, authCtx.UserID, authCtx.OrgID, query, limit, mode, memoryType, tagFilter, sessionID)
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
 	}
 
-	// Fuse results using Reciprocal Rank Fusion (RRF) when in hybrid mode
-	var matches []string
-	var recalledBlockIDs []int64
-	if mode == "hybrid" && len(semanticResults) > 0 && len(keywordResults) > 0 {
-		matches, recalledBlockIDs = fuseRRF(semanticResults, keywordResults, limit)
-	} else {
-		// Single-source mode or one source returned nothing
-		for _, r := range semanticResults {
-			matches = append(matches, fmt.Sprintf("[%d] [%s] (semantic) %s", r.blockID, r.scope, r.text))
-			recalledBlockIDs = append(recalledBlockIDs, r.blockID)
-		}
-		for _, r := range keywordResults {
-			matches = append(matches, fmt.Sprintf("[%d] [%s] (keyword) %s", r.blockID, r.scope, r.text))
-			recalledBlockIDs = append(recalledBlockIDs, r.blockID)
-		}
-	}
-
-	if len(matches) == 0 {
+	if len(results) == 0 {
 		return toolResult("No matching memories found")
 	}
 
-	if len(matches) > limit {
-		matches = matches[:limit]
-		recalledBlockIDs = recalledBlockIDs[:limit]
+	var matches []string
+	var mnemeIDs []uuid.UUID
+	for _, r := range results {
+		matches = append(matches, fmt.Sprintf("[%s] [%s] (score=%.2f) %s", r.MnemeID, r.Scope, r.Score, r.Content))
+		mnemeIDs = append(mnemeIDs, r.MnemeID)
 	}
 
-	// Track recall hits asynchronously
-	if len(recalledBlockIDs) > 0 {
-		ids := recalledBlockIDs
-		userID := authCtx.UserID
+	// Confirm recall in background (Bayesian confidence update)
+	if len(mnemeIDs) > 0 {
+		ids := mnemeIDs
 		s.goBackground(func() {
 			trackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.queries.IncrementRecallCount(trackCtx, sqlc.IncrementRecallCountParams{
-				BlockIds: ids,
-				UserID:   userID,
-			}); err != nil {
-				s.logger.Warn("failed to increment recall count",
+			if err := s.store.ConfirmRecall(trackCtx, ids); err != nil {
+				s.logger.Warn("failed to confirm recall",
 					"error", err.Error(),
 				)
 			}
@@ -417,138 +204,30 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 	return toolResult(strings.Join(matches, "\n"))
 }
 
-// fuseRRF merges two ranked result lists using Reciprocal Rank Fusion.
-// RRF score = sum of 1/(k + rank) for each list the result appears in.
-// k=60 is the standard constant from the original RRF paper.
-func fuseRRF(semantic, keyword []rankedResult, limit int) ([]string, []int64) {
-	const k = 60.0
-
-	type fusedEntry struct {
-		blockID int64
-		scope   string
-		text    string
-		score   float64
-		sources string
-	}
-
-	entries := make(map[int64]*fusedEntry)
-
-	for rank, r := range semantic {
-		entries[r.blockID] = &fusedEntry{
-			blockID: r.blockID,
-			scope:   r.scope,
-			text:    r.text,
-			score:   1.0 / (k + float64(rank+1)),
-			sources: "semantic",
-		}
-	}
-
-	for rank, r := range keyword {
-		if e, exists := entries[r.blockID]; exists {
-			e.score += 1.0 / (k + float64(rank+1))
-			e.sources = "hybrid"
-		} else {
-			entries[r.blockID] = &fusedEntry{
-				blockID: r.blockID,
-				scope:   r.scope,
-				text:    r.text,
-				score:   1.0 / (k + float64(rank+1)),
-				sources: "keyword",
-			}
-		}
-	}
-
-	// Sort by fused score descending
-	sorted := make([]*fusedEntry, 0, len(entries))
-	for _, e := range entries {
-		sorted = append(sorted, e)
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].score > sorted[j].score
-	})
-
-	if len(sorted) > limit {
-		sorted = sorted[:limit]
-	}
-
-	matches := make([]string, len(sorted))
-	blockIDs := make([]int64, len(sorted))
-	for i, e := range sorted {
-		matches[i] = fmt.Sprintf("[%d] [%s] (%s) %s", e.blockID, e.scope, e.sources, e.text)
-		blockIDs[i] = e.blockID
-	}
-	return matches, blockIDs
-}
-
 func (s *Server) handleForget(authCtx *auth.Context, args map[string]any) CallToolResult {
-	factIDFloat, ok := args["fact_id"].(float64)
-	if !ok {
+	factIDStr, ok := args["fact_id"].(string)
+	if !ok || factIDStr == "" {
 		return toolError("fact_id is required")
 	}
-	factID := int64(factIDFloat)
+
+	mnemeID, err := uuid.Parse(factIDStr)
+	if err != nil {
+		return toolError("fact_id must be a valid UUID")
+	}
 
 	ctx := auth.WithContext(context.Background(), authCtx)
-
-	block, err := s.queries.GetMemoryBlockByID(ctx, sqlc.GetMemoryBlockByIDParams{
-		ID:     factID,
-		UserID: authCtx.UserID,
-	})
-	if err != nil {
-		return toolError(fmt.Sprintf("Memory with ID %d not found", factID))
-	}
-
-	if err := s.queries.DeleteMemoryBlock(ctx, sqlc.DeleteMemoryBlockParams{
-		UserID: authCtx.UserID,
-		Name:   block.Name,
-	}); err != nil {
-		return toolError(fmt.Sprintf("Error: %v", err))
-	}
-
-	if s.vectorDB != nil {
-		pointID := vector.MemoryPointID(authCtx.UserID, block.Name)
-		s.goBackground(func() {
-			delCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := s.vectorDB.Delete(delCtx, pointID); err != nil {
-				s.logger.Warn("failed to delete embedding",
-					"error", err.Error(),
-					"point_id", pointID,
-				)
-			}
-		})
-	}
-
-	return toolResult(fmt.Sprintf("Removed memory with ID %d", factID))
-}
-
-func (s *Server) handleListMemories(authCtx *auth.Context, args map[string]any) CallToolResult {
-	ctx := auth.WithContext(context.Background(), authCtx)
-
-	memoryType, _ := args["memory_type"].(string)
-
-	// Parse optional session_id filter
-	sessionFilter, err := parseSessionIDArg(args)
-	if err != nil {
+	if err := s.store.Forget(ctx, authCtx.UserID, authCtx.OrgID, mnemeID); err != nil {
 		return toolError(err.Error())
 	}
 
-	var blocks []sqlc.CurrentMemoryBlock
+	return toolResult(fmt.Sprintf("Removed memory %s", mnemeID))
+}
 
-	if memoryType != "" {
-		blocks, err = s.queries.GetAccessibleMemoryBlocksByType(ctx, sqlc.GetAccessibleMemoryBlocksByTypeParams{
-			UserID:     authCtx.UserID,
-			MemoryType: memoryType,
-		})
-	} else {
-		blocks, err = s.queries.GetAccessibleMemoryBlocks(ctx, authCtx.UserID)
-	}
-
-	if err != nil {
-		return toolError(fmt.Sprintf("Error: %v", err))
-	}
-
-	if len(blocks) == 0 {
-		return toolResult("No memories found")
+func (s *Server) handleListMemories(authCtx *auth.Context, args map[string]any) CallToolResult {
+	memoryType, _ := args["memory_type"].(string)
+	limit := 50
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
 	}
 
 	var tagFilter []string
@@ -560,36 +239,38 @@ func (s *Server) handleListMemories(authCtx *auth.Context, args map[string]any) 
 		}
 	}
 
-	var lines []string
-	for _, block := range blocks {
-		if len(tagFilter) > 0 && !matchesTags(block.Tags, tagFilter) {
-			continue
-		}
-		if sessionFilter != "" {
-			if !block.SessionID.Valid || uuid.UUID(block.SessionID.Bytes).String() != sessionFilter {
-				continue
-			}
-		}
-
-		value := ""
-		if block.Value.Valid {
-			value = block.Value.String
-		}
-
-		lines = append(lines, fmt.Sprintf("[%d] [%s,%s] [%s] %s", block.ID, block.Name, block.Tier, block.Scope, value))
+	sessionID, err := parseSessionIDPtr(args)
+	if err != nil {
+		return toolError(err.Error())
 	}
 
-	if len(lines) == 0 {
-		return toolResult("No matching memories found")
+	ctx := auth.WithContext(context.Background(), authCtx)
+	mnemes, err := s.store.List(ctx, authCtx.UserID, authCtx.OrgID, memoryType, tagFilter, sessionID, limit)
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	if len(mnemes) == 0 {
+		return toolResult("No memories found")
+	}
+
+	var lines []string
+	for _, m := range mnemes {
+		lines = append(lines, fmt.Sprintf("[%s] [%s] [%s] %s", m.ID, m.MemoryType, m.Scope, m.Content))
 	}
 
 	return toolResult(strings.Join(lines, "\n"))
 }
 
 func (s *Server) handleShareMemory(authCtx *auth.Context, args map[string]any) CallToolResult {
-	factID, ok := args["fact_id"].(float64)
-	if !ok {
-		return toolError("fact_id is required and must be a number")
+	factIDStr, ok := args["fact_id"].(string)
+	if !ok || factIDStr == "" {
+		return toolError("fact_id is required")
+	}
+
+	mnemeID, err := uuid.Parse(factIDStr)
+	if err != nil {
+		return toolError("fact_id must be a valid UUID")
 	}
 
 	scope, _ := args["scope"].(string)
@@ -601,82 +282,21 @@ func (s *Server) handleShareMemory(authCtx *auth.Context, args map[string]any) C
 	}
 
 	ctx := auth.WithContext(context.Background(), authCtx)
-
-	block, err := s.queries.GetMemoryBlockByID(ctx, sqlc.GetMemoryBlockByIDParams{
-		ID:     int64(factID),
-		UserID: authCtx.UserID,
-	})
-	if err != nil {
-		return toolError("Memory not found or you don't have permission to modify it")
-	}
-
-	updated, err := s.queries.UpdateMemoryBlockScope(ctx, sqlc.UpdateMemoryBlockScopeParams{
-		UserID: authCtx.UserID,
-		Name:   block.Name,
-		Scope:  scope,
-	})
-	if err != nil {
-		return toolError(fmt.Sprintf("Error updating scope: %v", err))
-	}
-
-	// Re-upsert the Qdrant point with updated scope metadata.
-	if s.embedder != nil && s.vectorDB != nil {
-		value := ""
-		if updated.Value.Valid {
-			value = updated.Value.String
-		}
-		s.goBackground(func() {
-			embedCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			vec, err := s.embedder.Embed(embedCtx, value)
-			if err != nil {
-				s.logger.Warn("failed to re-embed after scope change",
-					"error", err.Error(),
-					"block_id", updated.ID,
-				)
-				return
-			}
-
-			sessionID := ""
-			if updated.SessionID.Valid {
-				sessionID = uuid.UUID(updated.SessionID.Bytes).String()
-			}
-
-			point := vector.Point{
-				ID:         vector.MemoryPointID(authCtx.UserID, block.Name),
-				UserID:     authCtx.UserID,
-				OrgID:      authCtx.OrgID,
-				BlockID:    updated.ID,
-				Text:       value,
-				Scope:      scope,
-				MemoryType: updated.MemoryType,
-				Tags:       updated.Tags,
-				SessionID:  sessionID,
-				Vector:     vec,
-			}
-
-			if err := s.vectorDB.Upsert(embedCtx, point); err != nil {
-				s.logger.Warn("failed to update embedding scope",
-					"error", err.Error(),
-					"block_id", updated.ID,
-				)
-			}
-		})
+	if err := s.store.ChangeScope(ctx, authCtx.UserID, authCtx.OrgID, mnemeID, scope); err != nil {
+		return toolError(err.Error())
 	}
 
 	scopeLabel := "personal"
 	if scope == "org" {
 		scopeLabel = "organization"
 	}
-
-	return toolResult(fmt.Sprintf("Memory #%d is now %s", int64(factID), scopeLabel))
+	return toolResult(fmt.Sprintf("Memory %s is now %s", mnemeID, scopeLabel))
 }
 
 func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any) CallToolResult {
 	ctx := auth.WithContext(context.Background(), authCtx)
 
-	memories, err := s.queries.ExportMemories(ctx, authCtx.UserID)
+	allMnemes, err := s.store.Export(ctx, authCtx.UserID, authCtx.OrgID)
 	if err != nil {
 		return toolError(fmt.Sprintf("Error exporting memories: %v", err))
 	}
@@ -685,7 +305,6 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 	scope, _ := args["scope"].(string)
 	since, _ := args["since"].(string)
 
-	// Parse optional session_id filter
 	sessionFilter, parseErr := parseSessionIDArg(args)
 	if parseErr != nil {
 		return toolError(parseErr.Error())
@@ -709,48 +328,40 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 	}
 
 	var jsonlLines []string
-	for _, mem := range memories {
-		if memoryType != "" && mem.MemoryType != memoryType {
+	for _, m := range allMnemes {
+		if memoryType != "" && m.MemoryType != memoryType {
 			continue
 		}
-		if scope != "" && mem.Scope != scope {
+		if scope != "" && m.Scope != scope {
 			continue
 		}
-		if !sinceTime.IsZero() && mem.CreatedAt.Before(sinceTime) && mem.ModifiedAt.Before(sinceTime) {
+		if !sinceTime.IsZero() && m.CreatedAt.Before(sinceTime) {
 			continue
 		}
-		if len(tagFilter) > 0 && !matchesTags(mem.Tags, tagFilter) {
+		if len(tagFilter) > 0 && !matchesTags(m.Tags, tagFilter) {
 			continue
 		}
 		if sessionFilter != "" {
-			if !mem.SessionID.Valid || uuid.UUID(mem.SessionID.Bytes).String() != sessionFilter {
+			if m.SessionID == nil || m.SessionID.String() != sessionFilter {
 				continue
 			}
 		}
 
-		content := ""
-		if mem.Value.Valid {
-			content = mem.Value.String
-		}
-
 		exportRecord := map[string]interface{}{
-			"id":          mem.ID,
-			"guid":        mem.Guid.String(),
-			"user_id":     mem.UserID.String(),
-			"org_id":      mem.OrgID.String(),
-			"memory_type": mem.MemoryType,
-			"scope":       mem.Scope,
-			"tags":        mem.Tags,
-			"content":     content,
-			"created_at":  mem.CreatedAt.Format(time.RFC3339),
-			"modified_at": mem.ModifiedAt.Format(time.RFC3339),
+			"id":          m.ID.String(),
+			"memory_type": m.MemoryType,
+			"scope":       m.Scope,
+			"tags":        m.Tags,
+			"content":     m.Content,
+			"confidence":  m.Confidence,
+			"created_at":  m.CreatedAt.Format(time.RFC3339),
 		}
 
-		if mem.SessionID.Valid {
-			exportRecord["session_id"] = uuid.UUID(mem.SessionID.Bytes).String()
+		if m.SessionID != nil {
+			exportRecord["session_id"] = m.SessionID.String()
 		}
-		if mem.ExpiresAt.Valid {
-			exportRecord["expires_at"] = mem.ExpiresAt.Time.Format(time.RFC3339)
+		if m.ExpiresAt != nil {
+			exportRecord["expires_at"] = m.ExpiresAt.Format(time.RFC3339)
 		}
 
 		jsonBytes, err := json.Marshal(exportRecord)
@@ -767,8 +378,6 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 	output := strings.Join(jsonlLines, "\n") + "\n"
 	return toolResult(fmt.Sprintf("Exported %d memories:\n\n%s", len(jsonlLines), output))
 }
-
-// Tag parsing helpers
 
 // matchesTags returns true if tags contains all entries in filter (AND logic).
 func matchesTags(tags []string, filter []string) bool {
@@ -817,11 +426,10 @@ func relativeTime(t time.Time) string {
 }
 
 func (s *Server) handleListSessions(authCtx *auth.Context, args map[string]any) CallToolResult {
-	limit := int32(10)
+	limit := 10
 	if l, ok := args["limit"].(float64); ok && l > 0 {
-		limit = int32(l)
+		limit = int(l)
 	}
-	// Bound limit to 1-100 per security policy §3
 	if limit < 1 {
 		limit = 1
 	}
@@ -830,10 +438,7 @@ func (s *Server) handleListSessions(authCtx *auth.Context, args map[string]any) 
 	}
 
 	ctx := auth.WithContext(context.Background(), authCtx)
-	sessions, err := s.queries.ListUserSessions(ctx, sqlc.ListUserSessionsParams{
-		UserID:      authCtx.UserID,
-		ResultLimit: limit,
-	})
+	sessions, err := s.store.ListSessions(ctx, authCtx.UserID, authCtx.OrgID, limit)
 	if err != nil {
 		return toolError(fmt.Sprintf("Error: %v", err))
 	}
@@ -844,10 +449,6 @@ func (s *Server) handleListSessions(authCtx *auth.Context, args map[string]any) 
 
 	var lines []string
 	for _, sess := range sessions {
-		if !sess.SessionID.Valid {
-			continue
-		}
-		sid := uuid.UUID(sess.SessionID.Bytes).String()
 		lastActive := relativeTime(sess.LastActivity)
 		duration := sess.LastActivity.Sub(sess.FirstActivity)
 
@@ -861,27 +462,24 @@ func (s *Server) handleListSessions(authCtx *auth.Context, args map[string]any) 
 		}
 
 		lines = append(lines, fmt.Sprintf("[%s] %d memories, %s duration, last active %s",
-			sid, sess.MemoryCount, durationStr, lastActive))
+			sess.SessionID, sess.MemoryCount, durationStr, lastActive))
 	}
 
 	return toolResult(fmt.Sprintf("Found %d sessions:\n\n%s", len(lines), strings.Join(lines, "\n")))
 }
 
 func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any) CallToolResult {
-	sessionID, err := parseSessionIDArg(args)
+	sessionIDStr, err := parseSessionIDArg(args)
 	if err != nil {
 		return toolError(err.Error())
 	}
-	if sessionID == "" {
+	if sessionIDStr == "" {
 		return toolError("session_id is required")
 	}
 
-	parsed, _ := uuid.Parse(sessionID)
+	parsed, _ := uuid.Parse(sessionIDStr)
 	ctx := auth.WithContext(context.Background(), authCtx)
-	memories, err := s.queries.GetSessionMemories(ctx, sqlc.GetSessionMemoriesParams{
-		UserID:    authCtx.UserID,
-		SessionID: pgtype.UUID{Bytes: parsed, Valid: true},
-	})
+	memories, err := s.store.GetSessionMemories(ctx, authCtx.UserID, authCtx.OrgID, parsed)
 	if err != nil {
 		return toolError(fmt.Sprintf("Error: %v", err))
 	}
@@ -890,7 +488,33 @@ func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any
 		return toolResult("No memories found for this session")
 	}
 
-	// Compute time range
+	return formatSessionSummary(sessionIDStr, memories)
+}
+
+func (s *Server) handleSessionContext(authCtx *auth.Context, args map[string]any) CallToolResult {
+	sessionIDStr, err := parseSessionIDArg(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	if sessionIDStr == "" {
+		return toolError("session_id is required")
+	}
+
+	parsed, _ := uuid.Parse(sessionIDStr)
+	ctx := auth.WithContext(context.Background(), authCtx)
+	memories, err := s.store.GetSessionMemories(ctx, authCtx.UserID, authCtx.OrgID, parsed)
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	if len(memories) == 0 {
+		return toolResult("No memories found for this session")
+	}
+
+	return formatSessionContext(memories)
+}
+
+func formatSessionSummary(sessionID string, memories []mneme.Mneme) CallToolResult {
 	first := memories[0].CreatedAt
 	last := memories[len(memories)-1].CreatedAt
 	for _, m := range memories {
@@ -902,7 +526,6 @@ func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any
 		}
 	}
 
-	// Group by memory type
 	typeCounts := make(map[string]int)
 	tagSet := make(map[string]bool)
 	for _, m := range memories {
@@ -920,7 +543,6 @@ func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any
 		first.Format("Jan 2 15:04"), last.Format("15:04 MST"), relativeTime(last)))
 	sb.WriteString(fmt.Sprintf("Memories: %d total", len(memories)))
 
-	// Type breakdown
 	var typeParts []string
 	for _, t := range []string{"factual", "experiential", "working"} {
 		if c, ok := typeCounts[t]; ok {
@@ -932,7 +554,6 @@ func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any
 	}
 	sb.WriteString("\n")
 
-	// Tags
 	if len(tagSet) > 0 {
 		var tags []string
 		for t := range tagSet {
@@ -944,41 +565,14 @@ func (s *Server) handleSessionSummary(authCtx *auth.Context, args map[string]any
 
 	sb.WriteString("\nMemories:\n")
 	for _, m := range memories {
-		value := ""
-		if m.Value.Valid {
-			value = truncateText(m.Value.String, 120)
-		}
-		sb.WriteString(fmt.Sprintf("  [%d] [%s] %s\n", m.ID, m.MemoryType, value))
+		sb.WriteString(fmt.Sprintf("  [%s] [%s] %s\n", m.ID, m.MemoryType, truncateText(m.Content, 120)))
 	}
 
 	return toolResult(sb.String())
 }
 
-func (s *Server) handleSessionContext(authCtx *auth.Context, args map[string]any) CallToolResult {
-	sessionID, err := parseSessionIDArg(args)
-	if err != nil {
-		return toolError(err.Error())
-	}
-	if sessionID == "" {
-		return toolError("session_id is required")
-	}
-
-	parsed, _ := uuid.Parse(sessionID)
-	ctx := auth.WithContext(context.Background(), authCtx)
-	memories, err := s.queries.GetSessionMemories(ctx, sqlc.GetSessionMemoriesParams{
-		UserID:    authCtx.UserID,
-		SessionID: pgtype.UUID{Bytes: parsed, Valid: true},
-	})
-	if err != nil {
-		return toolError(fmt.Sprintf("Error: %v", err))
-	}
-
-	if len(memories) == 0 {
-		return toolResult("No memories found for this session")
-	}
-
-	// Group memories by type for structured context loading
-	groups := map[string][]sqlc.CurrentMemoryBlock{
+func formatSessionContext(memories []mneme.Mneme) CallToolResult {
+	groups := map[string][]mneme.Mneme{
 		"factual":      {},
 		"experiential": {},
 		"working":      {},
@@ -990,7 +584,6 @@ func (s *Server) handleSessionContext(authCtx *auth.Context, args map[string]any
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Session context (%d memories):\n", len(memories)))
 
-	// Output in priority order: factual → experiential → working
 	for _, memType := range []string{"factual", "experiential", "working"} {
 		group := groups[memType]
 		if len(group) == 0 {
@@ -998,29 +591,9 @@ func (s *Server) handleSessionContext(authCtx *auth.Context, args map[string]any
 		}
 		sb.WriteString(fmt.Sprintf("\n## %s (%d)\n", strings.ToUpper(memType[:1])+memType[1:], len(group)))
 		for _, m := range group {
-			value := ""
-			if m.Value.Valid {
-				value = m.Value.String
-			}
-			sb.WriteString(fmt.Sprintf("[%d] %s\n", m.ID, value))
+			sb.WriteString(fmt.Sprintf("[%s] %s\n", m.ID, m.Content))
 		}
 	}
 
 	return toolResult(sb.String())
-}
-
-func sanitizeName(s string) string {
-	runes := []rune(s)
-	if len(runes) > 50 {
-		s = string(runes[:50])
-	}
-	var result strings.Builder
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
-			result.WriteRune(c)
-		} else if c == ' ' {
-			result.WriteRune('_')
-		}
-	}
-	return strings.ToLower(result.String())
 }

@@ -16,8 +16,8 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/mcp"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/middleware"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/mneme"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/vector"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -120,34 +120,10 @@ func run() error {
 		slog.String("model", cfg.Embedding.Model),
 	)
 
-	var vectorDB *vector.Client
-	vectorDB, err = vector.NewClient(vector.Config{
-		Host:       cfg.Qdrant.Host,
-		GRPCPort:   cfg.Qdrant.GRPCPort,
-		APIKey:     cfg.Qdrant.APIKey,
-		UseTLS:     cfg.Qdrant.UseTLS,
-		Collection: cfg.Qdrant.Collection,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
-	if err != nil {
-		logger.Warn("failed to connect to Qdrant, vector search disabled",
-			slog.String("error", err.Error()),
-		)
-		vectorDB = nil
-	} else {
-		if err := vectorDB.EnsureCollection(ctx); err != nil {
-			logger.Warn("failed to ensure Qdrant collection",
-				slog.String("error", err.Error()),
-			)
-		} else {
-			logger.Info("connected to Qdrant",
-				slog.String("host", cfg.Qdrant.Host),
-				slog.String("collection", cfg.Qdrant.Collection),
-			)
-		}
-	}
+	// pg_recall store — replaces Qdrant + memory_blocks
+	store := mneme.NewStore(pool, embedder, logger)
 
-	healthHandler := handler.NewHealthHandler(pool, fmt.Sprintf("http://%s:%d", cfg.Qdrant.Host, cfg.Qdrant.HTTPPort))
+	healthHandler := handler.NewHealthHandler(pool)
 	memoryHandler := handler.NewMemoryHandler(queries)
 	journalHandler := handler.NewJournalHandler(queries)
 
@@ -159,13 +135,13 @@ func run() error {
 
 	adminHandler := handler.NewAdminHandler(queries, sessionProvider)
 
-	systemStatsHandler := handler.NewSystemStatsHandler(pool, vectorDB, queries)
+	systemStatsHandler := handler.NewSystemStatsHandler(pool, queries)
 
 	apiKeyProvider := auth.NewAPIKeyProviderWithAdapter(queries)
 	apiAuthProvider := auth.NewCompositeProvider(apiKeyProvider, authProvider)
 
 	// MCP endpoints only accept API key auth (no fallback to default provider)
-	mcpServer := mcp.NewServer(queries, logger, embedder, vectorDB)
+	mcpServer := mcp.NewServer(store, queries, logger)
 	mcpHTTPHandler := mcp.NewStreamableHTTPHandler(mcpServer, apiKeyProvider, logger)
 	mcpStatelessHandler := mcp.NewStatelessHTTPHandler(mcpServer, apiKeyProvider, logger)
 

@@ -240,25 +240,18 @@ func (h *StreamableHTTPHandler) handleGet(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	blocks, err := h.server.queries.GetCurrentMemoryBlocks(auth.WithContext(ctx, session.authCtx), session.authCtx.UserID)
-	if err == nil && len(blocks) > 0 {
-		limit := 20
-		if len(blocks) < limit {
-			limit = len(blocks)
-		}
-
+	mnemes, err := h.server.store.List(auth.WithContext(ctx, session.authCtx), session.authCtx.UserID, session.authCtx.OrgID, "", nil, nil, 20)
+	if err == nil && len(mnemes) > 0 {
 		var contextLines []string
-		for i := 0; i < limit; i++ {
-			if blocks[i].Value.Valid {
-				contextLines = append(contextLines, fmt.Sprintf("- %s", blocks[i].Value.String))
-			}
+		for _, m := range mnemes {
+			contextLines = append(contextLines, fmt.Sprintf("- %s", m.Content))
 		}
 
 		contextData := map[string]any{
 			"type":     "session_context",
 			"message":  "Previously stored memories for this user:",
 			"memories": contextLines,
-			"count":    len(blocks),
+			"count":    len(mnemes),
 		}
 
 		data, _ := json.Marshal(contextData)
