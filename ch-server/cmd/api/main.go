@@ -124,9 +124,6 @@ func run() error {
 	store := mneme.NewStore(pool, embedder, logger)
 
 	healthHandler := handler.NewHealthHandler(pool)
-	memoryHandler := handler.NewMemoryHandler(queries)
-	journalHandler := handler.NewJournalHandler(queries)
-
 	sessionProvider := auth.NewSessionProviderWithAdapter(auth.SessionProviderConfig{
 		Queries:         queries,
 		SessionDuration: 8 * time.Hour,
@@ -135,7 +132,7 @@ func run() error {
 
 	adminHandler := handler.NewAdminHandler(queries, sessionProvider)
 
-	systemStatsHandler := handler.NewSystemStatsHandler(pool, queries)
+	systemStatsHandler := handler.NewSystemStatsHandler(pool)
 
 	apiKeyProvider := auth.NewAPIKeyProviderWithAdapter(queries)
 	apiAuthProvider := auth.NewCompositeProvider(apiKeyProvider, authProvider)
@@ -151,7 +148,7 @@ func run() error {
 	mcpLimiter := middleware.NewRateLimiter(10, 50)
 	defer mcpLimiter.Close()
 
-	router := buildRouter(cfg, logger, apiAuthProvider, sessionProvider, healthHandler, memoryHandler, journalHandler, adminHandler, systemStatsHandler, mcpHTTPHandler, mcpStatelessHandler, loginLimiter, mcpLimiter)
+	router := buildRouter(cfg, logger, apiAuthProvider, sessionProvider, healthHandler, adminHandler, systemStatsHandler, mcpHTTPHandler, mcpStatelessHandler, loginLimiter, mcpLimiter)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
@@ -159,39 +156,6 @@ func run() error {
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
-
-	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	defer cleanupCancel()
-
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour) // Run daily
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-cleanupCtx.Done():
-				return
-			case <-ticker.C:
-				if err := queries.DeleteExpiredMemories(context.Background()); err != nil {
-					logger.Error("failed to delete expired memories",
-						slog.String("error", err.Error()),
-					)
-				} else {
-					logger.Info("expired memories cleanup completed")
-				}
-
-				if err := queries.PruneOldVersions(context.Background(), 10); err != nil {
-					logger.Error("failed to prune old memory versions",
-						slog.String("error", err.Error()),
-					)
-				} else {
-					logger.Info("old memory versions pruned")
-				}
-			}
-		}
-	}()
-
-	logger.Info("background cleanup job started for expired memories")
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -238,8 +202,6 @@ func buildRouter(
 	authProvider auth.Provider,
 	sessionProvider *auth.SessionProvider,
 	healthHandler *handler.HealthHandler,
-	memoryHandler *handler.MemoryHandler,
-	journalHandler *handler.JournalHandler,
 	adminHandler *handler.AdminHandler,
 	systemStatsHandler *handler.SystemStatsHandler,
 	mcpHTTPHandler *mcp.StreamableHTTPHandler,
@@ -270,44 +232,8 @@ func buildRouter(
 		r.Handle("/mcp/stateless", mcpStatelessHandler)
 	})
 
-	// API routes for MCP/programmatic access (API keys, JWT, or default provider)
+	// API routes
 	r.Route("/api/v1", func(r chi.Router) {
-		// Memory and journal routes require API auth (API keys, JWT, or default)
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.AuthMiddleware(authProvider))
-			r.Use(middleware.UserRateLimitMiddleware(mcpLimiter))
-			r.Use(middleware.ContentTypeJSON)
-
-			r.Get("/status", memoryHandler.Status)
-
-			r.Route("/memories", func(r chi.Router) {
-				r.Get("/context", memoryHandler.GetContext)
-				r.Post("/search", memoryHandler.Search)
-
-				r.Route("/blocks", func(r chi.Router) {
-					r.Get("/", memoryHandler.ListBlocks)
-					r.Get("/{name}", memoryHandler.GetBlock)
-					r.Put("/{name}", memoryHandler.CreateOrUpdateBlock)
-					r.Delete("/{name}", memoryHandler.DeleteBlock)
-					r.Get("/{name}/history", memoryHandler.GetBlockHistory)
-				})
-			})
-
-			r.Route("/journal", func(r chi.Router) {
-				r.Get("/entries", journalHandler.ListEntries)
-				r.Post("/entries", journalHandler.CreateEntry)
-				r.Get("/entries/{id}", journalHandler.GetEntry)
-				r.Put("/entries/{id}", journalHandler.UpdateEntry)
-				r.Post("/search", journalHandler.SearchEntries)
-				r.Get("/types/{type}", journalHandler.GetEntriesByType)
-			})
-
-			r.Get("/decisions", journalHandler.GetRecentDecisions)
-			r.Post("/decisions", journalHandler.CreateEntry) // Expects entry_type: decision
-			r.Get("/solutions", journalHandler.GetRecentSolutions)
-			r.Post("/solutions", journalHandler.CreateEntry) // Expects entry_type: solution
-		})
-
 		// User self-service routes (session auth only - for web UI)
 		r.Route("/user", func(r chi.Router) {
 			r.Use(middleware.ContentTypeJSON)

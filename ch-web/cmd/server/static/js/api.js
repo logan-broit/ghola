@@ -560,14 +560,14 @@ const mockData = {
     },
 
     memoryTypeDistribution: [
-        { memory_type: 'core', count: 85 },
-        { memory_type: 'index', count: 157 },
-        { memory_type: 'state', count: 100 },
+        { memory_type: 'factual', count: 85 },
+        { memory_type: 'experiential', count: 157 },
+        { memory_type: 'working', count: 100 },
     ],
 
     memoryScopeDistribution: [
-        { scope: 'global', count: 45 },
-        { scope: 'user', count: 297 },
+        { scope: 'personal', count: 252 },
+        { scope: 'org', count: 90 },
     ],
 
     topTags: [

@@ -244,10 +244,10 @@
             if (sys.memory) {
                 sections.push(`
                     <div class="health-section">
-                        <div class="health-section-title">Content</div>
+                        <div class="health-section-title">Mnemes</div>
                         <div class="health-pairs">
-                            <div class="health-pair"><div class="health-pair-label">Blocks</div><div class="health-pair-value">${sys.memory.total_memory_blocks}</div></div>
-                            <div class="health-pair"><div class="health-pair-label">Unique</div><div class="health-pair-value">${sys.memory.unique_memory_names}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Active</div><div class="health-pair-value">${sys.memory.total_memory_blocks}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Concepts</div><div class="health-pair-value">${sys.memory.unique_memory_names}</div></div>
                             <div class="health-pair"><div class="health-pair-label">Size</div><div class="health-pair-value">${ch.formatBytes(sys.memory.total_content_bytes)}</div></div>
                             <div class="health-pair"><div class="health-pair-label">Users</div><div class="health-pair-value">${sys.memory.users_with_memories}</div></div>
                         </div>
@@ -289,7 +289,7 @@
                     statCard('Users', s.active_users, `${s.admin_users} admins`, 'blue'),
                     statCard('API Keys', s.active_api_keys, null, 'purple'),
                     statCard('Sessions', s.active_sessions, null, 'green'),
-                    statCard('Memories', sys?.memory?.total_memory_blocks ?? '-', sys?.memory ? `${sys.memory.unique_memory_names} unique` : '', 'cyan'),
+                    statCard('Mnemes', sys?.memory?.total_memory_blocks ?? '-', sys?.memory ? `${sys.memory.unique_memory_names} concepts` : '', 'cyan'),
                 ].join('');
 
                 // Donut charts

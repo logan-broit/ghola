@@ -1,26 +1,21 @@
 package handler
 
 import (
+	"context"
 	"net/http"
-
-	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
-	"github.com/thinkwright/chapterhouse/ch-server/pkg/apierror"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // SystemStatsHandler handles system infrastructure statistics.
 type SystemStatsHandler struct {
-	pool    *pgxpool.Pool
-	queries *sqlc.Queries
+	pool *pgxpool.Pool
 }
 
 // NewSystemStatsHandler creates a new system stats handler.
-func NewSystemStatsHandler(pool *pgxpool.Pool, queries *sqlc.Queries) *SystemStatsHandler {
-	return &SystemStatsHandler{
-		pool:    pool,
-		queries: queries,
-	}
+func NewSystemStatsHandler(pool *pgxpool.Pool) *SystemStatsHandler {
+	return &SystemStatsHandler{pool: pool}
 }
 
 // PostgresStats holds PostgreSQL connection pool statistics.
@@ -34,7 +29,7 @@ type PostgresStats struct {
 	CanceledAcquireCount int64 `json:"canceled_acquire_count"`
 }
 
-// MemoryStats holds memory block statistics.
+// MemoryStats holds mneme statistics from pg_recall.
 type MemoryStats struct {
 	UsersWithMemories int64 `json:"users_with_memories"`
 	TotalMemoryBlocks int64 `json:"total_memory_blocks"`
@@ -81,17 +76,10 @@ func (h *SystemStatsHandler) GetSystemStats(w http.ResponseWriter, r *http.Reque
 			EmptyAcquireCount:    poolStats.EmptyAcquireCount(),
 			CanceledAcquireCount: poolStats.CanceledAcquireCount(),
 		}
-	}
 
-	if h.queries != nil {
-		memStats, err := h.queries.GetMemoryStats(r.Context())
+		stats, err := queryMemoryStats(r.Context(), h.pool)
 		if err == nil {
-			resp.Memory = &MemoryStats{
-				UsersWithMemories: memStats.UsersWithMemories,
-				TotalMemoryBlocks: memStats.TotalMemoryBlocks,
-				TotalContentBytes: memStats.TotalContentBytes,
-				UniqueMemoryNames: memStats.UniqueMemoryNames,
-			}
+			resp.Memory = stats
 		}
 	}
 
@@ -100,23 +88,28 @@ func (h *SystemStatsHandler) GetSystemStats(w http.ResponseWriter, r *http.Reque
 
 // GetMemoryTypeDistribution handles GET /api/v1/admin/memory-type-distribution
 func (h *SystemStatsHandler) GetMemoryTypeDistribution(w http.ResponseWriter, r *http.Request) {
-	if h.queries == nil {
-		Error(w, apierror.InternalError("Database queries not available"))
-		return
-	}
-
-	rows, err := h.queries.GetMemoryTypeDistribution(r.Context())
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT memory_type, COUNT(*)::bigint AS count
+		FROM pg_recall.mnemes
+		WHERE state = 'active'
+		  AND memory_type IS NOT NULL
+		GROUP BY memory_type
+		ORDER BY count DESC
+	`)
 	if err != nil {
-		Error(w, apierror.InternalError("Failed to get memory type distribution").WithError(err))
+		Error(w, err)
 		return
 	}
+	defer rows.Close()
 
-	result := make([]MemoryTypeDistribution, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, MemoryTypeDistribution{
-			MemoryType: string(row.MemoryType),
-			Count:      row.Count,
-		})
+	result := make([]MemoryTypeDistribution, 0)
+	for rows.Next() {
+		var d MemoryTypeDistribution
+		if err := rows.Scan(&d.MemoryType, &d.Count); err != nil {
+			Error(w, err)
+			return
+		}
+		result = append(result, d)
 	}
 
 	OK(w, result)
@@ -124,30 +117,40 @@ func (h *SystemStatsHandler) GetMemoryTypeDistribution(w http.ResponseWriter, r 
 
 // GetTopTags handles GET /api/v1/admin/top-tags
 func (h *SystemStatsHandler) GetTopTags(w http.ResponseWriter, r *http.Request) {
-	if h.queries == nil {
-		Error(w, apierror.InternalError("Database queries not available"))
-		return
-	}
-
-	// Default to top 20 tags
-	limit := int32(20)
-
-	rows, err := h.queries.GetTopTags(r.Context(), limit)
-	if err != nil {
-		Error(w, apierror.InternalError("Failed to get top tags").WithError(err))
-		return
-	}
-
-	result := make([]TopTag, 0, len(rows))
-	for _, row := range rows {
-		tag := ""
-		if s, ok := row.Tag.(string); ok {
-			tag = s
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
 		}
-		result = append(result, TopTag{
-			Tag:   tag,
-			Count: row.Count,
-		})
+	}
+
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT tag, COUNT(*)::bigint AS count
+		FROM (
+			SELECT unnest(tags) AS tag
+			FROM pg_recall.mnemes
+			WHERE state = 'active'
+			  AND array_length(tags, 1) > 0
+		) AS tags_extracted
+		WHERE tag != ''
+		GROUP BY tag
+		ORDER BY count DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		Error(w, err)
+		return
+	}
+	defer rows.Close()
+
+	result := make([]TopTag, 0)
+	for rows.Next() {
+		var t TopTag
+		if err := rows.Scan(&t.Tag, &t.Count); err != nil {
+			Error(w, err)
+			return
+		}
+		result = append(result, t)
 	}
 
 	OK(w, result)
@@ -155,24 +158,51 @@ func (h *SystemStatsHandler) GetTopTags(w http.ResponseWriter, r *http.Request) 
 
 // GetMemoryScopeDistribution handles GET /api/v1/admin/memory-scope-distribution
 func (h *SystemStatsHandler) GetMemoryScopeDistribution(w http.ResponseWriter, r *http.Request) {
-	if h.queries == nil {
-		Error(w, apierror.InternalError("Database queries not available"))
-		return
-	}
-
-	rows, err := h.queries.GetMemoryScopeDistribution(r.Context())
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT scope, COUNT(*)::bigint AS count
+		FROM pg_recall.mnemes
+		WHERE state = 'active'
+		  AND scope IS NOT NULL
+		GROUP BY scope
+		ORDER BY count DESC
+	`)
 	if err != nil {
-		Error(w, apierror.InternalError("Failed to get memory scope distribution").WithError(err))
+		Error(w, err)
 		return
 	}
+	defer rows.Close()
 
-	result := make([]MemoryScopeDistribution, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, MemoryScopeDistribution{
-			Scope: string(row.Scope),
-			Count: row.Count,
-		})
+	result := make([]MemoryScopeDistribution, 0)
+	for rows.Next() {
+		var d MemoryScopeDistribution
+		if err := rows.Scan(&d.Scope, &d.Count); err != nil {
+			Error(w, err)
+			return
+		}
+		result = append(result, d)
 	}
 
 	OK(w, result)
+}
+
+func queryMemoryStats(ctx context.Context, pool *pgxpool.Pool) (*MemoryStats, error) {
+	var stats MemoryStats
+	err := pool.QueryRow(ctx, `
+		SELECT
+			COUNT(DISTINCT workspace_id)::bigint AS users_with_memories,
+			COUNT(*)::bigint AS total_memory_blocks,
+			COALESCE(SUM(LENGTH(content)), 0)::bigint AS total_content_bytes,
+			COUNT(DISTINCT concept)::bigint AS unique_memory_names
+		FROM pg_recall.mnemes
+		WHERE state = 'active'
+	`).Scan(
+		&stats.UsersWithMemories,
+		&stats.TotalMemoryBlocks,
+		&stats.TotalContentBytes,
+		&stats.UniqueMemoryNames,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &stats, nil
 }
