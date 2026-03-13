@@ -1,0 +1,583 @@
+# Evidence Accumulation for pg_recall
+#
+# Inspired by the Thousand Brains Theory (arxiv 2507.04494): each Learning
+# Module maintains per-hypothesis evidence scores that accumulate additively
+# over time. In TBP, pose-based signals range [-1, 1] and feature-based
+# signals range [0, 1]; pg_recall instead uses log-odds scale signals
+# (any real value, clamped to [-3.66, 3.66] at accumulation). The update
+# rule in Monty is: e_new = e_old * past_weight + e_step * present_weight
+# (for comparison; pg_recall uses additive log-odds instead). Convergence
+# occurs when one hypothesis exceeds all others by x_percent_threshold.
+#
+# Currently, pg_recall tracks a single scalar confidence per memory via
+# Bayesian updating: posterior = f(prior, evidence). This is theoretically
+# stronger than Monty's heuristic scoring (Bogacz 2006 proved DDM/SPRT is
+# optimal), but it has a critical limitation: confidence is context-free.
+# A memory about "K8s pod scheduling" has the same confidence whether you're
+# debugging a crashloop or reviewing cluster architecture. In reality,
+# memories should be more or less trustworthy depending on the retrieval
+# context.
+#
+# This spec introduces per-context evidence accumulation: memories track
+# evidence across multiple contexts, and retrieval uses context-appropriate
+# evidence rather than a single global confidence score.
+#
+# Academic foundations:
+#   - Drift-Diffusion Model / SPRT (Ratcliff 1978, Wald 1947): optimal
+#     sequential evidence accumulation. dx = v*dt + s*dW. Bogacz 2006 proved
+#     DDM is the continuous-time limit of SPRT and implements Bayesian log-odds
+#     updating. We use log-odds form for numerical stability and optimality.
+#   - Temporal Context Model (Howard & Kahana 2002): context vector drifts via
+#     t_i = rho * t_{i-1} + beta * t^IN_i. Retrieved items reinstate their
+#     encoding context, producing contiguity effects. We use this to model
+#     context as a drifting vector that links encoding and retrieval.
+#   - Encoding Specificity (Tulving & Thomson 1973): retrieval success depends
+#     on overlap between encoding context and retrieval context. A memory
+#     encoded during debugging is better retrieved in a debugging context.
+#   - SAM (Raaijmakers & Shiffrin 1981): retrieval probability proportional
+#     to combined associative strength across all active cues. Context is
+#     one of the cues competing for retrieval.
+#   - MINERVA 2 (Hintzman 1988): echo intensity (sum of cubed similarities)
+#     measures overall familiarity. We adapt this for context-weighted
+#     evidence aggregation.
+
+---
+
+CONSTRAINT: backwards_compatible
+  The existing confidence field on mnemes remains and continues to function
+  as the global Bayesian confidence. Per-context evidence is additive --
+  a new table tracks evidence by (mneme_id, context_id) pairs. The existing
+  bayesian_update() function is not modified. recall() continues to use
+  global confidence. The new recall_voted() can optionally use per-context
+  evidence when a context_id is provided.
+
+CONSTRAINT: context_is_embedding
+  A context is represented as an embedding vector of the same dimensionality
+  as mneme embeddings. This allows context similarity to be computed via
+  cosine similarity. Contexts are not categorical labels -- they are points
+  in a continuous space. Two contexts can be partially similar (e.g.,
+  "debugging K8s" and "debugging Docker" share a debugging dimension).
+
+CONSTRAINT: log_odds_form
+  Per-context evidence is stored in log-odds form for numerical stability
+  and theoretical optimality (Bogacz 2006). Log-odds = ln(p / (1-p)).
+  Evidence increments are additive in log-odds space, which corresponds
+  to multiplicative Bayesian updating in probability space. This avoids
+  the floating-point issues of multiplying many small probabilities.
+
+CONSTRAINT: schema_migration
+  New tables (contexts, context_evidence) are additive -- no existing
+  tables are modified. CREATE TABLE IF NOT EXISTS is sufficient for
+  fresh installations. For upgrades, the extension's CREATE OR REPLACE
+  EXTENSION mechanism (managed by pgrx) handles schema versioning.
+  No data migration is needed -- new tables start empty and populate
+  through normal usage.
+
+CONSTRAINT: file_ownership
+  New code lives in src/evidence.rs. Schema additions for the evidence
+  table go in src/schema.rs. Context tracking utilities are in
+  src/context.rs. The recall module is extended to accept optional
+  context_id for context-aware scoring.
+
+---
+
+DATA: contexts
+  context_id:   uuid, primary key
+  workspace_id: uuid
+  embedding:    vector(768), the context's location in embedding space.
+                  Dimension must match configured embedding_dims. When
+                  configure_dimensions() is called (see reference-frame-projections
+                  spec, CONSTRAINT: dimension_consistency), this column is altered
+                  to match the new dimension.
+  label:        text, optional human-readable label (e.g., "debugging", "architecture-review")
+  created_at:   timestamptz
+  last_active:  timestamptz, updated on each use
+  parent_id:    uuid, optional, FK to contexts(context_id), for hierarchical
+                  contexts (e.g., "K8s" -> "K8s debugging"). Same-workspace
+                  constraint enforced by register_context() at write time:
+                  parent must exist and share the same workspace_id as the
+                  new context. A FK alone cannot enforce same-workspace because
+                  workspace_id is not part of the PK.
+  access_count: int, default 0
+  NOT NULL: context_id, workspace_id, embedding, created_at, last_active, access_count
+  NULLABLE: label, parent_id
+
+  INDEXES:
+    - HNSW on (embedding) using cosine distance:
+        CREATE INDEX contexts_embedding_hnsw_idx ON contexts
+          USING hnsw (embedding vector_cosine_ops)
+          WITH (m = 16, ef_construction = 64);
+      Required by register_context() for context deduplication: finding
+      existing contexts with cosine_similarity >= 0.95 to the provided
+      embedding. Without this index, deduplication degrades to sequential
+      scan — O(n) per registration call.
+      NOTE: pgvector HNSW does not support composite keys. Workspace
+      filtering is applied as a WHERE clause after the index scan,
+      consistent with the existing mnemes table pattern in recall.rs.
+      Expected context cardinality: tens to low hundreds per workspace.
+      HNSW parameters (m=16, ef_construction=64) are appropriate for this
+      scale. Write amplification from HNSW maintenance is negligible at
+      these volumes.
+    - B-tree on (workspace_id) for filtering contexts by workspace.
+
+  NOTE: workspace_id is an opaque caller-provided value with no FK to any
+    workspaces table. There is no automatic cascade when a workspace is
+    deleted. Callers must explicitly run:
+      DELETE FROM contexts WHERE workspace_id = $1;
+    before workspace cleanup. context_evidence rows will cascade from the
+    contexts delete (FK ON DELETE CASCADE), so the required sequence is:
+      1. DELETE FROM contexts WHERE workspace_id = $1  (cascades to context_evidence)
+      2. DELETE FROM mnemes WHERE workspace_id = $1    (cascades to any mneme-linked rows)
+      3. Proceed with workspace removal
+
+DATA: context_evidence
+  mneme_id:     uuid, FK to mnemes ON DELETE CASCADE
+  context_id:   uuid, FK to contexts ON DELETE CASCADE (cascades when
+                  the parent context row is explicitly deleted; see NOTE
+                  in contexts DATA section for required cleanup sequence)
+  log_odds:     float8 DEFAULT 0.0, accumulated evidence in log-odds form
+                  0.0 = neutral (p=0.5), positive = confident, negative = doubtful
+                  ln(0.975/0.025) ~= 3.66 is the practical ceiling (matching Bayesian bounds)
+                  ln(0.025/0.975) ~= -3.66 is the practical floor
+                  CHECK (log_odds >= -3.66 AND log_odds <= 3.66)
+  observations: int DEFAULT 0, how many times this memory was observed in this context
+  last_observed: timestamptz
+  PRIMARY KEY (mneme_id, context_id)
+  NOT NULL: mneme_id, context_id, log_odds, observations, last_observed
+
+  INDEXES:
+    - PK (mneme_id, context_id) covers get_context_evidence lookups by mneme_id
+      and accumulate_evidence upserts.
+    - B-tree on (context_id, last_observed) for decay_context_evidence(),
+      which scans all evidence rows in a workspace and needs to read
+      last_observed for each. The context_id prefix enables per-context
+      batch processing if decay is ever partitioned.
+
+DATA: evidence_result
+  mneme_id:         uuid
+  context_evidence: float8, evidence for this memory in the query context [0, 1]
+  global_confidence: float8, existing Bayesian confidence
+  blended:          float8, weighted combination of context evidence and global confidence
+  context_sim:      float8, cosine similarity between query context and evidence context
+  observations:     int, how many observations in this context
+  concept:          text, from mnemes table (joined on mneme_id)
+  content:          text, from mnemes table (joined on mneme_id)
+  NOTE: evidence_result is a composite return type (CREATE TYPE), not a
+  persisted table. Implemented via extension_sql! in src/types.rs, following
+  the same pattern as recall_result.
+
+---
+
+FUNCTION: register_context(workspace_id uuid, embedding vector,
+    label text DEFAULT NULL, parent_id uuid DEFAULT NULL) -> uuid
+
+  Create or retrieve a context. If a context with cosine similarity >= 0.95
+  to the provided embedding already exists in the workspace, return its ID
+  (context deduplication). Otherwise create a new context.
+
+  RULES:
+    - Search existing contexts in workspace via HNSW for nearest neighbor
+    - If cosine_similarity(existing, provided) >= 0.95, return existing context_id
+      and update last_active = now(), access_count = access_count + 1
+      The 0.95 threshold is strict by design — it merges near-identical contexts
+      while allowing conceptually similar but distinct contexts (e.g., "debugging
+      K8s" vs "troubleshooting K8s") to remain separate. At 0.85-0.92, many
+      paraphrases would merge prematurely, fragmenting evidence across fewer
+      contexts than intended. The threshold is not configurable in v1; if
+      empirical data shows it is too strict, consider a per-workspace setting.
+    - Otherwise insert new context with provided embedding, label, parent_id
+    - Return the context_id (existing or new)
+    - parent_id, if provided, must reference an existing context in same workspace
+    - Context embeddings are immutable after creation. If a context drifts
+      over time, the drift is modeled by creating new contexts (the 0.95
+      deduplication threshold allows gradual evolution — a context embedding
+      that drifts beyond 0.95 similarity creates a new context automatically).
+      There is no update_context_embedding function by design.
+    - Concurrency: deduplication is best-effort via HNSW approximate search.
+      Two concurrent calls with near-identical embeddings may both miss each
+      other's insert and create duplicates. This is acceptable because:
+      (a) accumulate_evidence handles evidence split across near-duplicate
+      contexts via the blended evidence formula (get_blended_evidence aggregates
+      across similar contexts), and (b) duplicate contexts eventually merge
+      in practice because subsequent calls find the first-inserted context
+      via HNSW. For workspaces requiring strict deduplication, callers should
+      serialize register_context calls externally.
+    - To prevent evidence fragmentation from near-duplicates, callers should
+      prefer a find-then-insert pattern (HNSW lookup before INSERT). A periodic
+      background merge of contexts with cosine_similarity > 0.95 is recommended
+      for workspaces with high concurrent registration activity.
+
+  DONE_WHEN:
+    - Repeated calls with similar embeddings return the same context_id
+    - Distinct contexts get distinct IDs
+    - parent_id linkage preserved for hierarchical contexts
+
+  EXAMPLES:
+    first call with embedding for "debugging K8s"
+      -> creates new context, returns uuid
+
+    second call with very similar embedding (cosine >= 0.95)
+      -> returns same uuid, last_active updated
+
+    call with embedding for "architecture review" (cosine < 0.95 to "debugging")
+      -> creates new context, different uuid
+
+    call with parent_id pointing to "K8s" context
+      -> creates child context "K8s debugging" linked to parent
+
+  ERRORS:
+    - workspace_id NULL -> fail with descriptive message
+    - parent_id not found -> fail with descriptive message
+    - embedding wrong dimensions -> fail with descriptive message
+
+---
+
+FUNCTION: accumulate_evidence(mneme_id uuid, context_id uuid,
+    signal float8) -> float8
+
+  Add an evidence increment to a memory in a specific context.
+  Returns the new probability (converted from log-odds).
+
+  This implements the SPRT/DDM evidence accumulation step in log-odds form.
+  Each observation adds a log-likelihood increment. Positive signal means
+  the memory is relevant in this context; negative means it is not.
+
+  RULES:
+    - Workspace isolation: verify that mnemes.workspace_id for mneme_id
+      matches contexts.workspace_id for context_id. Fail if they differ.
+      This prevents cross-workspace evidence leakage -- a caller cannot
+      accidentally (or intentionally) accumulate evidence linking a mneme
+      in workspace A to a context in workspace B.
+    - Convert signal to log-odds increment: delta = signal
+      (signal is already in log-odds scale; log_odds is clamped to
+       [-3.66, 3.66] on both INSERT and UPDATE paths)
+    - Upsert context_evidence row using atomic Postgres UPSERT:
+        INSERT INTO context_evidence (mneme_id, context_id, log_odds, observations, last_observed)
+        VALUES ($mneme_id, $context_id, LEAST(3.66, GREATEST(-3.66, $delta)), 1, now())
+        ON CONFLICT (mneme_id, context_id) DO UPDATE SET
+          log_odds = LEAST(3.66, GREATEST(-3.66, context_evidence.log_odds + $delta)),
+          observations = context_evidence.observations + 1,
+          last_observed = now()
+      The use of context_evidence.log_odds (table reference, not EXCLUDED) in
+      the DO UPDATE ensures atomicity: Postgres applies the addition on the
+      current row value within the UPSERT lock, preventing read-then-write races
+      from concurrent callers.
+    - Clamp log_odds to [-3.66, 3.66] (corresponding to probability [0.025, 0.975],
+      matching Bayesian confidence bounds from bayesian_update())
+    - Return probability: p = 1 / (1 + exp(-log_odds))
+    - Immutable math, mutable state (updates the evidence row)
+
+  DONE_WHEN:
+    - Evidence accumulates additively in log-odds space
+    - Bounds prevent certainty (same [0.025, 0.975] range as bayesian_update)
+    - Multiple small signals compound: 10 observations of +0.3 each
+      -> log_odds = 3.0 -> p ~= 0.95
+    - Negative signals reduce evidence: observation of -1.0 after +3.0
+      -> log_odds = 2.0 -> p ~= 0.88
+
+  EXAMPLES:
+    first observation, signal = +0.5
+      -> log_odds = 0.5, p ~= 0.62, observations = 1
+
+    second observation, signal = +0.5
+      -> log_odds = 1.0, p ~= 0.73, observations = 2
+
+    10 observations of +0.3 each
+      -> log_odds = 3.0, p ~= 0.95, near ceiling
+
+    observation of -2.0 (strong negative)
+      -> log_odds clamped at floor if result < -3.66
+
+    signal = 0.0 (neutral observation)
+      -> log_odds unchanged, observations incremented
+
+  ERRORS:
+    - mneme_id not found -> fail with descriptive message
+    - context_id not found -> fail with descriptive message
+    - mneme and context belong to different workspaces -> fail with descriptive message
+    - signal is NaN or +/-Infinity -> fail with 'signal must be a finite number'
+
+---
+
+FUNCTION: observe_recall_in_context(mneme_ids uuid[], scores float8[],
+    context_id uuid) -> void
+
+  Batch evidence accumulation after a recall in a specific context.
+  For each returned memory, accumulate positive evidence proportional
+  to its recall score. This is the bridge between recall() and the
+  evidence system -- every retrieval is an observation.
+
+  RULES:
+    - For each (mneme_id, score) pair:
+        signal = ln(score / (1 - score)) * 0.5
+        (convert recall score [0,1] to log-odds, scaled by 0.5 to prevent
+         single observations from dominating)
+    - Call accumulate_evidence(mneme_id, context_id, signal) for each
+    - Validate: if any score is < 0 or > 1, fail with 'scores must be in
+      [0, 1] range'. After validation, scores at extremes (< 0.01 or > 0.99)
+      are clamped to [0.01, 0.99] before log-odds conversion to avoid infinity.
+    - If context_id is NULL, skip (no context tracking for this recall)
+
+  NOTE: Self-reinforcing feedback loop and asymmetry with projection
+    training. observe_recall_in_context runs unconditionally after every
+    retrieval -- evidence accumulates without user confirmation. By
+    contrast, projection training (record_projection_training in the
+    reference-frame-projections spec) only uses confirmed events. This
+    asymmetry is intentional: evidence accumulation is bounded (log-odds
+    clamped to [-3.66, 3.66]) and decayed (decay_context_evidence pulls
+    toward neutral), so unconditional accumulation converges to a stable
+    signal that reflects actual retrieval patterns. Projection training
+    modifies the embedding transform itself, which has unbounded downstream
+    effects on all future retrievals -- requiring confirmation prevents
+    the system from learning to reinforce its own output.
+    Recall scores feed back into evidence, which feeds back into
+    context_aware_score, which affects future recall scores. The 0.5
+    scaling factor attenuates each step, and the log-odds clamp at
+    [-3.66, 3.66] bounds the accumulation. Together these prevent
+    runaway amplification. Convergence speed
+    depends on recall scores:
+      - Typical case (score ~0.9): signal = ln(9)*0.5 ~= 1.10 per obs,
+        ceiling reached in ~4 observations (4 * 1.10 = 4.40, clamped)
+      - Worst case (score clamped to 0.99): signal = ln(99)*0.5 ~= 2.30,
+        ceiling reached in 2 observations (2 * 2.30 = 4.60, clamped)
+      - Moderate case (score ~0.75): signal = ln(3)*0.5 ~= 0.55,
+        ceiling reached in ~7 observations (7 * 0.55 = 3.85, clamped)
+    The feedback loop is bounded by the clamp regardless of convergence
+    speed. The decay function (decay_context_evidence) further counteracts
+    accumulation by pulling evidence toward neutral over time. This
+    bounded, decaying feedback is acceptable because it reflects genuine
+    usage patterns -- memories that are consistently recalled in a context
+    genuinely are relevant to that context.
+    NOTE: This convergence analysis assumes no intervening decay between
+    observations. In practice, concurrent decay pulls evidence toward zero.
+    Steady-state log_odds = signal_rate * avg_signal / decay_rate when
+    observations and decay are balanced.
+
+  NOTE: Absence-as-evidence is intentionally not modeled. If a memory exists
+    in a context but is not retrieved, that non-retrieval is not recorded as
+    negative evidence. This creates a positive-only accumulation bias: evidence
+    can only grow from retrieval, and only shrinks from time decay. Rationale:
+    non-retrieval is ambiguous — it may mean the memory is irrelevant, or that
+    the query simply didn't match. Treating absence as evidence would require
+    knowing the full set of "expected" retrievals per context, which is not
+    available. The decay function (decay_context_evidence) compensates by
+    pulling unreinforced evidence toward neutral over time.
+
+  DONE_WHEN:
+    - Each recall in a context contributes evidence to the retrieved memories
+    - Higher-scoring recalls (> 0.5) contribute positive evidence
+    - Score = 0.5 is the neutral point (signal = 0, no evidence either way)
+    - Low-scoring recalls (< 0.5) contribute negative evidence, reflecting
+      that the memory was retrieved but scored poorly in this context
+    - The 0.5 scaling factor prevents single observations from dominating
+    - Evidence accumulates across many recalls in the same context
+
+  EXAMPLES:
+    recall returns mneme A with score 0.9 in context "debugging"
+      -> signal = ln(0.9/0.1) * 0.5 = ln(9) * 0.5 ~= 1.10
+      -> strong positive evidence for A in debugging context
+
+    recall returns mneme B with score 0.5 in context "debugging"
+      -> signal = ln(0.5/0.5) * 0.5 = 0.0
+      -> neutral, borderline recall contributes nothing
+
+    recall returns mneme C with score 0.2 in context "architecture"
+      -> signal = ln(0.2/0.8) * 0.5 = ln(0.25) * 0.5 ~= -0.69
+      -> negative evidence: C was recalled but scored poorly
+
+  ERRORS:
+    - mneme_ids and scores arrays different lengths -> fail
+    - context_id not found -> fail with descriptive message
+    - Workspace mismatch for individual mneme_ids: accumulate_evidence fails
+      for that pair. Behavior: skip the failing pair, log a warning, continue
+      processing remaining pairs. The batch is not atomic — partial success
+      is acceptable because evidence accumulation is additive and bounded
+      (the [-3.66, 3.66] clamp prevents unbounded growth). Note: retries of
+      accumulate_evidence cause double-counting. Callers requiring exactly-once
+      semantics should use observation deduplication (e.g., include a unique
+      observation_id and skip if already recorded).
+
+---
+
+FUNCTION: get_context_evidence(mneme_id uuid, query_context_id uuid,
+    max_contexts int DEFAULT 5, min_similarity float8 DEFAULT 0.3)
+    -> SETOF evidence_result
+
+  Retrieve per-context evidence rows for a memory, centered on a query context.
+  Returns evidence from the query context and nearby contexts, weighted
+  by context similarity (encoding specificity principle).
+
+FUNCTION: get_blended_evidence(mneme_id uuid, query_context_id uuid,
+    max_contexts int DEFAULT 5, min_similarity float8 DEFAULT 0.3)
+    -> float8
+
+  Compute and return the single blended evidence scalar for a memory in a
+  query context. This is the function that context_aware_score calls for
+  performance (avoids materializing the full SETOF result).
+
+  RULES (shared by both functions):
+    - Fetch the query context's embedding
+    - Find all context_evidence rows for this mneme.
+      Cross-workspace isolation: enforced at write time by accumulate_evidence(),
+      which validates that mneme and context belong to the same workspace before
+      creating evidence rows. This means evidence rows for a mneme only reference
+      contexts from that mneme's workspace by construction. No additional
+      workspace_id filter is needed at read time.
+    - For each evidence row, compute context_sim = cosine_similarity(
+        query_context.embedding, evidence_context.embedding)
+    - Filter by min_similarity
+    - Convert log_odds to probability: context_evidence = 1 / (1 + exp(-log_odds))
+    - Compute blended evidence across nearby contexts:
+        blended = sum(context_evidence_i * context_sim_i^2) / sum(context_sim_i^2)
+      Similarity is squared to weight nearby contexts strongly (same principle
+      as breadth^2 in voting -- nearby contexts dominate, distant ones fade)
+    - Include global_confidence from the mneme's Bayesian confidence field
+    - get_context_evidence returns top max_contexts evidence rows ordered by
+      context_sim descending. Each row represents a real context's evidence.
+    - get_blended_evidence returns only the blended scalar (float).
+    - If no contexts pass min_similarity filter, get_blended_evidence returns
+      NULL (caller should fall back to global_confidence); get_context_evidence
+      returns an empty set.
+
+  DONE_WHEN:
+    - Evidence from matching contexts contributes most
+    - Evidence from similar contexts contributes proportionally
+    - Evidence from dissimilar contexts is excluded (min_similarity filter)
+    - Blended score provides a single usable value for scoring
+
+  EXAMPLES:
+    mneme has evidence in "debugging K8s" (log_odds=2.0) and "debugging Docker"
+    (log_odds=1.5), query context is "debugging K8s"
+      context_sim to self = 1.0, context_sim to Docker debugging = 0.7
+      -> blended ~= (0.88 * 1.0 + 0.82 * 0.49) / (1.0 + 0.49) ~= 0.86
+
+    mneme has evidence only in "architecture review", query is "debugging"
+      context_sim = 0.2 (below min_similarity=0.3)
+      -> no matching contexts, returns empty (fall back to global confidence)
+
+    mneme has no context_evidence rows at all
+      -> returns empty, caller should use global_confidence
+
+  ERRORS:
+    - mneme_id not found -> fail with descriptive message
+    - query_context_id not found -> fail with descriptive message
+
+---
+
+FUNCTION: decay_context_evidence(workspace_id uuid,
+    half_life_days float8 DEFAULT 30.0) -> int
+
+  Apply time-based decay to context evidence. Evidence that hasn't been
+  refreshed by recent observations should fade, reflecting the Ebbinghaus
+  forgetting curve at the context level.
+
+  RULES:
+    - Workspace scoping: context_evidence has no workspace_id column.
+      Join through contexts table: context_evidence JOIN contexts
+      ON context_evidence.context_id = contexts.context_id
+      WHERE contexts.workspace_id = workspace_id.
+      The B-tree index on contexts(workspace_id) supports this join.
+    - For each context_evidence row in workspace (via join above):
+        days_since = (now() - last_observed) in fractional days
+        decay_factor = exp(-0.693 * days_since / half_life_days)
+        (0.693 = ln(2), the standard half-life decay constant)
+        new_log_odds = log_odds * decay_factor
+    - After applying decay, update last_observed = now(). This resets
+      days_since for the next decay run, preventing double-decay: without
+      this update, each daily run re-applies the full elapsed-time factor
+      to an already-decayed value, destroying the half-life property.
+    - Skip writes where abs(log_odds - new_log_odds) < 0.001
+      (avoids unnecessary updates on recently-observed evidence where
+      the decay is negligible, e.g. 2 hours old -> decay_factor ~= 0.998)
+    - Decay pulls log_odds toward 0 (neutral), not toward negative
+    - Delete context_evidence rows where abs(log_odds) < 0.01
+      (effectively neutral, no information)
+    - Return count of rows modified (updated rows where decay was applied +
+      deleted rows where decayed value fell below threshold). Rows where the
+      write was skipped due to negligible change are not counted.
+    - Intended to be called by the background worker on a schedule
+      (e.g., daily)
+
+  DONE_WHEN:
+    - Stale context evidence fades toward neutral over time
+    - Decay is continuous -- no step function at any time boundary
+    - Recently-observed evidence decays negligibly (skipped for efficiency)
+    - Effectively neutral rows are cleaned up
+    - half_life_days = 30 means evidence halves monthly without reinforcement
+
+  EXAMPLES:
+    evidence with log_odds=2.0, last_observed 30 days ago, half_life=30
+      -> decay_factor = exp(-0.693) ~= 0.5
+      -> new_log_odds = 1.0 (halved)
+
+    evidence with log_odds=0.05, last_observed 90 days ago
+      -> decay_factor = exp(-0.693 * 90/30) = 0.125
+      -> new_log_odds = 0.05 * 0.125 = 0.00625, below 0.01 threshold, row deleted
+
+    evidence with log_odds=0.1, last_observed 2 hours ago
+      -> decay_factor ~= 0.998, change = 0.1 * 0.002 ~= 0.0002, below 0.001 threshold, write skipped
+
+  ERRORS:
+    - workspace_id NULL -> fail with descriptive message
+    - half_life_days <= 0 -> fail with 'half_life_days must be positive'
+
+---
+
+FUNCTION: context_aware_score(mneme_id uuid, context_id uuid,
+    global_confidence float8, context_weight float8 DEFAULT 0.6)
+    -> float8
+
+  Compute a blended score combining global Bayesian confidence with
+  per-context evidence. This is the scoring primitive that recall_voted()
+  uses when a context_id is provided.
+
+  RULES:
+    - Validate context_weight is in [0, 1] at function entry, before any
+      other logic. Fail with descriptive message if outside range. This
+      prevents invalid weights from passing silently when no context
+      evidence exists.
+    - Verify context_id exists. If not, return global_confidence immediately
+      (graceful degradation -- do not propagate to get_context_evidence which
+      would fail on missing context_id. context_aware_score is called in the
+      recall_voted() scoring hot path where a missing context must not crash
+      the entire retrieval.)
+    - Fetch blended context evidence for this mneme in this context
+      (via get_blended_evidence, inlined for performance)
+    - If context evidence exists:
+        score = context_weight * context_evidence + (1 - context_weight) * global_confidence
+    - If no context evidence (new memory or unseen context):
+        score = global_confidence (fall back to global)
+    - Result clamped to [0.025, 0.975] matching Bayesian bounds
+    - STABLE and parallel-safe (reads evidence rows but does not modify state).
+      Do NOT mark as IMMUTABLE in pgrx — the function reads mutable tables and
+      may return different results across calls within a transaction.
+
+  DONE_WHEN:
+    - Memories with strong context evidence score higher in matching contexts
+    - Memories with no context evidence fall back to global confidence
+    - context_weight controls the balance (0.6 default = context dominates)
+
+  EXAMPLES:
+    context_evidence = 0.95, global_confidence = 0.5, weight = 0.6
+      -> score = 0.6 * 0.95 + 0.4 * 0.5 = 0.77
+      -> context evidence lifts a mediocre global confidence
+
+    context_evidence = 0.2, global_confidence = 0.9, weight = 0.6
+      -> score = 0.6 * 0.2 + 0.4 * 0.9 = 0.48
+      -> context evidence pulls down a strong global confidence
+      -> this memory is globally trusted but not relevant HERE
+
+    no context evidence, global_confidence = 0.8
+      -> score = 0.8 (pure fallback)
+
+  ERRORS:
+    - mneme_id not found -> fail with descriptive message
+    - context_id not found -> return global_confidence (graceful degradation)
+    - context_weight outside [0, 1] -> fail with descriptive message
+    - Workspace isolation is enforced at write time by accumulate_evidence(),
+      not at read time. context_aware_score does not re-validate workspace
+      consistency because evidence rows can only exist for same-workspace
+      (mneme_id, context_id) pairs by construction.
+
+---
+Generated with Claude Code
