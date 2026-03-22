@@ -162,8 +162,17 @@ func (h *StreamableHTTPHandler) handlePost(w http.ResponseWriter, r *http.Reques
 	h.mu.RUnlock()
 
 	if !exists {
-		http.Error(w, "Session not found", http.StatusNotFound)
-		return
+		// Session expired or lost (pod restart, TTL). Auto-recover by
+		// creating a new session from the request's auth credentials.
+		session, sessionID, err = h.recoverSession(w, r)
+		if err != nil {
+			return // recoverSession already wrote the error response
+		}
+		w.Header().Set("Mcp-Session-Id", sessionID)
+		h.logger.Info("HTTP session auto-recovered",
+			slog.String("session_prefix", sessionID[:8]),
+			slog.String("user", session.authCtx.UserID.String()),
+		)
 	}
 
 	resp := h.server.HandleRequest(session.authCtx, req)
@@ -175,6 +184,35 @@ func (h *StreamableHTTPHandler) handlePost(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// recoverSession creates a new session when the client presents an expired or
+// unknown session ID. This handles pod restarts and TTL expiration transparently
+// — the client doesn't need to re-initialize.
+func (h *StreamableHTTPHandler) recoverSession(w http.ResponseWriter, r *http.Request) (*httpSession, string, error) {
+	authCtx, err := h.authProvider.Authenticate(r)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return nil, "", err
+	}
+
+	authCtx.IPAddress = r.RemoteAddr
+	authCtx.UserAgent = r.Header.Get("User-Agent")
+
+	sessionUUID := uuid.New()
+	authCtx.SessionID = sessionUUID
+	sessionID := sessionUUID.String()
+
+	sess := &httpSession{
+		authCtx:   authCtx,
+		createdAt: time.Now(),
+	}
+
+	h.mu.Lock()
+	h.sessions[sessionID] = sess
+	h.mu.Unlock()
+
+	return sess, sessionID, nil
 }
 
 func (h *StreamableHTTPHandler) handleInitialize(w http.ResponseWriter, r *http.Request, req Request) {
@@ -223,8 +261,12 @@ func (h *StreamableHTTPHandler) handleGet(w http.ResponseWriter, r *http.Request
 	h.mu.RUnlock()
 
 	if !exists {
-		http.Error(w, "Session not found", http.StatusNotFound)
-		return
+		var err error
+		session, sessionID, err = h.recoverSession(w, r)
+		if err != nil {
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", sessionID)
 	}
 
 	flusher, ok := w.(http.Flusher)
