@@ -17,7 +17,7 @@ import (
 
 const nearDuplicateThreshold = 0.92
 
-// Mneme represents a single memory unit from pg_ghola.mnemes.
+// Mneme represents a single memory unit from ghola.mnemes.
 type Mneme struct {
 	ID          uuid.UUID
 	WorkspaceID uuid.UUID
@@ -43,7 +43,7 @@ type NearDuplicate struct {
 	Similarity float64
 }
 
-// RecallResult represents a single result from pg_ghola.recall().
+// RecallResult represents a single result from ghola.recall().
 type RecallResult struct {
 	MnemeID      uuid.UUID
 	Score        float64
@@ -169,7 +169,7 @@ func (s *Store) Remember(ctx context.Context, userID, orgID uuid.UUID, fact, mem
 		oldID = &existing.ID
 	}
 
-	// 3. INSERT into pg_ghola.mnemes
+	// 3. INSERT into ghola.mnemes
 	vecStr := vectorToString(vec)
 	insertRow := s.pool.QueryRow(ctx, insertMneme,
 		wsID, concept, fact, vecStr,
@@ -215,7 +215,7 @@ func (s *Store) Remember(ctx context.Context, userID, orgID uuid.UUID, fact, mem
 	return m, dup, nil
 }
 
-// Recall searches memories using pg_ghola.recall(), querying both personal and org workspaces.
+// Recall searches memories using ghola.recall(), querying both personal and org workspaces.
 func (s *Store) Recall(ctx context.Context, userID, orgID uuid.UUID, query string, limit int, mode, memType string, tags []string, sessionID *uuid.UUID) ([]RecallResult, error) {
 	vec, err := s.embedder.Embed(ctx, query)
 	if err != nil {
