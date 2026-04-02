@@ -1,8 +1,8 @@
-// pg_recall::scoring — Pure cognitive scoring functions
+// pg_ghola::scoring — Pure cognitive scoring functions
 //
 // Implements softplus, actr_activation, ebbinghaus_decay, bayesian_update.
 // All functions are stateless, immutable, and parallel-safe.
-// The control file's schema directive places all objects in pg_recall automatically.
+// The control file's schema directive places all objects in pg_ghola automatically.
 //
 // Owned by: implement_scoring_primitives task
 
@@ -365,7 +365,7 @@ mod tests {
         // producing very high activation. This tests the timestamptz→days conversion
         // path that unit tests can't exercise.
         let result = Spi::get_one::<f64>(
-            "SELECT pg_recall.actr_activation(5, now() - interval '10 seconds')",
+            "SELECT pg_ghola.actr_activation(5, now() - interval '10 seconds')",
         )
         .expect("query failed")
         .expect("null result");
@@ -380,13 +380,13 @@ mod tests {
         // Crammed vs well-spaced via real timestamps — tests the timestamp
         // conversion path: same days_since, different lifespans.
         let crammed = Spi::get_one::<f64>(
-            "SELECT pg_recall.ebbinghaus_decay(\
+            "SELECT pg_ghola.ebbinghaus_decay(\
                 now() - interval '30 days', 50, now() - interval '1 day')",
         )
         .expect("query failed")
         .expect("null result");
         let spaced = Spi::get_one::<f64>(
-            "SELECT pg_recall.ebbinghaus_decay(\
+            "SELECT pg_ghola.ebbinghaus_decay(\
                 now() - interval '30 days', 50, now() - interval '180 days')",
         )
         .expect("query failed")
@@ -404,7 +404,7 @@ mod tests {
         let mut conf = 0.5_f64;
         for _ in 0..20 {
             conf = Spi::get_one::<f64>(&format!(
-                "SELECT pg_recall.bayesian_update({conf}, 0.05)"
+                "SELECT pg_ghola.bayesian_update({conf}, 0.05)"
             ))
             .expect("query failed")
             .expect("null");
@@ -418,7 +418,7 @@ mod tests {
         conf = 0.5;
         for _ in 0..20 {
             conf = Spi::get_one::<f64>(&format!(
-                "SELECT pg_recall.bayesian_update({conf}, 0.99)"
+                "SELECT pg_ghola.bayesian_update({conf}, 0.99)"
             ))
             .expect("query failed")
             .expect("null");

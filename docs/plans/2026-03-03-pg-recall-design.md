@@ -1,6 +1,6 @@
-# pg_recall: Cognitive Memory Primitives for Postgres
+# pg_ghola: Cognitive Memory Primitives for Postgres
 
-FUNCTION pg_recall_extension(postgres, pgvector) -> cognitive_memory_system
+FUNCTION pg_ghola_extension(postgres, pgvector) -> cognitive_memory_system
   A Postgres extension that implements neuroscience-inspired memory primitives --
   ACT-R activation, Hebbian association learning, Bayesian confidence, and
   Ebbinghaus decay -- as composable SQL functions over pgvector-enabled tables.
@@ -28,9 +28,9 @@ RULES
     are deferred to v0.2+.
 
 DONE_WHEN
-  - CREATE EXTENSION pg_recall creates the schema, functions, types, and starts
+  - CREATE EXTENSION pg_ghola creates the schema, functions, types, and starts
     the background worker.
-  - pg_recall.recall() returns ranked results fusing vector + FTS + ACT-R +
+  - pg_ghola.recall() returns ranked results fusing vector + FTS + ACT-R +
     Hebbian + confidence in a single query.
   - Associations form automatically from co-activation events without user
     intervention.
@@ -70,7 +70,7 @@ in cognitive psychology and neuroscience:
 
 Current AI memory systems (vector databases, key-value stores, context windows)
 treat storage as static retrieval. They answer "what data matches this query?"
-but not "what should I be thinking about right now?" pg_recall brings the
+but not "what should I be thinking about right now?" pg_ghola brings the
 cognitive model to Postgres: memories decay, strengthen through use, form
 associations automatically, and track confidence -- on a foundation with ACID
 transactions, streaming replication, RLS, and the full Postgres ecosystem.
@@ -88,7 +88,7 @@ RULES
   - FTS vector is a generated column, always in sync with content.
 
 ```sql
-CREATE TABLE pg_recall.mnemes (
+CREATE TABLE pg_ghola.mnemes (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id  uuid NOT NULL,
     concept       text NOT NULL,
@@ -106,9 +106,9 @@ CREATE TABLE pg_recall.mnemes (
         CHECK (state IN ('active', 'archived', 'dormant'))
 );
 
-CREATE TABLE pg_recall.associations (
-    src_id         uuid NOT NULL REFERENCES pg_recall.mnemes(id),
-    dst_id         uuid NOT NULL REFERENCES pg_recall.mnemes(id),
+CREATE TABLE pg_ghola.associations (
+    src_id         uuid NOT NULL REFERENCES pg_ghola.mnemes(id),
+    dst_id         uuid NOT NULL REFERENCES pg_ghola.mnemes(id),
     weight         float NOT NULL DEFAULT 0.01,
     co_activations int NOT NULL DEFAULT 0,
     updated_at     timestamptz NOT NULL DEFAULT now(),
@@ -116,7 +116,7 @@ CREATE TABLE pg_recall.associations (
     CHECK (src_id < dst_id)
 );
 
-CREATE TABLE pg_recall.co_activation_queue (
+CREATE TABLE pg_ghola.co_activation_queue (
     id           bigserial PRIMARY KEY,
     workspace_id uuid NOT NULL,
     mneme_ids    uuid[] NOT NULL,
@@ -124,14 +124,14 @@ CREATE TABLE pg_recall.co_activation_queue (
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX ON pg_recall.mnemes USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX ON pg_recall.mnemes USING gin (search_vector);
-CREATE INDEX ON pg_recall.mnemes (workspace_id, last_access DESC);
-CREATE INDEX ON pg_recall.associations (dst_id, src_id);
+CREATE INDEX ON pg_ghola.mnemes USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX ON pg_ghola.mnemes USING gin (search_vector);
+CREATE INDEX ON pg_ghola.mnemes (workspace_id, last_access DESC);
+CREATE INDEX ON pg_ghola.associations (dst_id, src_id);
 ```
 
 DONE_WHEN
-  - Tables exist in pg_recall schema after CREATE EXTENSION.
+  - Tables exist in pg_ghola schema after CREATE EXTENSION.
   - CHECK constraint on associations prevents src_id >= dst_id.
   - HNSW and GIN indexes are created.
   - search_vector auto-updates when concept or content changes.
@@ -240,8 +240,8 @@ FUNCTION recall(
     query_embedding vector(384),
     limit_n int DEFAULT 10,
     min_confidence float DEFAULT 0.0,
-    weights pg_recall.score_weights DEFAULT NULL
-) -> SETOF pg_recall.recall_result
+    weights pg_ghola.score_weights DEFAULT NULL
+) -> SETOF pg_ghola.recall_result
   Full cognitive recall pipeline. Fuses vector similarity, full-text search,
   ACT-R temporal activation, Hebbian association strength, and Bayesian
   confidence into a single ranked result set.
@@ -254,7 +254,7 @@ FUNCTION recall(
     5. Composite:           content_match * temporal_weight * confidence
     6. Side effect:         Enqueue co-activation event for top-n results
 
-  Return type (pg_recall.recall_result):
+  Return type (pg_ghola.recall_result):
     mneme_id      uuid
     score         float     -- final composite
     content_match float     -- vector + FTS fusion
@@ -280,7 +280,7 @@ RULES
 
 EXAMPLES
   -- Basic recall
-  SELECT * FROM pg_recall.recall(
+  SELECT * FROM pg_ghola.recall(
       '550e8400-e29b-41d4-a716-446655440000',
       'kubernetes pod scheduling',
       (SELECT embedding FROM my_embeddings WHERE id = 1),
@@ -288,7 +288,7 @@ EXAMPLES
   );
 
   -- High-confidence only
-  SELECT * FROM pg_recall.recall(
+  SELECT * FROM pg_ghola.recall(
       '550e8400-e29b-41d4-a716-446655440000',
       'database migration strategy',
       my_embedding,
@@ -311,7 +311,7 @@ RULES
   - Duplicate events are fine; the worker aggregates correctly.
 
 EXAMPLES
-  SELECT pg_recall.record_co_activation(
+  SELECT pg_ghola.record_co_activation(
       '550e8400-e29b-41d4-a716-446655440000',
       ARRAY['id1', 'id2', 'id3']::uuid[],
       ARRAY[0.9, 0.7, 0.5]
@@ -402,7 +402,7 @@ FUNCTION worker_stats() -> record
                        Client (AI agent, app, SQL session)
                                      |
                                      v
-                   pg_recall.recall(workspace, query, embedding)
+                   pg_ghola.recall(workspace, query, embedding)
                                      |
                    +-----------------+-----------------+
                    |                 |                 |
@@ -470,10 +470,10 @@ What Postgres provides (not reimplemented):
 ## Extension Packaging
 
 ```
-pg_recall/
-  pg_recall.control
+pg_ghola/
+  pg_ghola.control
   sql/
-    pg_recall--0.1.0.sql
+    pg_ghola--0.1.0.sql
   src/
     lib.rs          -- pgrx entry, extension registration, bgworker setup
     scoring.rs      -- actr_activation, ebbinghaus_decay, bayesian_update, softplus

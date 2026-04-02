@@ -1,4 +1,4 @@
-// pg_recall::worker_stats — Worker statistics table and query function
+// pg_ghola::worker_stats — Worker statistics table and query function
 //
 // Provides a singleton table for the background worker to report its state,
 // and a SQL-callable function for users to query worker status.
@@ -98,18 +98,18 @@ mod tests {
     fn test_worker_stats_table_exists() {
         let count = Spi::get_one::<i64>(
             "SELECT count(*) FROM information_schema.tables
-             WHERE table_schema = 'pg_recall' AND table_name = 'worker_stats'",
+             WHERE table_schema = 'pg_ghola' AND table_name = 'worker_stats'",
         )
         .expect("query failed")
         .expect("null result");
-        assert_eq!(count, 1, "worker_stats table should exist in pg_recall schema");
+        assert_eq!(count, 1, "worker_stats table should exist in pg_ghola schema");
     }
 
     #[pg_test]
     fn test_worker_stats_singleton_seeded() {
         // The singleton row should be pre-seeded by the extension install
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_recall.worker_stats",
+            "SELECT count(*) FROM pg_ghola.worker_stats",
         )
         .expect("query failed")
         .expect("null result");
@@ -121,7 +121,7 @@ mod tests {
     fn test_worker_stats_singleton_enforced() {
         // Attempting to insert a second row should fail
         Spi::run(
-            "INSERT INTO pg_recall.worker_stats (id) VALUES (2)",
+            "INSERT INTO pg_ghola.worker_stats (id) VALUES (2)",
         )
         .expect("should have failed");
     }
@@ -129,7 +129,7 @@ mod tests {
     #[pg_test]
     fn test_worker_stats_default_state() {
         let state = Spi::get_one::<String>(
-            "SELECT state FROM pg_recall.worker_stats WHERE id = 1",
+            "SELECT state FROM pg_ghola.worker_stats WHERE id = 1",
         )
         .expect("query failed")
         .expect("null result");
@@ -142,18 +142,18 @@ mod tests {
             "SELECT EXISTS(
                 SELECT 1 FROM pg_type t
                 JOIN pg_namespace n ON t.typnamespace = n.oid
-                WHERE n.nspname = 'pg_recall' AND t.typname = 'worker_status'
+                WHERE n.nspname = 'pg_ghola' AND t.typname = 'worker_status'
             )",
         )
         .unwrap()
         .unwrap();
-        assert!(exists, "worker_status type should exist in pg_recall schema");
+        assert!(exists, "worker_status type should exist in pg_ghola schema");
     }
 
     #[pg_test]
     fn test_get_worker_stats_callable() {
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM pg_recall.get_worker_stats() AS s",
+            "SELECT (s).state FROM pg_ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -163,7 +163,7 @@ mod tests {
     #[pg_test]
     fn test_get_worker_stats_uptime() {
         let uptime = Spi::get_one::<f64>(
-            "SELECT (s).uptime_seconds FROM pg_recall.get_worker_stats() AS s",
+            "SELECT (s).uptime_seconds FROM pg_ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -174,7 +174,7 @@ mod tests {
     fn test_worker_stats_upsert() {
         // Simulate the worker updating stats
         Spi::run(
-            "UPDATE pg_recall.worker_stats SET
+            "UPDATE pg_ghola.worker_stats SET
                 state = 'active',
                 queue_depth = 42,
                 batches_processed = 10,
@@ -188,14 +188,14 @@ mod tests {
         .expect("update should succeed");
 
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM pg_recall.get_worker_stats() AS s",
+            "SELECT (s).state FROM pg_ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
         assert_eq!(state, "active");
 
         let depth = Spi::get_one::<i64>(
-            "SELECT (s).queue_depth FROM pg_recall.get_worker_stats() AS s",
+            "SELECT (s).queue_depth FROM pg_ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");

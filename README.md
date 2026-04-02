@@ -1,4 +1,4 @@
-# pg_recall
+# pg_ghola
 
 Cognitive Memory Primitives for Postgres.
 
@@ -38,17 +38,17 @@ Then in PostgreSQL:
 
 ```sql
 CREATE EXTENSION vector;       -- pgvector must be installed first
-CREATE EXTENSION pg_recall;    -- installs all objects in the pg_recall schema
+CREATE EXTENSION pg_ghola;    -- installs all objects in the pg_ghola schema
 
 -- Optional: configure embedding dimensions (default 768, must be called before inserting data)
-SELECT pg_recall.configure_dimensions(3072);  -- e.g. for OpenAI text-embedding-3-large
+SELECT pg_ghola.configure_dimensions(3072);  -- e.g. for OpenAI text-embedding-3-large
 ```
 
 ## Schema
 
 ### Tables
 
-**`pg_recall.mnemes`** — Primary memory store
+**`pg_ghola.mnemes`** — Primary memory store
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -70,7 +70,7 @@ SELECT pg_recall.configure_dimensions(3072);  -- e.g. for OpenAI text-embedding-
 | `session_id` | `uuid` | Episodic session grouping |
 | `expires_at` | `timestamptz` | Expiration time (working memories) |
 
-**`pg_recall.associations`** — Typed links between mnemes
+**`pg_ghola.associations`** — Typed links between mnemes
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -83,7 +83,7 @@ SELECT pg_recall.configure_dimensions(3072);  -- e.g. for OpenAI text-embedding-
 
 Primary key: `(src_id, dst_id, association_type)` — the same pair can have multiple typed relationships.
 
-**`pg_recall.co_activation_queue`** — Pending Hebbian processing events
+**`pg_ghola.co_activation_queue`** — Pending Hebbian processing events
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -93,7 +93,7 @@ Primary key: `(src_id, dst_id, association_type)` — the same pair can have mul
 | `scores` | `float8[]` | Corresponding recall scores |
 | `created_at` | `timestamptz` | Event time |
 
-**`pg_recall.config`** — Extension configuration
+**`pg_ghola.config`** — Extension configuration
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -102,7 +102,7 @@ Primary key: `(src_id, dst_id, association_type)` — the same pair can have mul
 
 Default entry: `embedding_dims = '768'`.
 
-**`pg_recall.contradiction_candidates`** — Flagged contradicting mneme pairs
+**`pg_ghola.contradiction_candidates`** — Flagged contradicting mneme pairs
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -116,7 +116,7 @@ Default entry: `embedding_dims = '768'`.
 | `created_at` | `timestamptz` | Detection time |
 | `resolved_at` | `timestamptz` | Resolution time (null if pending) |
 
-**`pg_recall.worker_stats`** — Background worker operational state (singleton)
+**`pg_ghola.worker_stats`** — Background worker operational state (singleton)
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -146,27 +146,27 @@ Default entry: `embedding_dims = '768'`.
 
 ### Composite Types
 
-**`pg_recall.recall_result`** — Return type for `recall()`
+**`pg_ghola.recall_result`** — Return type for `recall()`
 
 ```sql
 (mneme_id uuid, score float8, content_match float8, activation float8,
  hebbian_boost float8, confidence float8, concept text, content text)
 ```
 
-**`pg_recall.score_weights`** — Tuning parameters for `recall()`
+**`pg_ghola.score_weights`** — Tuning parameters for `recall()`
 
 ```sql
 (semantic float8, fts float8, actr_decay float8, hebbian_scale float8)
 -- Defaults: (0.6, 0.4, 0.5, 4.0)
 ```
 
-**`pg_recall.contradiction_candidate_result`** — Return type for `check_contradictions()`
+**`pg_ghola.contradiction_candidate_result`** — Return type for `check_contradictions()`
 
 ```sql
 (candidate_id bigint, mneme_a uuid, mneme_b uuid, similarity float8, concept_overlap boolean)
 ```
 
-**`pg_recall.contradiction_detail`** — Return type for `get_pending_contradictions()`
+**`pg_ghola.contradiction_detail`** — Return type for `get_pending_contradictions()`
 
 ```sql
 (candidate_id bigint, similarity float8, concept_overlap boolean,
@@ -179,7 +179,7 @@ Default entry: `embedding_dims = '768'`.
 ### Inserting Memories
 
 ```sql
-INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding,
+INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding,
                               memory_type, tier, tags, session_id)
 VALUES (
     'your-workspace-uuid',
@@ -200,7 +200,7 @@ When a mneme is inserted with a `session_id`, a trigger automatically creates `s
 The `recall()` function fuses vector similarity, full-text search, temporal activation, Hebbian associations, and Bayesian confidence into one ranked result set:
 
 ```sql
-SELECT * FROM pg_recall.recall(
+SELECT * FROM pg_ghola.recall(
     'your-workspace-uuid'::uuid,    -- workspace filter
     'how does pod scheduling work',  -- query text (for FTS)
     '[0.1, 0.2, ...]'::vector(768), -- query embedding (for vector search)
@@ -213,7 +213,7 @@ SELECT * FROM pg_recall.recall(
 With filters and session context:
 
 ```sql
-SELECT * FROM pg_recall.recall(
+SELECT * FROM pg_ghola.recall(
     'your-workspace-uuid'::uuid,
     'pod scheduling',
     '[0.1, 0.2, ...]'::vector(768),
@@ -254,15 +254,15 @@ Memory types influence cognitive scoring beyond simple filtering:
 
 ```sql
 -- Mark a newer mneme as superseding an older one (archives the older mneme)
-SELECT pg_recall.mark_supersedes('newer-id'::uuid, 'older-id'::uuid);
+SELECT pg_ghola.mark_supersedes('newer-id'::uuid, 'older-id'::uuid);
 
 -- Mark supporting evidence (boosts supported mneme's confidence)
-SELECT pg_recall.mark_supports('evidence-id'::uuid, 'claim-id'::uuid);
+SELECT pg_ghola.mark_supports('evidence-id'::uuid, 'claim-id'::uuid);
 
 -- Query typed associations for a mneme
-SELECT * FROM pg_recall.get_typed_associations('mneme-id'::uuid);
-SELECT * FROM pg_recall.get_typed_associations('mneme-id'::uuid, 'supports');
-SELECT * FROM pg_recall.get_typed_associations('mneme-id'::uuid, NULL, 0.1);
+SELECT * FROM pg_ghola.get_typed_associations('mneme-id'::uuid);
+SELECT * FROM pg_ghola.get_typed_associations('mneme-id'::uuid, 'supports');
+SELECT * FROM pg_ghola.get_typed_associations('mneme-id'::uuid, NULL, 0.1);
 ```
 
 ### Processing Hebbian Learning
@@ -271,10 +271,10 @@ Each `recall()` call automatically enqueues a co-activation event. The backgroun
 
 ```sql
 -- Process a batch of pending events
-SELECT pg_recall.process_co_activation_batch(100);
+SELECT pg_ghola.process_co_activation_batch(100);
 
 -- Or drain the entire queue
-SELECT pg_recall.process_all_pending_co_activations();
+SELECT pg_ghola.process_all_pending_co_activations();
 ```
 
 State-tier mnemes are excluded from Hebbian pair generation — they appear in recall results but do not form associations.
@@ -286,8 +286,8 @@ maintenance, and archives stale memories. To enable it:
 
 ```
 # postgresql.conf
-shared_preload_libraries = 'pg_recall'
-pg_recall.database = 'memories'          # database where extension is installed
+shared_preload_libraries = 'pg_ghola'
+pg_ghola.database = 'memories'          # database where extension is installed
 ```
 
 Restart PostgreSQL after changing `shared_preload_libraries`. The worker adapts its
@@ -312,7 +312,7 @@ polling interval based on queue activity:
 **Monitoring:**
 
 ```sql
-SELECT * FROM pg_recall.get_worker_stats();
+SELECT * FROM pg_ghola.get_worker_stats();
 ```
 
 Without `shared_preload_libraries`, the extension works fully — process events manually or via `pg_cron`.
@@ -325,16 +325,16 @@ same workspace, a contradiction candidate is flagged for review.
 
 ```sql
 -- Check for contradictions without flagging (read-only)
-SELECT * FROM pg_recall.check_contradictions('mneme-id'::uuid, 0.85);
+SELECT * FROM pg_ghola.check_contradictions('mneme-id'::uuid, 0.85);
 
 -- Flag contradictions (inserts into contradiction_candidates)
-SELECT pg_recall.flag_contradictions('mneme-id'::uuid, 0.85);
+SELECT pg_ghola.flag_contradictions('mneme-id'::uuid, 0.85);
 
 -- Review pending contradictions with full mneme details
-SELECT * FROM pg_recall.get_pending_contradictions('workspace-id'::uuid);
+SELECT * FROM pg_ghola.get_pending_contradictions('workspace-id'::uuid);
 
 -- Scan entire workspace for contradictions (batch)
-SELECT pg_recall.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
+SELECT pg_ghola.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
 ```
 
 **Resolving contradictions:**
@@ -342,10 +342,10 @@ SELECT pg_recall.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
 ```sql
 -- Confirm: penalizes the newer mneme, weakens Hebbian association,
 -- and creates a 'contradicts' typed association (negative recall boost)
-SELECT pg_recall.resolve_contradiction(candidate_id, 'confirmed');
+SELECT pg_ghola.resolve_contradiction(candidate_id, 'confirmed');
 
 -- Dismiss: marks as dismissed, no side effects
-SELECT pg_recall.resolve_contradiction(candidate_id, 'dismissed');
+SELECT pg_ghola.resolve_contradiction(candidate_id, 'dismissed');
 ```
 
 ### Confirming Recall
@@ -353,7 +353,7 @@ SELECT pg_recall.resolve_contradiction(candidate_id, 'dismissed');
 When a user confirms that recalled memories were useful, strengthen their confidence:
 
 ```sql
-SELECT pg_recall.confirm_recall(ARRAY['mneme-id-1', 'mneme-id-2']::uuid[]);
+SELECT pg_ghola.confirm_recall(ARRAY['mneme-id-1', 'mneme-id-2']::uuid[]);
 ```
 
 ### Configuring Embedding Dimensions
@@ -361,7 +361,7 @@ SELECT pg_recall.confirm_recall(ARRAY['mneme-id-1', 'mneme-id-2']::uuid[]);
 The default embedding dimension is 768. To use a different model, call `configure_dimensions()` before inserting any data:
 
 ```sql
-SELECT pg_recall.configure_dimensions(3072);  -- for text-embedding-3-large
+SELECT pg_ghola.configure_dimensions(3072);  -- for text-embedding-3-large
 ```
 
 This alters the embedding column type, recreates the HNSW index, and updates the config table. Cannot be called once data exists.
@@ -371,12 +371,12 @@ This alters the embedding column type, recreates the HNSW index, and updates the
 All scoring primitives are available as standalone SQL functions:
 
 ```sql
-SELECT pg_recall.softplus(2.0);                                    -- ~2.13
-SELECT pg_recall.actr_activation(10, now() - interval '5 days');   -- temporal activation
-SELECT pg_recall.ebbinghaus_decay(                                 -- spacing-aware decay
+SELECT pg_ghola.softplus(2.0);                                    -- ~2.13
+SELECT pg_ghola.actr_activation(10, now() - interval '5 days');   -- temporal activation
+SELECT pg_ghola.ebbinghaus_decay(                                 -- spacing-aware decay
     now() - interval '30 days', 50, now() - interval '180 days');
-SELECT pg_recall.bayesian_update(0.5, 0.95);                       -- ~0.925
-SELECT pg_recall.update_confidence('mneme-id'::uuid, 0.95);        -- update and persist
+SELECT pg_ghola.bayesian_update(0.5, 0.95);                       -- ~0.925
+SELECT pg_ghola.update_confidence('mneme-id'::uuid, 0.95);        -- update and persist
 ```
 
 ## Scoring Formula
@@ -403,8 +403,8 @@ score           = content_match * temporal_weight * confidence
 All tables include a `workspace_id` column. The extension does not enforce Row-Level Security (RLS) itself but is designed to work with Postgres RLS policies:
 
 ```sql
-ALTER TABLE pg_recall.mnemes ENABLE ROW LEVEL SECURITY;
-CREATE POLICY workspace_isolation ON pg_recall.mnemes
+ALTER TABLE pg_ghola.mnemes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY workspace_isolation ON pg_ghola.mnemes
     USING (workspace_id = current_setting('app.workspace_id')::uuid);
 ```
 

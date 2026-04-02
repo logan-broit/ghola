@@ -1,9 +1,9 @@
-// pg_recall::recall — Composite recall function
+// pg_ghola::recall — Composite recall function
 //
 // The primary retrieval entry point that fuses vector similarity, full-text search,
 // ACT-R temporal activation, Hebbian association strength, and Bayesian confidence
 // into a single ranked result set.
-// The control file's schema directive places all objects in pg_recall automatically.
+// The control file's schema directive places all objects in pg_ghola automatically.
 //
 // Owned by: implement_composite_recall task
 
@@ -30,18 +30,18 @@ CREATE FUNCTION recall(
     query_embedding vector(768),
     limit_n int DEFAULT 10,
     min_confidence float8 DEFAULT 0.0,
-    weights pg_recall.score_weights DEFAULT NULL,
+    weights pg_ghola.score_weights DEFAULT NULL,
     memory_type text DEFAULT NULL,
     scope text DEFAULT NULL,
     tags text[] DEFAULT NULL,
     session_id uuid DEFAULT NULL
-) RETURNS SETOF pg_recall.recall_result
+) RETURNS SETOF pg_ghola.recall_result
 LANGUAGE SQL
 STABLE
 AS $$
     SELECT (mneme_id, score, content_match, activation, hebbian_boost,
-            confidence, concept, content)::pg_recall.recall_result
-    FROM pg_recall.recall_inner(
+            confidence, concept, content)::pg_ghola.recall_result
+    FROM pg_ghola.recall_inner(
         workspace_id, query_text, query_embedding::text, limit_n, min_confidence,
         COALESCE((weights).semantic, 0.6),
         COALESCE((weights).fts, 0.4),
@@ -164,7 +164,7 @@ fn recall_inner(
                        (1.0 - (embedding <=> '{emb}'::vector(768)))::float8 AS cosine_sim, \
                        ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
-                FROM pg_recall.mnemes \
+                FROM pg_ghola.mnemes \
                 WHERE workspace_id = '{ws}' \
                   AND state = 'active' \
                   AND confidence >= {min_conf} \
@@ -178,7 +178,7 @@ fn recall_inner(
                        (1.0 - (embedding <=> '{emb}'::vector(768)))::float8 AS cosine_sim, \
                        ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
-                FROM pg_recall.mnemes \
+                FROM pg_ghola.mnemes \
                 WHERE workspace_id = '{ws}' \
                   AND state = 'active' \
                   AND confidence >= {min_conf} \
@@ -240,7 +240,7 @@ fn recall_inner(
                 .join(",");
 
             let query = format!(
-                "SELECT src_id, dst_id, association_type, weight FROM pg_recall.associations \
+                "SELECT src_id, dst_id, association_type, weight FROM pg_ghola.associations \
                  WHERE src_id IN ({ids}) AND dst_id IN ({ids})",
                 ids = id_list,
             );
@@ -365,7 +365,7 @@ fn enqueue_co_activation(workspace_id: &pgrx::Uuid, results: &[ScoredCandidate])
     if results.is_empty() {
         // Still enqueue with empty arrays per spec
         Spi::run(&format!(
-            "INSERT INTO pg_recall.co_activation_queue (workspace_id, mneme_ids, scores) \
+            "INSERT INTO pg_ghola.co_activation_queue (workspace_id, mneme_ids, scores) \
              VALUES ('{ws}', ARRAY[]::uuid[], ARRAY[]::float8[])",
             ws = workspace_id,
         ))
@@ -375,7 +375,7 @@ fn enqueue_co_activation(workspace_id: &pgrx::Uuid, results: &[ScoredCandidate])
         let scores: Vec<String> = results.iter().map(|r| format!("{}", r.score)).collect();
 
         Spi::run(&format!(
-            "INSERT INTO pg_recall.co_activation_queue (workspace_id, mneme_ids, scores) \
+            "INSERT INTO pg_ghola.co_activation_queue (workspace_id, mneme_ids, scores) \
              VALUES ('{ws}', ARRAY[{ids}]::uuid[], ARRAY[{scores}]::float8[])",
             ws = workspace_id,
             ids = ids.join(","),
@@ -436,7 +436,7 @@ mod tests {
 
     fn insert_mneme_with_embedding(ws_id: &str, concept: &str, content: &str, embedding: &str) -> String {
         Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws_id}', '{concept}', '{content}', \
              '{embedding}'::vector(768)) \
              RETURNING id::text"
@@ -458,7 +458,7 @@ mod tests {
         let emb = make_query_embedding();
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
+            "SELECT count(*) FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, \
                 'kubernetes pod scheduling', \
                 '{emb}'::vector(768), \
@@ -478,7 +478,7 @@ mod tests {
 
         // Check that all fields of recall_result are accessible
         let score = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_recall.recall(\
+            "SELECT (r).score FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 10, 0.0, NULL) AS r LIMIT 1"
         ))
@@ -494,7 +494,7 @@ mod tests {
         let emb = make_query_embedding();
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
+            "SELECT count(*) FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 2, 0.0, NULL)"
         ))
@@ -513,23 +513,23 @@ mod tests {
 
         // Set one mneme to high confidence, others to low
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET confidence = 0.9 WHERE id = '{}'::uuid",
+            "UPDATE pg_ghola.mnemes SET confidence = 0.9 WHERE id = '{}'::uuid",
             mneme_ids[0]
         ))
         .expect("update failed");
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET confidence = 0.3 WHERE id = '{}'::uuid",
+            "UPDATE pg_ghola.mnemes SET confidence = 0.3 WHERE id = '{}'::uuid",
             mneme_ids[1]
         ))
         .expect("update failed");
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET confidence = 0.2 WHERE id = '{}'::uuid",
+            "UPDATE pg_ghola.mnemes SET confidence = 0.2 WHERE id = '{}'::uuid",
             mneme_ids[2]
         ))
         .expect("update failed");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
+            "SELECT count(*) FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 10, 0.7, NULL)"
         ))
@@ -552,7 +552,7 @@ mod tests {
         // Query with a different workspace_id should return nothing
         let other_ws = "00000000-0000-0000-0000-000000000042";
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
+            "SELECT count(*) FROM pg_ghola.recall(\
                 '{other_ws}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 10, 0.0, NULL)"
         ))
@@ -573,18 +573,18 @@ mod tests {
         let emb = make_query_embedding();
 
         // Clear any existing queue entries
-        Spi::run("DELETE FROM pg_recall.co_activation_queue").expect("delete failed");
+        Spi::run("DELETE FROM pg_ghola.co_activation_queue").expect("delete failed");
 
         // Execute recall
         Spi::run(&format!(
-            "SELECT * FROM pg_recall.recall(\
+            "SELECT * FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 10, 0.0, NULL)"
         ))
         .expect("recall failed");
 
         let queue_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_recall.co_activation_queue")
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
                 .expect("query failed")
                 .expect("null count");
 
@@ -602,18 +602,18 @@ mod tests {
         let ws_id = "00000000-0000-0000-0000-000000000077";
         let emb = make_query_embedding();
 
-        Spi::run("DELETE FROM pg_recall.co_activation_queue").expect("delete failed");
+        Spi::run("DELETE FROM pg_ghola.co_activation_queue").expect("delete failed");
 
         // No mnemes in this workspace, should return empty but still enqueue
         Spi::run(&format!(
-            "SELECT * FROM pg_recall.recall(\
+            "SELECT * FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'nonexistent topic', '{emb}'::vector(768), \
                 10, 0.0, NULL)"
         ))
         .expect("recall failed");
 
         let queue_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_recall.co_activation_queue")
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
                 .expect("query failed")
                 .expect("null count");
 
@@ -632,7 +632,7 @@ mod tests {
 
         // Score with default weights (semantic=0.6, fts=0.4)
         let score_default = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_recall.recall(\
+            "SELECT (r).score FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 1, 0.0, NULL) AS r LIMIT 1"
         ))
@@ -641,9 +641,9 @@ mod tests {
 
         // Score with semantic-only weights (semantic=1.0, fts=0.0)
         let score_semantic_only = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_recall.recall(\
+            "SELECT (r).score FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
-                1, 0.0, (1.0, 0.0, 0.5, 4.0)::pg_recall.score_weights) AS r LIMIT 1"
+                1, 0.0, (1.0, 0.0, 0.5, 4.0)::pg_ghola.score_weights) AS r LIMIT 1"
         ))
         .expect("query failed")
         .expect("null score");
@@ -667,7 +667,7 @@ mod tests {
         let (m1, m2) = (&mneme_ids[0], &mneme_ids[1]);
         let (src, dst) = if m1 < m2 { (m1, m2) } else { (m2, m1) };
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              VALUES ('{src}'::uuid, '{dst}'::uuid, 0.8)"
         ))
         .expect("insert association failed");
@@ -676,7 +676,7 @@ mod tests {
         // The one associated with the other should get a non-zero hebbian_boost.
         let has_boost = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS( \
-                SELECT 1 FROM pg_recall.recall( \
+                SELECT 1 FROM pg_ghola.recall( \
                     '{ws_id}'::uuid, 'kubernetes docker', '{emb}'::vector(768), \
                     10, 0.0, NULL) \
                 WHERE hebbian_boost > 0 \
@@ -699,7 +699,7 @@ mod tests {
         let emb = make_query_embedding();
 
         let before = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{}'::uuid",
+            "SELECT access_count FROM pg_ghola.mnemes WHERE id = '{}'::uuid",
             mneme_ids[0]
         ))
         .expect("query failed")
@@ -707,13 +707,13 @@ mod tests {
 
         // Execute recall
         Spi::run(&format!(
-            "SELECT * FROM pg_recall.recall(\
+            "SELECT * FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), 10, 0.0, NULL)"
         ))
         .expect("recall failed");
 
         let after = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{}'::uuid",
+            "SELECT access_count FROM pg_ghola.mnemes WHERE id = '{}'::uuid",
             mneme_ids[0]
         ))
         .expect("query failed")
@@ -736,7 +736,7 @@ mod tests {
             let rows = client
                 .select(
                     &format!(
-                        "SELECT (r).score FROM pg_recall.recall(\
+                        "SELECT (r).score FROM pg_ghola.recall(\
                             '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                             10, 0.0, NULL) AS r"
                     ),
@@ -783,7 +783,7 @@ mod tests {
                 .select(
                     &format!(
                         "SELECT (r).mneme_id::text, (r).score, (r).content_match \
-                         FROM pg_recall.recall( \
+                         FROM pg_ghola.recall( \
                              '{ws_id}'::uuid, 'query', '{emb}'::vector(768), \
                              10, 0.0, NULL \
                          ) AS r"
@@ -835,13 +835,13 @@ mod tests {
 
         // Archive one mneme
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET state = 'archived' WHERE id = '{}'::uuid",
+            "UPDATE pg_ghola.mnemes SET state = 'archived' WHERE id = '{}'::uuid",
             mneme_ids[0]
         ))
         .expect("update failed");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.recall(\
+            "SELECT count(*) FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
                 10, 0.0, NULL)"
         ))

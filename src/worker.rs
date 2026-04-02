@@ -1,4 +1,4 @@
-// pg_recall::worker — Autonomous background worker for Hebbian processing
+// pg_ghola::worker — Autonomous background worker for Hebbian processing
 //
 // Implements a pgrx background worker that:
 // 1. Automatically drains the co_activation_queue via process_co_activation_batch
@@ -6,14 +6,14 @@
 // 3. Runs periodic association decay, pruning, and dormant archival
 // 4. Drains in-flight work on graceful shutdown (SIGTERM)
 //
-// Requires shared_preload_libraries = 'pg_recall' in postgresql.conf.
-// The target database is configured via the pg_recall.database GUC.
+// Requires shared_preload_libraries = 'pg_ghola' in postgresql.conf.
+// The target database is configured via the pg_ghola.database GUC.
 
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::time::{Duration, Instant};
 
-use crate::PG_RECALL_DATABASE;
+use crate::PG_GHOLA_DATABASE;
 
 // ---------------------------------------------------------------------------
 // Adaptive polling state machine
@@ -127,16 +127,16 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 fn run_decay_pruning() {
     // Decay: reduce weight of stale associations by 0.1%
     Spi::run(
-        "UPDATE pg_recall.associations \
+        "UPDATE pg_ghola.associations \
          SET weight = weight * 0.999 \
          WHERE updated_at < now() - interval '1 day'",
     )
-    .unwrap_or_else(|e| log!("pg_recall worker: decay failed: {e}"));
+    .unwrap_or_else(|e| log!("pg_ghola worker: decay failed: {e}"));
 
     // Prune: remove associations below threshold
     let pruned = Spi::get_one::<i64>(
         "WITH deleted AS ( \
-             DELETE FROM pg_recall.associations \
+             DELETE FROM pg_ghola.associations \
              WHERE weight < 0.001 \
              RETURNING 1 \
          ) SELECT count(*) FROM deleted",
@@ -146,7 +146,7 @@ fn run_decay_pruning() {
 
     if pruned > 0 {
         log!(
-            "pg_recall worker: decay/prune cycle complete, pruned {pruned} associations"
+            "pg_ghola worker: decay/prune cycle complete, pruned {pruned} associations"
         );
     }
 }
@@ -155,7 +155,7 @@ fn run_decay_pruning() {
 fn run_archival() {
     let archived = Spi::get_one::<i64>(
         "WITH updated AS ( \
-             UPDATE pg_recall.mnemes \
+             UPDATE pg_ghola.mnemes \
              SET state = 'dormant' \
              WHERE state = 'active' \
                AND last_access < now() - interval '90 days' \
@@ -168,7 +168,7 @@ fn run_archival() {
 
     if archived > 0 {
         log!(
-            "pg_recall worker: archived {archived} dormant memories"
+            "pg_ghola worker: archived {archived} dormant memories"
         );
     }
 }
@@ -177,7 +177,7 @@ fn run_archival() {
 fn run_working_memory_expiration() {
     let expired = Spi::get_one::<i64>(
         "WITH updated AS ( \
-             UPDATE pg_recall.mnemes \
+             UPDATE pg_ghola.mnemes \
              SET state = 'dormant' \
              WHERE memory_type = 'working' \
                AND state = 'active' \
@@ -191,7 +191,7 @@ fn run_working_memory_expiration() {
 
     if expired > 0 {
         log!(
-            "pg_recall worker: archived {expired} expired working memories"
+            "pg_ghola worker: archived {expired} expired working memories"
         );
     }
 }
@@ -201,7 +201,7 @@ fn run_working_memory_expiration() {
 fn run_state_cleanup() {
     let cleaned = Spi::get_one::<i64>(
         "WITH updated AS ( \
-             UPDATE pg_recall.mnemes \
+             UPDATE pg_ghola.mnemes \
              SET state = 'dormant' \
              WHERE tier = 'state' \
                AND state = 'active' \
@@ -214,7 +214,7 @@ fn run_state_cleanup() {
 
     if cleaned > 0 {
         log!(
-            "pg_recall worker: archived {cleaned} stale state-tier mnemes"
+            "pg_ghola worker: archived {cleaned} stale state-tier mnemes"
         );
     }
 }
@@ -236,7 +236,7 @@ fn write_stats_row(
 ) {
     // Get current queue depth
     let queue_depth = Spi::get_one::<i64>(
-        "SELECT count(*) FROM pg_recall.co_activation_queue",
+        "SELECT count(*) FROM pg_ghola.co_activation_queue",
     )
     .unwrap_or(Some(0))
     .unwrap_or(0);
@@ -248,7 +248,7 @@ fn write_stats_row(
     };
 
     Spi::run(&format!(
-        "UPDATE pg_recall.worker_stats SET \
+        "UPDATE pg_ghola.worker_stats SET \
              state = '{state}', \
              queue_depth = {queue_depth}, \
              batches_processed = {batches}, \
@@ -260,7 +260,7 @@ fn write_stats_row(
              updated_at = now() \
          WHERE id = 1",
     ))
-    .unwrap_or_else(|e| log!("pg_recall worker: failed to update stats: {e}"));
+    .unwrap_or_else(|e| log!("pg_ghola worker: failed to update stats: {e}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -274,12 +274,12 @@ fn drain_via_transactions() -> i64 {
     let mut total: i64 = 0;
     loop {
         if Instant::now() >= deadline {
-            log!("pg_recall worker: drain timeout reached, exiting");
+            log!("pg_ghola worker: drain timeout reached, exiting");
             break;
         }
         let processed = BackgroundWorker::transaction(|| {
             Spi::get_one::<i64>(
-                "SELECT pg_recall.process_co_activation_batch(100)",
+                "SELECT pg_ghola.process_co_activation_batch(100)",
             )
             .unwrap_or(Some(0))
             .unwrap_or(0)
@@ -304,9 +304,9 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
 
     // Read the target database name from the GUC.
     // We must connect to SPI before calling transaction(), so we first connect
-    // to the configured database. The GUC pg_recall.database is set in
+    // to the configured database. The GUC pg_ghola.database is set in
     // postgresql.conf and read via the static GUC variable.
-    let db_name = PG_RECALL_DATABASE
+    let db_name = PG_GHOLA_DATABASE
         .get()
         .and_then(|cs| cs.to_str().ok().map(|s| s.to_string()))
         .unwrap_or_else(|| "memories".to_string());
@@ -314,7 +314,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     log!(
-        "pg_recall worker: started, connected to database '{db_name}'"
+        "pg_ghola worker: started, connected to database '{db_name}'"
     );
 
     let mut sm = StateMachine::new();
@@ -323,19 +323,19 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     // Mark worker as running
     BackgroundWorker::transaction(|| {
         Spi::run(
-            "UPDATE pg_recall.worker_stats SET \
+            "UPDATE pg_ghola.worker_stats SET \
                  state = 'active', \
                  started_at = now(), \
                  updated_at = now() \
              WHERE id = 1",
         )
-        .unwrap_or_else(|e| log!("pg_recall worker: failed to set initial state: {e}"));
+        .unwrap_or_else(|e| log!("pg_ghola worker: failed to set initial state: {e}"));
     });
 
     loop {
         // Check for termination signal
         if BackgroundWorker::sigterm_received() {
-            log!("pg_recall worker: SIGTERM received, draining queue");
+            log!("pg_ghola worker: SIGTERM received, draining queue");
             let drain_total = drain_via_transactions();
             stats.rows_processed += drain_total;
             // Final stats update
@@ -347,7 +347,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
                 write_stats_row("shutdown", 0, batches, rows, pairs, poll_ms, false);
             });
             log!(
-                "pg_recall worker: shutdown complete, processed {} total rows",
+                "pg_ghola worker: shutdown complete, processed {} total rows",
                 stats.rows_processed
             );
             break;
@@ -356,7 +356,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
         // Process one batch cycle within a transaction
         let processed = BackgroundWorker::transaction(|| {
             Spi::get_one::<i64>(
-                "SELECT pg_recall.process_co_activation_batch(100)",
+                "SELECT pg_ghola.process_co_activation_batch(100)",
             )
             .unwrap_or(Some(0))
             .unwrap_or(0)

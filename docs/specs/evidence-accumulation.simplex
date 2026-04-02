@@ -1,15 +1,15 @@
-# Evidence Accumulation for pg_recall
+# Evidence Accumulation for pg_ghola
 #
 # Inspired by the Thousand Brains Theory (arxiv 2507.04494): each Learning
 # Module maintains per-hypothesis evidence scores that accumulate additively
 # over time. In TBP, pose-based signals range [-1, 1] and feature-based
-# signals range [0, 1]; pg_recall instead uses log-odds scale signals
+# signals range [0, 1]; pg_ghola instead uses log-odds scale signals
 # (any real value, clamped to [-3.66, 3.66] at accumulation). The update
 # rule in Monty is: e_new = e_old * past_weight + e_step * present_weight
-# (for comparison; pg_recall uses additive log-odds instead). Convergence
+# (for comparison; pg_ghola uses additive log-odds instead). Convergence
 # occurs when one hypothesis exceeds all others by x_percent_threshold.
 #
-# Currently, pg_recall tracks a single scalar confidence per memory via
+# Currently, pg_ghola tracks a single scalar confidence per memory via
 # Bayesian updating: posterior = f(prior, evidence). This is theoretically
 # stronger than Monty's heuristic scoring (Bogacz 2006 proved DDM/SPRT is
 # optimal), but it has a critical limitation: confidence is context-free.

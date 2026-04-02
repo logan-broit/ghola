@@ -1,14 +1,14 @@
 [package]
-name = "pg_recall"
-version = "0.4.0"
+name = "pg_ghola"
+version = "0.0.1"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [[bin]]
-name = "pgrx_embed_pg_recall"
-path = "src/bin/pgrx_embed_pg_recall.rs"
+name = "pgrx_embed_pg_ghola"
+path = "src/bin/pgrx_embed_pg_ghola.rs"
 
 [features]
 default = ["pg18"]

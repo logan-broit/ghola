@@ -5,7 +5,7 @@
 ## Problem
 
 The four thousand-brains specs introduce schema changes that need a migration
-strategy for existing pg_recall installations:
+strategy for existing pg_ghola installations:
 
 ### New columns on existing tables
 - `associations.displacement` — vector column, NULL default (backwards compatible)
@@ -25,7 +25,7 @@ strategy for existing pg_recall installations:
 
 ## Current schema mechanism
 
-pg_recall uses `extension_sql!` macros in `src/schema.rs` with `requires` for
+pg_ghola uses `extension_sql!` macros in `src/schema.rs` with `requires` for
 ordering. Schema is created at `CREATE EXTENSION` time. There is no versioned
 migration system — the extension creates all objects from scratch.
 
@@ -38,8 +38,8 @@ assumes tables exist and uses SPI to process co-activation batches.
    The control file needs `default_version` updated.
 
 2. **Upgrade script**: PostgreSQL extensions support versioned upgrades via
-   `ALTER EXTENSION pg_recall UPDATE TO '0.5'`. This requires a migration SQL
-   file (e.g., `pg_recall--0.4--0.5.sql`) that:
+   `ALTER EXTENSION pg_ghola UPDATE TO '0.5'`. This requires a migration SQL
+   file (e.g., `pg_ghola--0.4--0.5.sql`) that:
    - ALTERs the associations table to add displacement/magnitude columns
    - CREATEs the new tables with proper constraints and indexes
    - CREATEs the new SQL functions (recall_voted, recall_by_analogy, etc.)

@@ -1,4 +1,4 @@
-# pg_recall: Cognitive Memory Primitives for Postgres
+# pg_ghola: Cognitive Memory Primitives for Postgres
 
 A Postgres extension that implements neuroscience-inspired memory primitives —
 ACT-R activation, Hebbian association learning, Bayesian confidence, and
@@ -27,7 +27,7 @@ CONSTRAINT: version_requirements
   | pgvector   | 0.8.2+     | Extension control: requires='vector'|
 
 CONSTRAINT: extension_identity
-  Extension is named pg_recall. All objects live in the pg_recall schema.
+  Extension is named pg_ghola. All objects live in the pg_ghola schema.
   Extension version is 0.1.0. The .control file declares
   requires = 'vector' so pgvector must be installed first.
 
@@ -47,10 +47,10 @@ CONSTRAINT: file_ownership
   Each task owns specific files. No task may edit another task's primary owned
   file unless it is the final integration task. This prevents merge conflicts
   when tasks execute in parallel. Ownership:
-    - bootstrap: Cargo.toml, pg_recall.control, src/lib.rs, empty module stubs
+    - bootstrap: Cargo.toml, pg_ghola.control, src/lib.rs, empty module stubs
     - types: src/types.rs
     - scoring: src/scoring.rs
-    - schema: sql/pg_recall--0.1.0.sql
+    - schema: sql/pg_ghola--0.1.0.sql
     - hebbian: src/hebbian.rs
     - recall: src/recall.rs
     - integration: final edits to src/lib.rs, end-to-end tests, README
@@ -58,7 +58,7 @@ CONSTRAINT: file_ownership
 CONSTRAINT: schema_via_pgrx
   Tables and indexes are defined using pgrx extension_sql! or
   extension_sql_file! macros in Rust, not a hand-written SQL install script
-  separate from the crate. The sql/pg_recall--0.1.0.sql file is generated
+  separate from the crate. The sql/pg_ghola--0.1.0.sql file is generated
   by cargo pgrx schema. Agents must not write raw SQL that bypasses pgrx
   registration.
 
@@ -85,34 +85,34 @@ DATA: score_weights
 FUNCTION: bootstrap_extension_skeleton() -> compiling pgrx project
 
   The foundation that all other work builds on. Produces a pgrx project
-  that compiles, boots Postgres, and accepts CREATE EXTENSION pg_recall.
+  that compiles, boots Postgres, and accepts CREATE EXTENSION pg_ghola.
 
   RULES:
-    - Extension named pg_recall in the pg_recall schema
+    - Extension named pg_ghola in the pg_ghola schema
     - pgrx project configured with pg18 feature flag and pgvector dependency
     - All source modules exist as stubs with placeholder public signatures
     - recall_result and score_weights composite types have stub definitions
     - All scoring, recall, and hebbian function signatures are stubbed
     - Project compiles and boots with cargo pgrx run
-    - CREATE EXTENSION pg_recall succeeds on the booted instance
+    - CREATE EXTENSION pg_ghola succeeds on the booted instance
     - Running bootstrap on a workspace with partial files overwrites stubs
       cleanly without leaving orphaned artifacts
 
   DONE_WHEN:
     - cargo pgrx run boots Postgres with the extension loadable
-    - CREATE EXTENSION pg_recall creates the pg_recall schema without errors
+    - CREATE EXTENSION pg_ghola creates the pg_ghola schema without errors
     - All downstream module files exist in the source tree as compilable stubs
 
   EXAMPLES:
     greenfield workspace with no existing files
       -> compiling pgrx project, cargo pgrx run boots cleanly,
-         CREATE EXTENSION pg_recall succeeds
+         CREATE EXTENSION pg_ghola succeeds
 
     workspace with partial or stale files from a previous attempt
       -> stubs are overwritten, project compiles cleanly, no orphaned files
 
-    CREATE EXTENSION pg_recall on booted instance
-      -> pg_recall schema exists, stub functions visible, no errors
+    CREATE EXTENSION pg_ghola on booted instance
+      -> pg_ghola schema exists, stub functions visible, no errors
 
   ERRORS:
     - cargo pgrx run fails -> resolve compilation errors before any downstream work
@@ -128,26 +128,26 @@ FUNCTION: define_composite_types() -> SQL-visible composite types
   Define the two composite types used by recall and scoring functions.
 
   RULES:
-    - recall_result type registered in pg_recall schema with all fields from DATA
-    - score_weights type registered in pg_recall schema with all fields from DATA
+    - recall_result type registered in pg_ghola schema with all fields from DATA
+    - score_weights type registered in pg_ghola schema with all fields from DATA
     - Both types are usable in SQL: castable, selectable, returnable from functions
     - Types are importable by other Rust modules in the same crate
 
   DONE_WHEN:
-    - Casting a valid literal to pg_recall.recall_result succeeds in SQL
-    - Casting a valid literal to pg_recall.score_weights succeeds in SQL
+    - Casting a valid literal to pg_ghola.recall_result succeeds in SQL
+    - Casting a valid literal to pg_ghola.score_weights succeeds in SQL
     - Downstream Rust modules can reference the type definitions
 
   EXAMPLES:
-    SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_recall.recall_result
+    SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_ghola.recall_result
       -> valid composite value, all fields accessible
-    SELECT (0.7, 0.3, 0.5, 4.0)::pg_recall.score_weights
+    SELECT (0.7, 0.3, 0.5, 4.0)::pg_ghola.score_weights
       -> valid composite value with custom weights
-    SELECT r.score, r.concept FROM unnest(ARRAY[...]) AS r(pg_recall.recall_result)
+    SELECT r.score, r.concept FROM unnest(ARRAY[...]) AS r(pg_ghola.recall_result)
       -> fields individually selectable from composite
 
   ERRORS:
-    - Type not found in pg_recall schema -> pgrx registration is incorrect
+    - Type not found in pg_ghola schema -> pgrx registration is incorrect
     - Field count mismatch on cast -> type definition does not match DATA spec
 
   READS:
@@ -181,10 +181,10 @@ FUNCTION: implement_scoring_primitives() -> four SQL-callable scoring functions
     - bayesian_update(prior float, evidence float) returns posterior with
       Laplace smoothing: result = 0.95 * (prior*ev / max(prior*ev + (1-prior)*(1-ev), 1e-9)) + 0.025
     - bayesian_update result is always in [0.025, 0.975], never reaching 0 or 1
-    - All four functions are immutable and parallel_safe in the pg_recall schema
+    - All four functions are immutable and parallel_safe in the pg_ghola schema
 
   DONE_WHEN:
-    - All four functions callable from SQL in the pg_recall schema
+    - All four functions callable from SQL in the pg_ghola schema
     - Reference values match within reasonable floating-point tolerance
     - Functions marked immutable and parallel_safe
 
@@ -223,7 +223,7 @@ FUNCTION: implement_scoring_primitives() -> four SQL-callable scoring functions
 
 FUNCTION: create_extension_schema() -> tables, indexes, constraints
 
-  Define the schema objects that CREATE EXTENSION pg_recall produces. Tables,
+  Define the schema objects that CREATE EXTENSION pg_ghola produces. Tables,
   indexes, and constraints are declared via pgrx extension_sql! or
   extension_sql_file! macros so they are registered in the extension's
   generated install script.
@@ -250,22 +250,22 @@ FUNCTION: create_extension_schema() -> tables, indexes, constraints
     - Embedding dimension hardcoded to 384 for v0.1
 
   DONE_WHEN:
-    - All three tables exist in pg_recall schema after CREATE EXTENSION
+    - All three tables exist in pg_ghola schema after CREATE EXTENSION
     - CHECK constraint on associations rejects src_id >= dst_id
     - CHECK constraint on mnemes.state rejects values outside active/archived/dormant
     - search_vector auto-populates when concept or content is inserted or updated
     - All four indexes are present
 
   EXAMPLES:
-    CREATE EXTENSION pg_recall (pgvector already installed)
-      -> all three tables visible in pg_recall schema
-    INSERT INTO pg_recall.mnemes with concept='k8s' and content='pod scheduling'
+    CREATE EXTENSION pg_ghola (pgvector already installed)
+      -> all three tables visible in pg_ghola schema
+    INSERT INTO pg_ghola.mnemes with concept='k8s' and content='pod scheduling'
       -> search_vector column auto-populated with weighted tsvector
-    INSERT INTO pg_recall.associations with src_id >= dst_id
+    INSERT INTO pg_ghola.associations with src_id >= dst_id
       -> CHECK violation error, rejected
-    INSERT INTO pg_recall.mnemes with state='invalid'
+    INSERT INTO pg_ghola.mnemes with state='invalid'
       -> CHECK violation error, rejected
-    INSERT INTO pg_recall.mnemes with state='dormant'
+    INSERT INTO pg_ghola.mnemes with state='dormant'
       -> succeeds, valid state value
 
   ERRORS:
@@ -321,7 +321,7 @@ FUNCTION: implement_hebbian_helpers() -> six SQL-callable Hebbian and confidence
       until the queue is drained and returns total rows processed
 
   DONE_WHEN:
-    - All six functions callable from SQL in the pg_recall schema
+    - All six functions callable from SQL in the pg_ghola schema
     - Co-activation events flow from queue to association weight updates
     - Access tracking (access_count, last_access) updates on batch processing
     - Queue rows are deleted after successful processing
@@ -382,11 +382,11 @@ FUNCTION: implement_composite_recall() -> SQL-callable recall function
   confidence into a single ranked result set.
 
   The SQL signature is:
-    pg_recall.recall(workspace_id uuid, query_text text,
+    pg_ghola.recall(workspace_id uuid, query_text text,
       query_embedding vector(384), limit_n int DEFAULT 10,
       min_confidence float DEFAULT 0.0,
-      weights pg_recall.score_weights DEFAULT NULL)
-    RETURNS SETOF pg_recall.recall_result
+      weights pg_ghola.score_weights DEFAULT NULL)
+    RETURNS SETOF pg_ghola.recall_result
 
   RULES:
     - Candidate pool is the union of HNSW nearest neighbors and FTS ts_rank
@@ -411,7 +411,7 @@ FUNCTION: implement_composite_recall() -> SQL-callable recall function
       semantic=0.6, fts=0.4, actr_decay=0.5, hebbian_scale=4.0
 
   DONE_WHEN:
-    - recall() callable from SQL, returns SETOF pg_recall.recall_result
+    - recall() callable from SQL, returns SETOF pg_ghola.recall_result
     - Ranking reflects all five scoring signals
     - Co-activation event enqueued after each recall
     - Workspace and confidence filtering behave correctly
@@ -427,10 +427,10 @@ FUNCTION: implement_composite_recall() -> SQL-callable recall function
       -> only mnemes with confidence >= 0.7 included, others excluded even if
          semantically similar
 
-    recall('ws1', 'query', embedding, 10, 0.0, (0.8, 0.2, 0.5, 2.0)::pg_recall.score_weights)
+    recall('ws1', 'query', embedding, 10, 0.0, (0.8, 0.2, 0.5, 2.0)::pg_ghola.score_weights)
       -> custom weights applied: heavier semantic, lighter FTS, reduced hebbian scale
 
-    recall('ws1', 'query', embedding, 10, 0.0, (0.6, 0.4, 0.8, 4.0)::pg_recall.score_weights)
+    recall('ws1', 'query', embedding, 10, 0.0, (0.6, 0.4, 0.8, 4.0)::pg_ghola.score_weights)
       -> actr_decay=0.8 causes faster temporal decay than default 0.5,
          older mnemes score lower relative to recent ones
 
@@ -468,7 +468,7 @@ FUNCTION: integrate_and_package() -> releasable extension
   coherent, installable extension and verify end-to-end behavior.
 
   RULES:
-    - CREATE EXTENSION vector followed by CREATE EXTENSION pg_recall
+    - CREATE EXTENSION vector followed by CREATE EXTENSION pg_ghola
       succeeds on a clean database
     - All SQL-visible functions, types, and tables are accessible after install
     - End-to-end flow works: insert mnemes with embeddings, call recall(),
@@ -485,8 +485,8 @@ FUNCTION: integrate_and_package() -> releasable extension
     - No compilation warnings from pgrx
 
   EXAMPLES:
-    Fresh database: CREATE EXTENSION vector; CREATE EXTENSION pg_recall;
-      -> all pg_recall schema objects visible, no errors
+    Fresh database: CREATE EXTENSION vector; CREATE EXTENSION pg_ghola;
+      -> all pg_ghola schema objects visible, no errors
 
     Insert 3 mnemes, call recall() with a related query
       -> ranked results returned with scores, content_match, activation,
@@ -501,7 +501,7 @@ FUNCTION: integrate_and_package() -> releasable extension
          demonstrating the learn-from-usage feedback loop
 
   ERRORS:
-    - pgvector not installed -> CREATE EXTENSION pg_recall fails with clear dependency message
+    - pgvector not installed -> CREATE EXTENSION pg_ghola fails with clear dependency message
     - Rust function signature does not match SQL expectation -> compilation error
     - any unhandled condition -> fail with descriptive message
 

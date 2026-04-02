@@ -1,8 +1,8 @@
-// pg_recall::hebbian — Hebbian learning and confidence functions
+// pg_ghola::hebbian — Hebbian learning and confidence functions
 //
 // Implements record_co_activation, get_associations, update_confidence,
 // confirm_recall, process_co_activation_batch, process_all_pending_co_activations.
-// The control file's schema directive places all objects in pg_recall automatically.
+// The control file's schema directive places all objects in pg_ghola automatically.
 //
 // Owned by: implement_hebbian_helpers task
 
@@ -13,7 +13,7 @@ use crate::scoring::bayesian_update_inner;
 /// Insert a co-activation event into the queue.
 ///
 /// Validates that mneme_ids and scores arrays have the same length,
-/// then inserts a single row into pg_recall.co_activation_queue.
+/// then inserts a single row into pg_ghola.co_activation_queue.
 #[pg_extern]
 fn record_co_activation(
     workspace_id: pgrx::Uuid,
@@ -32,7 +32,7 @@ fn record_co_activation(
     let scores_literal = float_array_literal(&scores);
 
     Spi::run(&format!(
-        "INSERT INTO pg_recall.co_activation_queue (workspace_id, mneme_ids, scores) \
+        "INSERT INTO pg_ghola.co_activation_queue (workspace_id, mneme_ids, scores) \
          VALUES ('{workspace_id}', {ids_literal}, {scores_literal})"
     ))
     .expect("failed to insert co-activation event");
@@ -51,10 +51,10 @@ fn get_associations(
     let results = Spi::connect(|client| {
         let query = format!(
             "SELECT related_id, weight FROM ( \
-                SELECT dst_id AS related_id, weight FROM pg_recall.associations \
+                SELECT dst_id AS related_id, weight FROM pg_ghola.associations \
                 WHERE src_id = '{mneme_id}' AND weight >= {min_weight} \
                 UNION ALL \
-                SELECT src_id AS related_id, weight FROM pg_recall.associations \
+                SELECT src_id AS related_id, weight FROM pg_ghola.associations \
                 WHERE dst_id = '{mneme_id}' AND weight >= {min_weight} \
             ) sub \
             ORDER BY weight DESC"
@@ -91,7 +91,7 @@ fn update_confidence(mneme_id: pgrx::Uuid, evidence: f64) -> f64 {
         let tup_table = client
             .select(
                 &format!(
-                    "SELECT confidence, tier FROM pg_recall.mnemes WHERE id = '{mneme_id}' FOR UPDATE"
+                    "SELECT confidence, tier FROM pg_ghola.mnemes WHERE id = '{mneme_id}' FOR UPDATE"
                 ),
                 None,
                 &[],
@@ -120,7 +120,7 @@ fn update_confidence(mneme_id: pgrx::Uuid, evidence: f64) -> f64 {
                 client
                     .update(
                         &format!(
-                            "UPDATE pg_recall.mnemes SET confidence = {clamped} WHERE id = '{mneme_id}'"
+                            "UPDATE pg_ghola.mnemes SET confidence = {clamped} WHERE id = '{mneme_id}'"
                         ),
                         None,
                         &[],
@@ -150,7 +150,7 @@ fn confirm_recall(mneme_ids: Vec<pgrx::Uuid>) -> &'static str {
             let tup_table = client
                 .select(
                     &format!(
-                        "SELECT confidence, tier FROM pg_recall.mnemes WHERE id = '{id}' FOR UPDATE"
+                        "SELECT confidence, tier FROM pg_ghola.mnemes WHERE id = '{id}' FOR UPDATE"
                     ),
                     None,
                     &[],
@@ -179,7 +179,7 @@ fn confirm_recall(mneme_ids: Vec<pgrx::Uuid>) -> &'static str {
                     client
                         .update(
                             &format!(
-                                "UPDATE pg_recall.mnemes SET confidence = {clamped} WHERE id = '{id}'"
+                                "UPDATE pg_ghola.mnemes SET confidence = {clamped} WHERE id = '{id}'"
                             ),
                             None,
                             &[],
@@ -209,7 +209,7 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
         let rows = client
             .select(
                 &format!(
-                    "SELECT id, mneme_ids, scores FROM pg_recall.co_activation_queue \
+                    "SELECT id, mneme_ids, scores FROM pg_ghola.co_activation_queue \
                      ORDER BY id LIMIT {batch_limit}"
                 ),
                 None,
@@ -269,7 +269,7 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
             let rows = client
                 .select(
                     &format!(
-                        "SELECT id::text FROM pg_recall.mnemes \
+                        "SELECT id::text FROM pg_ghola.mnemes \
                          WHERE id IN ({id_list}) AND tier = 'state'"
                     ),
                     None,
@@ -322,13 +322,13 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
             client
                 .update(
                     &format!(
-                        "INSERT INTO pg_recall.associations (src_id, dst_id, association_type, weight, co_activations, updated_at) \
+                        "INSERT INTO pg_ghola.associations (src_id, dst_id, association_type, weight, co_activations, updated_at) \
                          VALUES ('{src}', '{dst}', 'hebbian', \
                              LEAST(1.0, EXP(LN(0.01) + {signal} * LN(1.01))), \
                              1, now()) \
                          ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
-                             weight = LEAST(1.0, EXP(LN(pg_recall.associations.weight) + {signal} * LN(1.01))), \
-                             co_activations = pg_recall.associations.co_activations + 1, \
+                             weight = LEAST(1.0, EXP(LN(pg_ghola.associations.weight) + {signal} * LN(1.01))), \
+                             co_activations = pg_ghola.associations.co_activations + 1, \
                              updated_at = now()"
                     ),
                     None,
@@ -342,7 +342,7 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
             client
                 .update(
                     &format!(
-                        "UPDATE pg_recall.mnemes SET access_count = access_count + 1, \
+                        "UPDATE pg_ghola.mnemes SET access_count = access_count + 1, \
                          last_access = now() WHERE id = '{mid}'"
                     ),
                     None,
@@ -355,7 +355,7 @@ fn process_co_activation_batch(batch_limit: default!(i32, 100)) -> i64 {
         for qid in &consumed_ids {
             client
                 .update(
-                    &format!("DELETE FROM pg_recall.co_activation_queue WHERE id = {qid}"),
+                    &format!("DELETE FROM pg_ghola.co_activation_queue WHERE id = {qid}"),
                     None,
                     &[],
                 )
@@ -373,7 +373,7 @@ fn process_all_pending_co_activations() -> i64 {
     let mut total: i64 = 0;
     loop {
         let processed = Spi::get_one::<i64>(
-            "SELECT pg_recall.process_co_activation_batch(100)",
+            "SELECT pg_ghola.process_co_activation_batch(100)",
         )
         .expect("failed to call process_co_activation_batch")
         .unwrap_or(0);
@@ -431,7 +431,7 @@ mod tests {
         let elements = vec![format!("{fill_val}"); 768];
         let vec_literal = format!("[{}]", elements.join(","));
         Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_recall.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws_id}', '{concept}', '{content}', \
              '{vec_literal}'::vector(768)) \
              RETURNING id::text"
@@ -447,7 +447,7 @@ mod tests {
         let (ws_id, m1, m2, m3) = setup_test_mnemes();
 
         let result = Spi::get_one::<&str>(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}','{m3}']::uuid[], \
                 ARRAY[0.9, 0.7, 0.5]::float8[])"
@@ -457,7 +457,7 @@ mod tests {
 
         assert_eq!(result, "ok");
 
-        let count = Spi::get_one::<i64>("SELECT count(*) FROM pg_recall.co_activation_queue")
+        let count = Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
             .expect("count failed")
             .expect("null count");
 
@@ -470,7 +470,7 @@ mod tests {
         let (ws_id, m1, m2, ..) = setup_test_mnemes();
 
         Spi::get_one::<&str>(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}']::uuid[], \
                 ARRAY[0.9]::float8[])"
@@ -485,7 +485,7 @@ mod tests {
         let (_ws_id, m1, ..) = setup_test_mnemes();
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.get_associations('{m1}'::uuid, 0.01)"
+            "SELECT count(*) FROM pg_ghola.get_associations('{m1}'::uuid, 0.01)"
         ))
         .expect("query failed")
         .expect("null count");
@@ -499,21 +499,21 @@ mod tests {
 
         // Insert associations with canonical ordering
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m2}'::uuid), 0.5"
         ))
         .expect("insert assoc 1 failed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m3}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m3}'::uuid), 0.3"
         ))
         .expect("insert assoc 2 failed");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.get_associations('{m1}'::uuid, 0.01)"
+            "SELECT count(*) FROM pg_ghola.get_associations('{m1}'::uuid, 0.01)"
         ))
         .expect("query failed")
         .expect("null count");
@@ -526,14 +526,14 @@ mod tests {
         let (_ws_id, m1, m2, m3) = setup_test_mnemes();
 
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m2}'::uuid), 0.5"
         ))
         .expect("insert assoc failed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m3}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m3}'::uuid), 0.1"
         ))
@@ -541,7 +541,7 @@ mod tests {
 
         // min_weight=0.3 should only return the 0.5 association
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.get_associations('{m1}'::uuid, 0.3)"
+            "SELECT count(*) FROM pg_ghola.get_associations('{m1}'::uuid, 0.3)"
         ))
         .expect("query failed")
         .expect("null count");
@@ -554,21 +554,21 @@ mod tests {
         let (_ws_id, m1, m2, m3) = setup_test_mnemes();
 
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m2}'::uuid), 0.3"
         ))
         .expect("insert assoc failed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m3}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m3}'::uuid), 0.7"
         ))
         .expect("insert assoc failed");
 
         let first_weight = Spi::get_one::<f64>(&format!(
-            "SELECT weight FROM pg_recall.get_associations('{m1}'::uuid, 0.01) LIMIT 1"
+            "SELECT weight FROM pg_ghola.get_associations('{m1}'::uuid, 0.01) LIMIT 1"
         ))
         .expect("query failed")
         .expect("null weight");
@@ -587,7 +587,7 @@ mod tests {
 
         // Default confidence is 0.5, apply strong evidence
         let new_conf = Spi::get_one::<f64>(&format!(
-            "SELECT pg_recall.update_confidence('{m1}'::uuid, 0.95)"
+            "SELECT pg_ghola.update_confidence('{m1}'::uuid, 0.95)"
         ))
         .expect("query failed")
         .expect("null result");
@@ -599,7 +599,7 @@ mod tests {
 
         // Verify it's persisted
         let stored = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_recall.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null result");
@@ -616,12 +616,12 @@ mod tests {
 
         // Set initial confidence to 0.8
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET confidence = 0.8 WHERE id = '{m1}'::uuid"
+            "UPDATE pg_ghola.mnemes SET confidence = 0.8 WHERE id = '{m1}'::uuid"
         ))
         .expect("update failed");
 
         let new_conf = Spi::get_one::<f64>(&format!(
-            "SELECT pg_recall.update_confidence('{m1}'::uuid, 0.10)"
+            "SELECT pg_ghola.update_confidence('{m1}'::uuid, 0.10)"
         ))
         .expect("query failed")
         .expect("null result");
@@ -637,7 +637,7 @@ mod tests {
     fn test_update_confidence_nonexistent() {
         setup_test_mnemes(); // ensure tables exist
         Spi::get_one::<f64>(
-            "SELECT pg_recall.update_confidence(\
+            "SELECT pg_ghola.update_confidence(\
                 '99999999-9999-9999-9999-999999999999'::uuid, 0.5)"
         )
         .expect("query failed");
@@ -650,7 +650,7 @@ mod tests {
         let (_ws_id, m1, m2, m3) = setup_test_mnemes();
 
         Spi::run(&format!(
-            "SELECT pg_recall.confirm_recall(ARRAY['{m1}','{m2}','{m3}']::uuid[])"
+            "SELECT pg_ghola.confirm_recall(ARRAY['{m1}','{m2}','{m3}']::uuid[])"
         ))
         .expect("confirm_recall failed");
 
@@ -658,7 +658,7 @@ mod tests {
         // bayesian_update(0.5, 0.95) ≈ 0.925
         for mid in &[&m1, &m2, &m3] {
             let conf = Spi::get_one::<f64>(&format!(
-                "SELECT confidence FROM pg_recall.mnemes WHERE id = '{mid}'::uuid"
+                "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{mid}'::uuid"
             ))
             .expect("query failed")
             .expect("null confidence");
@@ -678,14 +678,14 @@ mod tests {
 
         // Set mneme to core tier with moderate confidence
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET tier = 'core', confidence = 0.5 WHERE id = '{m1}'::uuid"
+            "UPDATE pg_ghola.mnemes SET tier = 'core', confidence = 0.5 WHERE id = '{m1}'::uuid"
         ))
         .expect("update failed");
 
         // Apply very weak evidence — bayesian_update(0.5, 0.05) ≈ 0.072
         // But core floor is 0.30, so result should be clamped to 0.30
         let new_conf = Spi::get_one::<f64>(&format!(
-            "SELECT pg_recall.update_confidence('{m1}'::uuid, 0.05)"
+            "SELECT pg_ghola.update_confidence('{m1}'::uuid, 0.05)"
         ))
         .expect("query failed")
         .expect("null result");
@@ -704,7 +704,7 @@ mod tests {
         // Apply weak evidence — bayesian_update(0.5, 0.05) ≈ 0.072
         // Index floor is 0.025, so no clamping
         let new_conf = Spi::get_one::<f64>(&format!(
-            "SELECT pg_recall.update_confidence('{m1}'::uuid, 0.05)"
+            "SELECT pg_ghola.update_confidence('{m1}'::uuid, 0.05)"
         ))
         .expect("query failed")
         .expect("null result");
@@ -726,7 +726,7 @@ mod tests {
         setup_test_mnemes(); // ensure tables exist
 
         let processed = Spi::get_one::<i64>(
-            "SELECT pg_recall.process_co_activation_batch(100)",
+            "SELECT pg_ghola.process_co_activation_batch(100)",
         )
         .expect("query failed")
         .expect("null result");
@@ -740,7 +740,7 @@ mod tests {
 
         // Enqueue a co-activation event
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}','{m3}']::uuid[], \
                 ARRAY[0.9, 0.7, 0.5]::float8[])"
@@ -748,7 +748,7 @@ mod tests {
         .expect("record failed");
 
         let processed = Spi::get_one::<i64>(
-            "SELECT pg_recall.process_co_activation_batch(100)",
+            "SELECT pg_ghola.process_co_activation_batch(100)",
         )
         .expect("query failed")
         .expect("null result");
@@ -757,7 +757,7 @@ mod tests {
 
         // Should have 3 associations: (m1,m2), (m1,m3), (m2,m3)
         let assoc_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_recall.associations")
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.associations")
                 .expect("query failed")
                 .expect("null count");
 
@@ -765,7 +765,7 @@ mod tests {
 
         // Queue should be empty now
         let queue_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_recall.co_activation_queue")
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
                 .expect("query failed")
                 .expect("null count");
 
@@ -778,7 +778,7 @@ mod tests {
 
         // Record initial access_count
         let initial_count = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT access_count FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -787,19 +787,19 @@ mod tests {
 
         // Enqueue and process
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}']::uuid[], \
                 ARRAY[0.9, 0.7]::float8[])"
         ))
         .expect("record failed");
 
-        Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+        Spi::run("SELECT pg_ghola.process_co_activation_batch(100)")
             .expect("process failed");
 
         // access_count should be incremented
         let new_count = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_recall.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT access_count FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -813,33 +813,33 @@ mod tests {
 
         // Process first co-activation
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}']::uuid[], \
                 ARRAY[0.9, 0.7]::float8[])"
         ))
         .expect("record failed");
 
-        Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+        Spi::run("SELECT pg_ghola.process_co_activation_batch(100)")
             .expect("process failed");
 
-        let weight1 = Spi::get_one::<f64>("SELECT weight FROM pg_recall.associations LIMIT 1")
+        let weight1 = Spi::get_one::<f64>("SELECT weight FROM pg_ghola.associations LIMIT 1")
             .expect("query failed")
             .expect("null weight");
 
         // Process second co-activation for same pair
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}']::uuid[], \
                 ARRAY[0.9, 0.7]::float8[])"
         ))
         .expect("record failed");
 
-        Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+        Spi::run("SELECT pg_ghola.process_co_activation_batch(100)")
             .expect("process failed");
 
-        let weight2 = Spi::get_one::<f64>("SELECT weight FROM pg_recall.associations LIMIT 1")
+        let weight2 = Spi::get_one::<f64>("SELECT weight FROM pg_ghola.associations LIMIT 1")
             .expect("query failed")
             .expect("null weight");
 
@@ -855,17 +855,17 @@ mod tests {
 
         // Process a co-activation for a new pair
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}']::uuid[], \
                 ARRAY[0.9, 0.7]::float8[])"
         ))
         .expect("record failed");
 
-        Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+        Spi::run("SELECT pg_ghola.process_co_activation_batch(100)")
             .expect("process failed");
 
-        let weight = Spi::get_one::<f64>("SELECT weight FROM pg_recall.associations LIMIT 1")
+        let weight = Spi::get_one::<f64>("SELECT weight FROM pg_ghola.associations LIMIT 1")
             .expect("query failed")
             .expect("null weight");
 
@@ -886,7 +886,7 @@ mod tests {
         // Enqueue multiple events
         for _ in 0..5 {
             Spi::run(&format!(
-                "SELECT pg_recall.record_co_activation(\
+                "SELECT pg_ghola.record_co_activation(\
                     '{ws_id}'::uuid, \
                     ARRAY['{m1}','{m2}','{m3}']::uuid[], \
                     ARRAY[0.9, 0.7, 0.5]::float8[])"
@@ -895,7 +895,7 @@ mod tests {
         }
 
         let total = Spi::get_one::<i64>(
-            "SELECT pg_recall.process_all_pending_co_activations()",
+            "SELECT pg_ghola.process_all_pending_co_activations()",
         )
         .expect("query failed")
         .expect("null result");
@@ -904,7 +904,7 @@ mod tests {
 
         // Queue should be empty
         let remaining =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_recall.co_activation_queue")
+            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
                 .expect("query failed")
                 .expect("null count");
 
@@ -916,7 +916,7 @@ mod tests {
         setup_test_mnemes(); // ensure tables exist
 
         let total = Spi::get_one::<i64>(
-            "SELECT pg_recall.process_all_pending_co_activations()",
+            "SELECT pg_ghola.process_all_pending_co_activations()",
         )
         .expect("query failed")
         .expect("null result");
@@ -938,7 +938,7 @@ mod tests {
             (&m2, &m1)
         };
         Spi::run(&format!(
-            "INSERT INTO pg_recall.associations (src_id, dst_id, weight, co_activations) \
+            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight, co_activations) \
              VALUES ('{src}'::uuid, '{dst}'::uuid, 0.99, 100)"
         ))
         .expect("insert failed");
@@ -947,15 +947,15 @@ mod tests {
         // weight = LEAST(1.0, exp(ln(0.99) + 0.81 * ln(1.01))) ≈ LEAST(1.0, 0.998)
         // Even with many rounds, it should never exceed 1.0
         Spi::run(&format!(
-            "INSERT INTO pg_recall.co_activation_queue (workspace_id, mneme_ids, scores) \
+            "INSERT INTO pg_ghola.co_activation_queue (workspace_id, mneme_ids, scores) \
              VALUES (gen_random_uuid(), ARRAY['{src}','{dst}']::uuid[], ARRAY[0.99, 0.99]::float8[])"
         ))
         .expect("enqueue failed");
-        Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+        Spi::run("SELECT pg_ghola.process_co_activation_batch(100)")
             .expect("process failed");
 
         let weight = Spi::get_one::<f64>(
-            "SELECT weight FROM pg_recall.associations LIMIT 1",
+            "SELECT weight FROM pg_ghola.associations LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
@@ -979,18 +979,18 @@ mod tests {
         // Process 3 co-activation events for the same pair
         for _ in 0..3 {
             Spi::run(&format!(
-                "SELECT pg_recall.record_co_activation(\
+                "SELECT pg_ghola.record_co_activation(\
                     '{ws_id}'::uuid, \
                     ARRAY['{m1}','{m2}']::uuid[], \
                     ARRAY[0.8, 0.7]::float8[])"
             ))
             .expect("record failed");
-            Spi::run("SELECT pg_recall.process_co_activation_batch(100)")
+            Spi::run("SELECT pg_ghola.process_co_activation_batch(100)")
                 .expect("process failed");
         }
 
         let co_acts = Spi::get_one::<i32>(
-            "SELECT co_activations FROM pg_recall.associations LIMIT 1",
+            "SELECT co_activations FROM pg_ghola.associations LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
@@ -1011,7 +1011,7 @@ mod tests {
         // Weak pair:   scores [0.1, 0.1] → signal = 0.01
         // Process one event with m1,m2 at high scores and m1,m3 at low scores
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}']::uuid[], \
                 ARRAY[0.9, 0.9]::float8[])"
@@ -1019,19 +1019,19 @@ mod tests {
         .expect("record failed");
 
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m3}']::uuid[], \
                 ARRAY[0.1, 0.1]::float8[])"
         ))
         .expect("record failed");
 
-        Spi::run("SELECT pg_recall.process_all_pending_co_activations()")
+        Spi::run("SELECT pg_ghola.process_all_pending_co_activations()")
             .expect("process failed");
 
         // Get both association weights
         let strong_weight = Spi::get_one::<f64>(&format!(
-            "SELECT weight FROM pg_recall.associations \
+            "SELECT weight FROM pg_ghola.associations \
              WHERE (src_id = LEAST('{m1}'::uuid, '{m2}'::uuid) \
                 AND dst_id = GREATEST('{m1}'::uuid, '{m2}'::uuid))"
         ))
@@ -1039,7 +1039,7 @@ mod tests {
         .expect("null");
 
         let weak_weight = Spi::get_one::<f64>(&format!(
-            "SELECT weight FROM pg_recall.associations \
+            "SELECT weight FROM pg_ghola.associations \
              WHERE (src_id = LEAST('{m1}'::uuid, '{m3}'::uuid) \
                 AND dst_id = GREATEST('{m1}'::uuid, '{m3}'::uuid))"
         ))
@@ -1061,25 +1061,25 @@ mod tests {
 
         // Mark m2 as state-tier
         Spi::run(&format!(
-            "UPDATE pg_recall.mnemes SET tier = 'state' WHERE id = '{m2}'::uuid"
+            "UPDATE pg_ghola.mnemes SET tier = 'state' WHERE id = '{m2}'::uuid"
         ))
         .expect("update failed");
 
         // Co-activate all three
         Spi::run(&format!(
-            "SELECT pg_recall.record_co_activation(\
+            "SELECT pg_ghola.record_co_activation(\
                 '{ws_id}'::uuid, \
                 ARRAY['{m1}','{m2}','{m3}']::uuid[], \
                 ARRAY[0.8, 0.8, 0.8]::float8[])"
         ))
         .expect("record failed");
 
-        Spi::run("SELECT pg_recall.process_all_pending_co_activations()")
+        Spi::run("SELECT pg_ghola.process_all_pending_co_activations()")
             .expect("process failed");
 
         // m1-m3 association should exist (both non-state)
         let m1_m3 = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.associations \
+            "SELECT count(*) FROM pg_ghola.associations \
              WHERE src_id = LEAST('{m1}'::uuid, '{m3}'::uuid) \
                AND dst_id = GREATEST('{m1}'::uuid, '{m3}'::uuid) \
                AND association_type = 'hebbian'"
@@ -1091,7 +1091,7 @@ mod tests {
 
         // m1-m2 and m2-m3 associations should NOT exist (m2 is state-tier)
         let m1_m2 = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.associations \
+            "SELECT count(*) FROM pg_ghola.associations \
              WHERE src_id = LEAST('{m1}'::uuid, '{m2}'::uuid) \
                AND dst_id = GREATEST('{m1}'::uuid, '{m2}'::uuid) \
                AND association_type = 'hebbian'"
@@ -1102,7 +1102,7 @@ mod tests {
         assert_eq!(m1_m2, 0, "state-tier m2 should be excluded from Hebbian pairs");
 
         let m2_m3 = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_recall.associations \
+            "SELECT count(*) FROM pg_ghola.associations \
              WHERE src_id = LEAST('{m2}'::uuid, '{m3}'::uuid) \
                AND dst_id = GREATEST('{m2}'::uuid, '{m3}'::uuid) \
                AND association_type = 'hebbian'"

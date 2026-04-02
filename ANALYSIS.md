@@ -1,8 +1,8 @@
-# pg_recall: A Deep Exploration
+# pg_ghola: A Deep Exploration
 
 ## 1. Project Purpose and Overview
 
-**pg_recall** is a PostgreSQL extension that implements neuroscience-inspired memory primitives using Rust and pgrx. It treats a relational database as a cognitive memory system rather than just static storage, modeling how memories decay with time, strengthen through use, form associations automatically through co-activation, and track confidence via Bayesian updating.
+**pg_ghola** is a PostgreSQL extension that implements neuroscience-inspired memory primitives using Rust and pgrx. It treats a relational database as a cognitive memory system rather than just static storage, modeling how memories decay with time, strengthen through use, form associations automatically through co-activation, and track confidence via Bayesian updating.
 
 The extension brings four established cognitive models from psychology research into Postgres:
 - **ACT-R** (Adaptive Control of Thought–Rational): Models memory activation based on frequency and recency
@@ -20,16 +20,16 @@ The extension brings four established cognitive models from psychology research 
 
 **Extension Model:**
 - Pure extension (compiled .so library loaded by Postgres, no separate services)
-- All objects in `pg_recall` schema
+- All objects in `pg_ghola` schema
 - Version 0.1.0
 - Requires pgvector as a dependency (declared in .control file)
 - Multi-tenant by design (all tables include workspace_id for isolation)
 
 **Project Structure:**
 ```
-/Users/bran/code/pg_recall/
+/Users/bran/code/pg_ghola/
 ├── Cargo.toml                      # Rust manifest with pgrx dependencies
-├── pg_recall.control               # PostgreSQL control file (schema, version, requires)
+├── pg_ghola.control               # PostgreSQL control file (schema, version, requires)
 ├── README.md                        # User-facing documentation
 ├── spec.simplex                     # Orchestration specification
 ├── PLEXUS_REPORT.md               # Build report showing 7-agent parallel development
@@ -44,7 +44,7 @@ The extension brings four established cognitive models from psychology research 
     ├── recall.rs                   # Main recall() function - composite retrieval engine
     ├── hebbian.rs                  # Association learning and confidence management
     ├── integration_tests.rs        # End-to-end test suite
-    └── bin/pgrx_embed_pg_recall.rs # Binary embedding
+    └── bin/pgrx_embed_pg_ghola.rs # Binary embedding
 ```
 
 ## 3. Directory Structure and Module Responsibilities
@@ -65,7 +65,7 @@ The extension brings four established cognitive models from psychology research 
 **SQL Composite Types (defined in types.rs):**
 
 ```sql
-CREATE TYPE pg_recall.recall_result AS (
+CREATE TYPE pg_ghola.recall_result AS (
     mneme_id      uuid,           -- Memory identifier
     score         float8,         -- Final composite score
     content_match float8,         -- Vector + FTS fusion
@@ -76,7 +76,7 @@ CREATE TYPE pg_recall.recall_result AS (
     content       text            -- Full memory content
 );
 
-CREATE TYPE pg_recall.score_weights AS (
+CREATE TYPE pg_ghola.score_weights AS (
     semantic      float8,         -- Weight for vector similarity (default 0.6)
     fts           float8,         -- Weight for full-text search (default 0.4)
     actr_decay    float8,         -- ACT-R decay exponent d (default 0.5)
@@ -172,7 +172,7 @@ These can be called independently or composed into custom retrieval pipelines.
 
 ```toml
 [package]
-name = "pg_recall"
+name = "pg_ghola"
 version = "0.1.0"
 edition = "2021"
 
@@ -204,17 +204,17 @@ cargo pgrx install --release
 
 # In PostgreSQL:
 CREATE EXTENSION vector;
-CREATE EXTENSION pg_recall;
+CREATE EXTENSION pg_ghola;
 ```
 
-**Extension Control File (pg_recall.control):**
+**Extension Control File (pg_ghola.control):**
 ```
-comment = 'pg_recall: Cognitive Memory Primitives for Postgres'
+comment = 'pg_ghola: Cognitive Memory Primitives for Postgres'
 default_version = '0.1.0'
-module_pathname = '$libdir/pg_recall'
+module_pathname = '$libdir/pg_ghola'
 relocatable = false
 superuser = true
-schema = 'pg_recall'
+schema = 'pg_ghola'
 requires = 'vector'
 ```
 
@@ -234,7 +234,7 @@ requires = 'vector'
 - ebbinghaus_decay: high stability, crammed spacing, retention floor, recent access
 
 **Schema Tests (schema.rs):**
-- Table existence in pg_recall schema
+- Table existence in pg_ghola schema
 - Search vector auto-generation from concept + content
 - State check constraint validation
 - Association canonical ordering (src < dst)
@@ -326,8 +326,8 @@ Public `recall()` is a thin SQL wrapper around internal `recall_inner()` Rust fu
 **10. Workspace Isolation Without Enforcement**
 Extension design allows per-workspace Row-Level Security policies:
 ```sql
-ALTER TABLE pg_recall.mnemes ENABLE ROW LEVEL SECURITY;
-CREATE POLICY workspace_isolation ON pg_recall.mnemes
+ALTER TABLE pg_ghola.mnemes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY workspace_isolation ON pg_ghola.mnemes
     USING (workspace_id = current_setting('app.workspace_id')::uuid);
 ```
 
@@ -371,4 +371,4 @@ The project was built using a parallel agent orchestration system (Plexus) that 
 
 ## Summary
 
-**pg_recall** is a production-grade cognitive memory system built into PostgreSQL, bringing neuroscience-inspired algorithms (ACT-R, Hebbian, Ebbinghaus, Bayesian) to bear on the problem of intelligent memory retrieval. It fuses vector similarity, full-text search, temporal activation, associative context, and confidence tracking into a single ranked result set. The extension is lightweight, durable (no external services), multi-tenant by design, and fully composable — users can call individual scoring functions or use the high-level `recall()` interface. With comprehensive test coverage (~80+ test cases), it represents a sophisticated but pragmatic implementation of cognitive principles in a relational database.
+**pg_ghola** is a production-grade cognitive memory system built into PostgreSQL, bringing neuroscience-inspired algorithms (ACT-R, Hebbian, Ebbinghaus, Bayesian) to bear on the problem of intelligent memory retrieval. It fuses vector similarity, full-text search, temporal activation, associative context, and confidence tracking into a single ranked result set. The extension is lightweight, durable (no external services), multi-tenant by design, and fully composable — users can call individual scoring functions or use the high-level `recall()` interface. With comprehensive test coverage (~80+ test cases), it represents a sophisticated but pragmatic implementation of cognitive principles in a relational database.

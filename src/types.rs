@@ -1,12 +1,12 @@
-// pg_recall::types — Composite types for recall_result and score_weights
+// pg_ghola::types — Composite types for recall_result and score_weights
 //
 // These types are defined as SQL composite types via extension_sql! and are
-// visible in the pg_recall schema (placed there by the control file's
-// schema = 'pg_recall' directive).
+// visible in the pg_ghola schema (placed there by the control file's
+// schema = 'pg_ghola' directive).
 //
 // Downstream Rust modules import the struct definitions for internal use.
 // The SQL composite types support standard tuple casting syntax, e.g.:
-//   SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_recall.recall_result
+//   SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_ghola.recall_result
 //
 // Owned by: define_composite_types task
 
@@ -135,7 +135,7 @@ mod tests {
                     "SELECT (r).mneme_id, (r).score, (r).content_match, \
                             (r).activation, (r).hebbian_boost, (r).confidence, \
                             (r).concept, (r).content \
-                     FROM (SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_recall.recall_result AS r) sub",
+                     FROM (SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_ghola.recall_result AS r) sub",
                     None,
                     &[],
                 )
@@ -169,7 +169,7 @@ mod tests {
             let rows = client
                 .select(
                     "SELECT (w).semantic, (w).fts, (w).actr_decay, (w).hebbian_scale \
-                     FROM (SELECT (0.7, 0.3, 0.5, 4.0)::pg_recall.score_weights AS w) sub",
+                     FROM (SELECT (0.7, 0.3, 0.5, 4.0)::pg_ghola.score_weights AS w) sub",
                     None,
                     &[],
                 )

@@ -1,8 +1,8 @@
-# pg_recall v0.3 — Contradiction Detection
+# pg_ghola v0.3 — Contradiction Detection
 
 ## Context
 
-The Bayesian confidence system in pg_recall has the *mechanism* for
+The Bayesian confidence system in pg_ghola has the *mechanism* for
 handling contradictions. When `bayesian_update(prior, 0.10)` is called, confidence
 collapses rapidly — from 0.8 to 0.32 on the first contradiction, to 0.078 on the
 second. The evidence constants are well-defined:
@@ -34,7 +34,7 @@ between both pairs would be high — they share the same topic and similar langu
 
 ## Design: Detection + Flagging
 
-Given this limitation, pg_recall takes a **detection + flagging** approach rather
+Given this limitation, pg_ghola takes a **detection + flagging** approach rather
 than fully automatic resolution:
 
 1. **Detect candidates** — find existing mnemes that are semantically close to a
@@ -47,7 +47,7 @@ than fully automatic resolution:
    `bayesian_update(confidence, 0.10)` on the newer memory, using the existing
    Bayesian machinery
 
-pg_recall surfaces *what might contradict*, not *what does contradict*. The
+pg_ghola surfaces *what might contradict*, not *what does contradict*. The
 judgment call stays with the caller.
 
 ## Detection Strategy
@@ -193,7 +193,7 @@ comparisons, though HNSW indexing amortizes the vector search).
 CREATE OR REPLACE FUNCTION contradiction_check_trigger()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM pg_recall.flag_contradictions(NEW.id, 0.85);
+    PERFORM pg_ghola.flag_contradictions(NEW.id, 0.85);
     RETURN NEW;
 END;
 $$;
@@ -213,10 +213,10 @@ for every insert. For typical workloads (tens of inserts per minute), this is
 negligible. For bulk imports, disable the trigger temporarily:
 
 ```sql
-ALTER TABLE pg_recall.mnemes DISABLE TRIGGER mneme_contradiction_check;
+ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check;
 -- ... bulk inserts ...
-ALTER TABLE pg_recall.mnemes ENABLE TRIGGER mneme_contradiction_check;
-SELECT pg_recall.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
+ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check;
+SELECT pg_ghola.scan_workspace_contradictions('workspace-id'::uuid, 0.85);
 ```
 
 ## System Integration

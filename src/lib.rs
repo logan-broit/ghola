@@ -1,15 +1,15 @@
-// pg_recall: Cognitive Memory Primitives for Postgres
+// pg_ghola: Cognitive Memory Primitives for Postgres
 // A pgrx extension implementing neuroscience-inspired memory primitives.
 //
-// All extension objects are installed into the pg_recall schema via the
-// control file's `schema = 'pg_recall'` directive. We do NOT use pgrx's
-// #[pg_schema] or schema = "pg_recall" in #[pg_extern] because:
+// All extension objects are installed into the pg_ghola schema via the
+// control file's `schema = 'pg_ghola'` directive. We do NOT use pgrx's
+// #[pg_schema] or schema = "pg_ghola" in #[pg_extern] because:
 // 1. PG18 reserves pg_ prefix for system schemas (requires allow_system_table_mods)
 // 2. The control file handles schema placement automatically
 //
 // v0.2: Background worker for autonomous Hebbian processing.
-// Requires shared_preload_libraries = 'pg_recall' for the worker to start.
-// Configure target database via postgresql.conf: pg_recall.database = 'memories'
+// Requires shared_preload_libraries = 'pg_ghola' for the worker to start.
+// Configure target database via postgresql.conf: pg_ghola.database = 'memories'
 // (defaults to 'postgres' if not set)
 
 ::pgrx::pg_module_magic!();
@@ -28,14 +28,14 @@ pub mod associations;
 pub mod integration_tests;
 
 // ---------------------------------------------------------------------------
-// GUC: pg_recall.database
+// GUC: pg_ghola.database
 // ---------------------------------------------------------------------------
 
 use pgrx::prelude::*;
 use pgrx::guc::*;
 use std::ffi::CString;
 
-pub static PG_RECALL_DATABASE: GucSetting<Option<CString>> =
+pub static PG_GHOLA_DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 
 // ---------------------------------------------------------------------------
@@ -49,17 +49,17 @@ pub extern "C-unwind" fn _PG_init() {
     use std::time::Duration;
 
     GucRegistry::define_string_guc(
-        c"pg_recall.database",
-        c"Target database for the pg_recall background worker.",
+        c"pg_ghola.database",
+        c"Target database for the pg_ghola background worker.",
         c"The background worker will connect to this database for Hebbian processing.",
-        &PG_RECALL_DATABASE,
+        &PG_GHOLA_DATABASE,
         GucContext::Sighup,
         GucFlags::default(),
     );
 
-    BackgroundWorkerBuilder::new("pg_recall Hebbian Worker")
+    BackgroundWorkerBuilder::new("pg_ghola Hebbian Worker")
         .set_function("worker_main")
-        .set_library("pg_recall")
+        .set_library("pg_ghola")
         .set_argument(0i32.into_datum())
         .enable_spi_access()
         .set_start_time(BgWorkerStartTime::RecoveryFinished)

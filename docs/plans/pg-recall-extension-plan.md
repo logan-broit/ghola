@@ -1,9 +1,9 @@
-# pg_recall Extension — Merge-Optimized Implementation Plan
+# pg_ghola Extension — Merge-Optimized Implementation Plan
 
 ## Scope
 
-Build the `pg_recall` Postgres extension as a self-contained Rust/pgrx project
-that ships as `CREATE EXTENSION pg_recall`.
+Build the `pg_ghola` Postgres extension as a self-contained Rust/pgrx project
+that ships as `CREATE EXTENSION pg_ghola`.
 
 This plan is optimized for one outcome above all others: **getting work merged
 reliably**.
@@ -54,7 +54,7 @@ v0.1 ships the cognitive memory core without autonomous background execution.
   - `bayesian_update`
   - `softplus`
 - Composite retrieval:
-  - `pg_recall.recall()`
+  - `pg_ghola.recall()`
 - Hebbian helper functions:
   - `record_co_activation(workspace_id uuid, mneme_ids uuid[], scores float[])`
   - `get_associations(mneme_id uuid, min_weight float DEFAULT 0.01)`
@@ -99,11 +99,11 @@ The bootstrap task should create the final structure immediately so later tasks
 merge into existing files instead of inventing layout independently.
 
 ```text
-pg_recall/
+pg_ghola/
   Cargo.toml
-  pg_recall.control
+  pg_ghola.control
   sql/
-    pg_recall--0.1.0.sql
+    pg_ghola--0.1.0.sql
   src/
     lib.rs
     scoring.rs
@@ -130,7 +130,7 @@ placeholder public surface area.
 **Owns**:
 
 - `Cargo.toml`
-- `pg_recall.control`
+- `pg_ghola.control`
 - `src/lib.rs`
 - empty module files under `src/`
 - test file stubs under `tests/`
@@ -147,7 +147,7 @@ placeholder public surface area.
 **Done when**:
 
 - `cargo pgrx run` boots
-- `CREATE EXTENSION pg_recall` succeeds with placeholder behavior
+- `CREATE EXTENSION pg_ghola` succeeds with placeholder behavior
 - all final files already exist in the repository
 
 **Dependencies**: None. This task must finish first.
@@ -183,7 +183,7 @@ placeholder public surface area.
 
 **Done when**:
 
-- types are exposed in schema `pg_recall`
+- types are exposed in schema `pg_ghola`
 - SQL casts work
 - downstream tasks can import the Rust definitions without changing ownership
 
@@ -212,7 +212,7 @@ placeholder public surface area.
 - `softplus(x float) -> float`
   - `ln(1 + exp(x))`, overflow guard at `x > 20`
 
-All marked `#[pg_extern(immutable, parallel_safe, schema = "pg_recall")]`.
+All marked `#[pg_extern(immutable, parallel_safe, schema = "pg_ghola")]`.
 
 **Reference checks**:
 
@@ -231,17 +231,17 @@ All marked `#[pg_extern(immutable, parallel_safe, schema = "pg_recall")]`.
 
 ### 4. Schema SQL
 
-**Goal**: `CREATE EXTENSION pg_recall` produces all tables, indexes, and
+**Goal**: `CREATE EXTENSION pg_ghola` produces all tables, indexes, and
 constraints needed for v0.1.
 
 **Owns**:
 
-- `sql/pg_recall--0.1.0.sql`
+- `sql/pg_ghola--0.1.0.sql`
 - schema verification tests
 
 **Tables**:
 
-- `pg_recall.mnemes`
+- `pg_ghola.mnemes`
   - `id uuid PK`
   - `workspace_id uuid`
   - `concept text`
@@ -253,13 +253,13 @@ constraints needed for v0.1.
   - `last_access timestamptz`
   - `created_at timestamptz`
   - `state text CHECK active/archived/dormant`
-- `pg_recall.associations`
+- `pg_ghola.associations`
   - `src_id/dst_id uuid FK, PK`
   - `weight float`
   - `co_activations int`
   - `updated_at timestamptz`
   - `CHECK src_id < dst_id`
-- `pg_recall.co_activation_queue`
+- `pg_ghola.co_activation_queue`
   - `id bigserial PK`
   - `workspace_id uuid`
   - `mneme_ids uuid[]`
@@ -333,7 +333,7 @@ external scheduler later without changing the data model.
 
 ### 6. Composite Recall Function
 
-**Goal**: Implement `pg_recall.recall()` as the primary retrieval entry point.
+**Goal**: Implement `pg_ghola.recall()` as the primary retrieval entry point.
 
 **Owns**:
 
@@ -349,7 +349,7 @@ Fuses HNSW nearest neighbors and FTS `ts_rank` into a candidate pool
 2. `temporal = softplus(actr_activation + 4.0 * hebbian_boost) / (1 + softplus(0))`
 3. `score = content_match * temporal * confidence`
 
-Returns top-n as `SETOF pg_recall.recall_result`.
+Returns top-n as `SETOF pg_ghola.recall_result`.
 
 After ranking, it enqueues a co-activation event via `record_co_activation(...)`.
 
@@ -378,7 +378,7 @@ without reopening broad ownership.
 **Owns**:
 
 - final edits to `src/lib.rs`
-- final edits to `pg_recall.control`
+- final edits to `pg_ghola.control`
 - final end-to-end verification
 - `README` installation and usage notes
 - end-to-end tests only
@@ -387,7 +387,7 @@ without reopening broad ownership.
 
 - wire the final exported functions/types into the extension surface
 - ensure install SQL, Rust modules, and tests agree on names/signatures
-- verify `CREATE EXTENSION vector; CREATE EXTENSION pg_recall;`
+- verify `CREATE EXTENSION vector; CREATE EXTENSION pg_ghola;`
 - verify a minimal seeded recall flow end-to-end
 
 **Dependencies**: Requires 2, 3, 4, 5, and 6.
@@ -478,10 +478,10 @@ than the place where the core logic is first invented.
 
 v0.1 is successful when:
 
-- `CREATE EXTENSION pg_recall` installs cleanly
+- `CREATE EXTENSION pg_ghola` installs cleanly
 - all schema objects and SQL-visible types exist
 - scoring primitives are independently callable
-- `pg_recall.recall()` returns ranked results using vector + FTS + temporal +
+- `pg_ghola.recall()` returns ranked results using vector + FTS + temporal +
   confidence scoring
 - co-activation events are queued automatically from recall
 - queued events can be processed deterministically through SQL functions

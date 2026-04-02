@@ -54,8 +54,8 @@
 | `.cargo/config.toml` | +2 |
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +63 |
 | `src/lib.rs` | +28 |
 | `src/recall.rs` | +25 |
@@ -81,8 +81,8 @@
 | `.cargo/config.toml` | +2 |
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +63 |
 | `src/lib.rs` | +28 |
 | `src/recall.rs` | +25 |
@@ -108,8 +108,8 @@
 | `.cargo/config.toml` | +2 |
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +63 |
 | `src/lib.rs` | +28 |
 | `src/recall.rs` | +25 |
@@ -135,8 +135,8 @@
 | `.cargo/config.toml` | +2 |
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +63 |
 | `src/lib.rs` | +28 |
 | `src/recall.rs` | +25 |
@@ -162,8 +162,8 @@
 | `.cargo/config.toml` | +2 |
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +818 |
 | `src/lib.rs` | +28 |
 | `src/recall.rs` | +25 |
@@ -189,8 +189,8 @@
 | `.cargo/config.toml` | +2 |
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +818 |
 | `src/lib.rs` | +28 |
 | `src/recall.rs` | +738 |
@@ -217,8 +217,8 @@
 | `Cargo.lock` | +2345 |
 | `Cargo.toml` | +31 |
 | `README.md` | +247 |
-| `pg_recall.control` | +7 |
-| `src/bin/pgrx_embed_pg_recall.rs` | +4 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
 | `src/hebbian.rs` | +818 |
 | `src/integration_tests.rs` | +580 |
 | `src/lib.rs` | +31 |

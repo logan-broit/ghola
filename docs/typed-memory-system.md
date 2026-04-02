@@ -1,8 +1,8 @@
-# pg_recall v0.4 — Typed Memory System
+# pg_ghola v0.4 — Typed Memory System
 
 ## Overview
 
-pg_recall is the cognitive storage layer for Chapterhouse, an MCP memory server
+pg_ghola is the cognitive storage layer for Chapterhouse, an MCP memory server
 for AI coding agents. v0.4 introduces **typed mnemes** and **typed associations**
 — metadata that directly influences cognitive scoring rather than serving as
 passive filters.
@@ -24,11 +24,11 @@ Different Chapterhouse deployments use different embedding models:
 
 ### Configuration
 
-The dimension is stored in `pg_recall.config` and defaults to 768. To use a
+The dimension is stored in `pg_ghola.config` and defaults to 768. To use a
 different dimension, call `configure_dimensions()` on an empty mnemes table:
 
 ```sql
-SELECT pg_recall.configure_dimensions(3072);
+SELECT pg_ghola.configure_dimensions(3072);
 ```
 
 This alters the embedding column type, drops and recreates the HNSW index, and
@@ -228,12 +228,12 @@ CREATE FUNCTION recall(
     query_embedding vector(768),
     limit_n int DEFAULT 10,
     min_confidence float8 DEFAULT 0.0,
-    weights pg_recall.score_weights DEFAULT NULL,
+    weights pg_ghola.score_weights DEFAULT NULL,
     memory_type text DEFAULT NULL,
     scope text DEFAULT NULL,
     tags text[] DEFAULT NULL,
     session_id uuid DEFAULT NULL
-) RETURNS SETOF pg_recall.recall_result
+) RETURNS SETOF pg_ghola.recall_result
 ```
 
 All new filter parameters are optional. When NULL, no filtering is applied for
@@ -297,7 +297,7 @@ boost (-0.5x weight), actively demoting contradicted mnemes in results.
    caller. Expired memories are archived, not deleted — they can be recovered
    if needed.
 
-6. **No versioning in pg_recall.** Chapterhouse's `is_current` / `version`
+6. **No versioning in pg_ghola.** Chapterhouse's `is_current` / `version`
    system is a higher-level concern. Version relationships are modeled via
    `supersedes` associations — the newer mneme supersedes the older one, which
    gets archived.
