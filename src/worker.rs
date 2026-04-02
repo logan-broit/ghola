@@ -127,7 +127,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 fn run_decay_pruning() {
     // Decay: reduce weight of stale associations by 0.1%
     Spi::run(
-        "UPDATE pg_ghola.associations \
+        "UPDATE ghola.associations \
          SET weight = weight * 0.999 \
          WHERE updated_at < now() - interval '1 day'",
     )
@@ -136,7 +136,7 @@ fn run_decay_pruning() {
     // Prune: remove associations below threshold
     let pruned = Spi::get_one::<i64>(
         "WITH deleted AS ( \
-             DELETE FROM pg_ghola.associations \
+             DELETE FROM ghola.associations \
              WHERE weight < 0.001 \
              RETURNING 1 \
          ) SELECT count(*) FROM deleted",
@@ -155,7 +155,7 @@ fn run_decay_pruning() {
 fn run_archival() {
     let archived = Spi::get_one::<i64>(
         "WITH updated AS ( \
-             UPDATE pg_ghola.mnemes \
+             UPDATE ghola.mnemes \
              SET state = 'dormant' \
              WHERE state = 'active' \
                AND last_access < now() - interval '90 days' \
@@ -177,7 +177,7 @@ fn run_archival() {
 fn run_working_memory_expiration() {
     let expired = Spi::get_one::<i64>(
         "WITH updated AS ( \
-             UPDATE pg_ghola.mnemes \
+             UPDATE ghola.mnemes \
              SET state = 'dormant' \
              WHERE memory_type = 'working' \
                AND state = 'active' \
@@ -201,7 +201,7 @@ fn run_working_memory_expiration() {
 fn run_state_cleanup() {
     let cleaned = Spi::get_one::<i64>(
         "WITH updated AS ( \
-             UPDATE pg_ghola.mnemes \
+             UPDATE ghola.mnemes \
              SET state = 'dormant' \
              WHERE tier = 'state' \
                AND state = 'active' \
@@ -236,7 +236,7 @@ fn write_stats_row(
 ) {
     // Get current queue depth
     let queue_depth = Spi::get_one::<i64>(
-        "SELECT count(*) FROM pg_ghola.co_activation_queue",
+        "SELECT count(*) FROM ghola.co_activation_queue",
     )
     .unwrap_or(Some(0))
     .unwrap_or(0);
@@ -248,7 +248,7 @@ fn write_stats_row(
     };
 
     Spi::run(&format!(
-        "UPDATE pg_ghola.worker_stats SET \
+        "UPDATE ghola.worker_stats SET \
              state = '{state}', \
              queue_depth = {queue_depth}, \
              batches_processed = {batches}, \
@@ -279,7 +279,7 @@ fn drain_via_transactions() -> i64 {
         }
         let processed = BackgroundWorker::transaction(|| {
             Spi::get_one::<i64>(
-                "SELECT pg_ghola.process_co_activation_batch(100)",
+                "SELECT ghola.process_co_activation_batch(100)",
             )
             .unwrap_or(Some(0))
             .unwrap_or(0)
@@ -323,7 +323,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     // Mark worker as running
     BackgroundWorker::transaction(|| {
         Spi::run(
-            "UPDATE pg_ghola.worker_stats SET \
+            "UPDATE ghola.worker_stats SET \
                  state = 'active', \
                  started_at = now(), \
                  updated_at = now() \
@@ -356,7 +356,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
         // Process one batch cycle within a transaction
         let processed = BackgroundWorker::transaction(|| {
             Spi::get_one::<i64>(
-                "SELECT pg_ghola.process_co_activation_batch(100)",
+                "SELECT ghola.process_co_activation_batch(100)",
             )
             .unwrap_or(Some(0))
             .unwrap_or(0)

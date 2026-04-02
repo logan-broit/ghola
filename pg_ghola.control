@@ -3,5 +3,5 @@ default_version = '0.0.1'
 module_pathname = '$libdir/pg_ghola'
 relocatable = false
 superuser = true
-schema = 'pg_ghola'
+schema = 'ghola'
 requires = 'vector'

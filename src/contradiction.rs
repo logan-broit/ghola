@@ -41,7 +41,7 @@ fn check_contradictions(
             .select(
                 &format!(
                     "SELECT workspace_id::text, embedding::text, concept, content \
-                     FROM pg_ghola.mnemes WHERE id = '{mneme_id}'"
+                     FROM ghola.mnemes WHERE id = '{mneme_id}'"
                 ),
                 None,
                 &[],
@@ -65,7 +65,7 @@ fn check_contradictions(
                 &format!(
                     "SELECT id, concept, content, \
                          1 - (embedding <=> '{embedding}'::vector) AS similarity \
-                     FROM pg_ghola.mnemes \
+                     FROM ghola.mnemes \
                      WHERE workspace_id = '{workspace_id}'::uuid \
                        AND id != '{mneme_id}'::uuid \
                        AND state = 'active' \
@@ -121,7 +121,7 @@ fn flag_contradictions(
             .select(
                 &format!(
                     "SELECT workspace_id::text, embedding::text, concept, content \
-                     FROM pg_ghola.mnemes WHERE id = '{mneme_id}'"
+                     FROM ghola.mnemes WHERE id = '{mneme_id}'"
                 ),
                 None,
                 &[],
@@ -144,7 +144,7 @@ fn flag_contradictions(
                 &format!(
                     "SELECT id, concept, content, \
                          1 - (embedding <=> '{embedding}'::vector) AS similarity \
-                     FROM pg_ghola.mnemes \
+                     FROM ghola.mnemes \
                      WHERE workspace_id = '{workspace_id}'::uuid \
                        AND id != '{mneme_id}'::uuid \
                        AND state = 'active' \
@@ -192,7 +192,7 @@ fn flag_contradictions(
                 .select(
                     &format!(
                         "WITH ins AS ( \
-                             INSERT INTO pg_ghola.contradiction_candidates \
+                             INSERT INTO ghola.contradiction_candidates \
                                  (workspace_id, mneme_a, mneme_b, similarity, concept_overlap) \
                              VALUES ('{workspace_id}'::uuid, '{mneme_id}'::uuid, '{cid}'::uuid, \
                                      {sim}, {overlap}) \
@@ -240,7 +240,7 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
             .select(
                 &format!(
                     "SELECT mneme_a::text, mneme_b::text, status \
-                     FROM pg_ghola.contradiction_candidates \
+                     FROM ghola.contradiction_candidates \
                      WHERE id = {candidate_id}"
                 ),
                 None,
@@ -266,7 +266,7 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
             let prior_row = client
                 .select(
                     &format!(
-                        "SELECT confidence FROM pg_ghola.mnemes \
+                        "SELECT confidence FROM ghola.mnemes \
                          WHERE id = '{mneme_a}'::uuid FOR UPDATE"
                     ),
                     None,
@@ -281,7 +281,7 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
                 client
                     .update(
                         &format!(
-                            "UPDATE pg_ghola.mnemes SET confidence = {posterior} \
+                            "UPDATE ghola.mnemes SET confidence = {posterior} \
                              WHERE id = '{mneme_a}'::uuid"
                         ),
                         None,
@@ -295,7 +295,7 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
             client
                 .update(
                     &format!(
-                        "UPDATE pg_ghola.associations \
+                        "UPDATE ghola.associations \
                          SET weight = weight * 0.1, updated_at = now() \
                          WHERE (src_id = LEAST('{mneme_a}'::uuid, '{mneme_b}'::uuid) \
                             AND dst_id = GREATEST('{mneme_a}'::uuid, '{mneme_b}'::uuid) \
@@ -310,7 +310,7 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
             client
                 .update(
                     &format!(
-                        "INSERT INTO pg_ghola.associations \
+                        "INSERT INTO ghola.associations \
                          (src_id, dst_id, association_type, weight, co_activations, updated_at) \
                          VALUES ('{mneme_a}'::uuid, '{mneme_b}'::uuid, 'contradicts', 1.0, 1, now()) \
                          ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
@@ -326,7 +326,7 @@ fn resolve_contradiction(candidate_id: i64, resolution: &str) -> &'static str {
         client
             .update(
                 &format!(
-                    "UPDATE pg_ghola.contradiction_candidates \
+                    "UPDATE ghola.contradiction_candidates \
                      SET status = '{resolution}', resolved_at = now() \
                      WHERE id = {candidate_id}"
                 ),
@@ -372,9 +372,9 @@ fn get_pending_contradictions(
                          a.concept, a.content, a.confidence, \
                          b.concept, b.content, b.confidence, \
                          cc.created_at \
-                     FROM pg_ghola.contradiction_candidates cc \
-                     JOIN pg_ghola.mnemes a ON cc.mneme_a = a.id \
-                     JOIN pg_ghola.mnemes b ON cc.mneme_b = b.id \
+                     FROM ghola.contradiction_candidates cc \
+                     JOIN ghola.mnemes a ON cc.mneme_a = a.id \
+                     JOIN ghola.mnemes b ON cc.mneme_b = b.id \
                      WHERE cc.workspace_id = '{workspace_id}'::uuid \
                        AND cc.status = 'pending' \
                      ORDER BY cc.similarity DESC \
@@ -424,7 +424,7 @@ fn scan_workspace_contradictions(
         let rows = client
             .select(
                 &format!(
-                    "SELECT id::text FROM pg_ghola.mnemes \
+                    "SELECT id::text FROM ghola.mnemes \
                      WHERE workspace_id = '{workspace_id}'::uuid \
                        AND state = 'active' \
                      ORDER BY created_at"
@@ -444,7 +444,7 @@ fn scan_workspace_contradictions(
     let mut total_flagged: i64 = 0;
     for id_str in &mneme_ids {
         let flagged = Spi::get_one::<i64>(&format!(
-            "SELECT pg_ghola.flag_contradictions('{id_str}'::uuid, {similarity_threshold})"
+            "SELECT ghola.flag_contradictions('{id_str}'::uuid, {similarity_threshold})"
         ))
         .unwrap_or(Some(0))
         .unwrap_or(0);
@@ -507,12 +507,12 @@ mod tests {
     fn insert_mneme_no_trigger(ws: &str, concept: &str, content: &str, fill: f64) -> String {
         // Disable the trigger temporarily to control when detection runs
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("failed to disable trigger");
 
         let emb = embedding(fill);
         let id = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector) \
              RETURNING id::text"
         ))
@@ -520,7 +520,7 @@ mod tests {
         .expect("null id");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("failed to enable trigger");
 
         id
@@ -564,7 +564,7 @@ mod tests {
 
         // Identical embeddings = similarity 1.0, should be found
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.check_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT count(*) FROM ghola.check_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -582,7 +582,7 @@ mod tests {
         let m2 = insert_mneme_no_trigger(ws, "fact", "the sky is blue", 0.5);
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.check_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT count(*) FROM ghola.check_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -600,27 +600,27 @@ mod tests {
         let emb_b = directional_embedding(200, 50);  // dims 200..250
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable trigger");
 
         let _m1 = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'topic a', 'content about dogs', '{emb_a}'::vector) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
         let m2 = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'topic b', 'content about quantum physics', '{emb_b}'::vector) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable trigger");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.check_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT count(*) FROM ghola.check_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -637,7 +637,7 @@ mod tests {
         let m2 = insert_mneme_no_trigger(ws, "python", "Python 3.12 is latest", 0.5);
 
         let flagged = Spi::get_one::<i64>(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -646,7 +646,7 @@ mod tests {
 
         // Verify it's in the table
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.contradiction_candidates WHERE status = 'pending'",
+            "SELECT count(*) FROM ghola.contradiction_candidates WHERE status = 'pending'",
         )
         .expect("query failed")
         .expect("null");
@@ -663,11 +663,11 @@ mod tests {
 
         // Flag twice
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("first flag failed");
 
         let second = Spi::get_one::<i64>(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -684,11 +684,11 @@ mod tests {
         let m2 = insert_mneme_no_trigger(ws, "python version", "Python 3.12", 0.5);
 
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed");
 
         let overlap = Spi::get_one::<bool>(
-            "SELECT concept_overlap FROM pg_ghola.contradiction_candidates LIMIT 1",
+            "SELECT concept_overlap FROM ghola.contradiction_candidates LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
@@ -706,30 +706,30 @@ mod tests {
 
         // Flag and get candidate ID
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed");
 
         let candidate_id = Spi::get_one::<i64>(
-            "SELECT id FROM pg_ghola.contradiction_candidates LIMIT 1",
+            "SELECT id FROM ghola.contradiction_candidates LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
 
         // Get confidence before resolution
         let conf_before = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
 
         // Resolve as confirmed
         Spi::run(&format!(
-            "SELECT pg_ghola.resolve_contradiction({candidate_id}, 'confirmed')"
+            "SELECT ghola.resolve_contradiction({candidate_id}, 'confirmed')"
         )).expect("resolve failed");
 
         // Newer mneme (m2 = mneme_a) should have reduced confidence
         let conf_after = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -741,7 +741,7 @@ mod tests {
 
         // Older mneme (m1 = mneme_b) should be unchanged
         let old_conf = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -752,7 +752,7 @@ mod tests {
 
         // Status should be confirmed
         let status = Spi::get_one::<String>(&format!(
-            "SELECT status FROM pg_ghola.contradiction_candidates WHERE id = {candidate_id}"
+            "SELECT status FROM ghola.contradiction_candidates WHERE id = {candidate_id}"
         ))
         .expect("query failed")
         .expect("null");
@@ -768,23 +768,23 @@ mod tests {
         let m2 = insert_mneme_no_trigger(ws, "info", "content b", 0.5);
 
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed");
 
         let candidate_id = Spi::get_one::<i64>(
-            "SELECT id FROM pg_ghola.contradiction_candidates LIMIT 1",
+            "SELECT id FROM ghola.contradiction_candidates LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
 
         Spi::run(&format!(
-            "SELECT pg_ghola.resolve_contradiction({candidate_id}, 'dismissed')"
+            "SELECT ghola.resolve_contradiction({candidate_id}, 'dismissed')"
         )).expect("resolve failed");
 
         // Both mnemes should have original confidence
         for mid in &[&m1, &m2] {
             let conf = Spi::get_one::<f64>(&format!(
-                "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{mid}'::uuid"
+                "SELECT confidence FROM ghola.mnemes WHERE id = '{mid}'::uuid"
             ))
             .expect("query failed")
             .expect("null");
@@ -795,7 +795,7 @@ mod tests {
         }
 
         let status = Spi::get_one::<String>(&format!(
-            "SELECT status FROM pg_ghola.contradiction_candidates WHERE id = {candidate_id}"
+            "SELECT status FROM ghola.contradiction_candidates WHERE id = {candidate_id}"
         ))
         .expect("query failed")
         .expect("null");
@@ -812,29 +812,29 @@ mod tests {
 
         // Create an association between them
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
+            "INSERT INTO ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m2}'::uuid), 0.8"
         )).expect("insert assoc failed");
 
         // Flag and confirm
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed");
 
         let candidate_id = Spi::get_one::<i64>(
-            "SELECT id FROM pg_ghola.contradiction_candidates LIMIT 1",
+            "SELECT id FROM ghola.contradiction_candidates LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
 
         Spi::run(&format!(
-            "SELECT pg_ghola.resolve_contradiction({candidate_id}, 'confirmed')"
+            "SELECT ghola.resolve_contradiction({candidate_id}, 'confirmed')"
         )).expect("resolve failed");
 
         // Hebbian association weight should be weakened to 0.08 (0.8 * 0.1)
         let weight = Spi::get_one::<f64>(
-            "SELECT weight FROM pg_ghola.associations WHERE association_type = 'hebbian' LIMIT 1",
+            "SELECT weight FROM ghola.associations WHERE association_type = 'hebbian' LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
@@ -846,7 +846,7 @@ mod tests {
 
         // A 'contradicts' association should also be created (newer → older)
         let contradicts_count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.associations \
+            "SELECT count(*) FROM ghola.associations \
              WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
                AND association_type = 'contradicts'"
         ))
@@ -859,7 +859,7 @@ mod tests {
         );
 
         let contradicts_weight = Spi::get_one::<f64>(&format!(
-            "SELECT weight FROM pg_ghola.associations \
+            "SELECT weight FROM ghola.associations \
              WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
                AND association_type = 'contradicts'"
         ))
@@ -884,7 +884,7 @@ mod tests {
 
         // Checking m2 should not find m1 (different workspace)
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.check_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT count(*) FROM ghola.check_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -902,11 +902,11 @@ mod tests {
 
         // Mark m1 as dormant
         Spi::run(&format!(
-            "UPDATE pg_ghola.mnemes SET state = 'dormant' WHERE id = '{m1}'::uuid"
+            "UPDATE ghola.mnemes SET state = 'dormant' WHERE id = '{m1}'::uuid"
         )).expect("update failed");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.check_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT count(*) FROM ghola.check_contradictions('{m2}'::uuid, 0.85)"
         ))
         .expect("query failed")
         .expect("null");
@@ -923,11 +923,11 @@ mod tests {
         let m2 = insert_mneme_no_trigger(ws, "lang", "Go is untyped", 0.5);
 
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.get_pending_contradictions('{ws}'::uuid, 50)"
+            "SELECT count(*) FROM ghola.get_pending_contradictions('{ws}'::uuid, 50)"
         ))
         .expect("query failed")
         .expect("null");
@@ -946,12 +946,12 @@ mod tests {
         // Insert second mneme WITH trigger enabled — should auto-flag
         let emb = embedding(0.5);
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector)"
         )).expect("insert with trigger failed");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.contradiction_candidates \
+            "SELECT count(*) FROM ghola.contradiction_candidates \
              WHERE workspace_id = '{ws}'::uuid AND status = 'pending'"
         ))
         .expect("query failed")
@@ -969,16 +969,16 @@ mod tests {
         let m2 = insert_mneme_no_trigger(ws, "item", "content two", 0.5);
 
         Spi::run(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed");
 
         // Delete mneme_a — candidate should cascade delete
         Spi::run(&format!(
-            "DELETE FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "DELETE FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         )).expect("delete failed");
 
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.contradiction_candidates",
+            "SELECT count(*) FROM ghola.contradiction_candidates",
         )
         .expect("query failed")
         .expect("null");
@@ -990,7 +990,7 @@ mod tests {
     #[should_panic(expected = "resolution must be")]
     fn test_resolve_invalid_resolution() {
         Spi::run(
-            "SELECT pg_ghola.resolve_contradiction(1, 'invalid')"
+            "SELECT ghola.resolve_contradiction(1, 'invalid')"
         ).expect("should have failed");
     }
 
@@ -998,7 +998,7 @@ mod tests {
     #[should_panic(expected = "not found")]
     fn test_resolve_nonexistent_candidate() {
         Spi::run(
-            "SELECT pg_ghola.resolve_contradiction(99999, 'confirmed')"
+            "SELECT ghola.resolve_contradiction(99999, 'confirmed')"
         ).expect("should have failed");
     }
 }

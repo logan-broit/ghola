@@ -49,7 +49,7 @@ pub extern "C-unwind" fn _PG_init() {
     use std::time::Duration;
 
     GucRegistry::define_string_guc(
-        c"pg_ghola.database",
+        c"ghola.database",
         c"Target database for the pg_ghola background worker.",
         c"The background worker will connect to this database for Hebbian processing.",
         &PG_GHOLA_DATABASE,

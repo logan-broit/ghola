@@ -29,7 +29,7 @@ mod tests {
     fn insert_mneme(ws: &str, concept: &str, content: &str, fill: f64) -> String {
         let emb = embedding(fill);
         Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(768)) \
              RETURNING id::text"
         ))
@@ -68,7 +68,7 @@ mod tests {
             ))
             .expect("query failed")
             .expect("null");
-            assert!(exists, "table pg_ghola.{table} should exist");
+            assert!(exists, "table ghola.{table} should exist");
         }
     }
 
@@ -84,7 +84,7 @@ mod tests {
             ))
             .expect("query failed")
             .expect("null");
-            assert!(exists, "type pg_ghola.{typ} should exist");
+            assert!(exists, "type ghola.{typ} should exist");
         }
     }
 
@@ -124,7 +124,7 @@ mod tests {
             ))
             .expect("query failed")
             .expect("null");
-            assert!(exists, "function pg_ghola.{func} should exist");
+            assert!(exists, "function ghola.{func} should exist");
         }
     }
 
@@ -146,7 +146,7 @@ mod tests {
 
         // 2. First recall — should return results with no Hebbian boost yet
         let emb = embedding(0.11);
-        Spi::run("DELETE FROM pg_ghola.co_activation_queue").expect("clear queue failed");
+        Spi::run("DELETE FROM ghola.co_activation_queue").expect("clear queue failed");
 
         let first_results = Spi::connect(|client| {
             let rows = client
@@ -154,7 +154,7 @@ mod tests {
                     &format!(
                         "SELECT (r).mneme_id::text, (r).score, (r).hebbian_boost, (r).content_match, \
                                 (r).activation, (r).confidence \
-                         FROM pg_ghola.recall( \
+                         FROM ghola.recall( \
                              '{WS}'::uuid, 'kubernetes pod scheduling', \
                              '{emb}'::vector(768), 10, 0.0, NULL \
                          ) AS r"
@@ -199,7 +199,7 @@ mod tests {
 
         // 3. Verify co-activation event was enqueued
         let queue_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
+            Spi::get_one::<i64>("SELECT count(*) FROM ghola.co_activation_queue")
                 .expect("query failed")
                 .expect("null");
         assert!(
@@ -209,7 +209,7 @@ mod tests {
 
         // 4. Process co-activation batch — should create associations
         let processed = Spi::get_one::<i64>(
-            "SELECT pg_ghola.process_all_pending_co_activations()",
+            "SELECT ghola.process_all_pending_co_activations()",
         )
         .expect("batch processing failed")
         .expect("null");
@@ -220,14 +220,14 @@ mod tests {
 
         // Queue should be empty after processing
         let remaining =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.co_activation_queue")
+            Spi::get_one::<i64>("SELECT count(*) FROM ghola.co_activation_queue")
                 .expect("query failed")
                 .expect("null");
         assert_eq!(remaining, 0, "queue should be empty after processing");
 
         // 5. Verify associations were formed between co-activated mnemes
         let assoc_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_ghola.associations")
+            Spi::get_one::<i64>("SELECT count(*) FROM ghola.associations")
                 .expect("query failed")
                 .expect("null");
         assert!(
@@ -237,7 +237,7 @@ mod tests {
 
         // Verify get_associations works for one of the mnemes
         let related_count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.get_associations('{m1}'::uuid, 0.001)"
+            "SELECT count(*) FROM ghola.get_associations('{m1}'::uuid, 0.001)"
         ))
         .expect("query failed")
         .expect("null");
@@ -248,7 +248,7 @@ mod tests {
 
         // 6. Verify access_count was incremented during batch processing
         let access = Spi::get_one::<i32>(&format!(
-            "SELECT access_count FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT access_count FROM ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -258,14 +258,14 @@ mod tests {
         );
 
         // 7. Second recall — should now show non-zero Hebbian boost
-        Spi::run("DELETE FROM pg_ghola.co_activation_queue").expect("clear queue failed");
+        Spi::run("DELETE FROM ghola.co_activation_queue").expect("clear queue failed");
 
         let second_results = Spi::connect(|client| {
             let rows = client
                 .select(
                     &format!(
                         "SELECT (r).mneme_id::text, (r).score, (r).hebbian_boost \
-                         FROM pg_ghola.recall( \
+                         FROM ghola.recall( \
                              '{WS}'::uuid, 'kubernetes pod scheduling', \
                              '{emb}'::vector(768), 10, 0.0, NULL \
                          ) AS r"
@@ -311,7 +311,7 @@ mod tests {
 
         // Initial confidence should be the default 0.5
         let conf_initial = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -322,12 +322,12 @@ mod tests {
 
         // Confirm recall should increase confidence
         Spi::run(&format!(
-            "SELECT pg_ghola.confirm_recall(ARRAY['{m1}']::uuid[])"
+            "SELECT ghola.confirm_recall(ARRAY['{m1}']::uuid[])"
         ))
         .expect("confirm_recall failed");
 
         let conf_after = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -338,7 +338,7 @@ mod tests {
 
         // Contradicting evidence should decrease confidence
         let new_conf = Spi::get_one::<f64>(&format!(
-            "SELECT pg_ghola.update_confidence('{m1}'::uuid, 0.05)"
+            "SELECT ghola.update_confidence('{m1}'::uuid, 0.05)"
         ))
         .expect("query failed")
         .expect("null");
@@ -359,20 +359,20 @@ mod tests {
     #[pg_test]
     fn test_scoring_functions_composable() {
         // Verify all scoring primitives are individually callable and composable
-        let sp = Spi::get_one::<f64>("SELECT pg_ghola.softplus(2.0)")
+        let sp = Spi::get_one::<f64>("SELECT ghola.softplus(2.0)")
             .expect("query failed")
             .expect("null");
         assert!((sp - 2.1269).abs() < 0.01, "softplus(2) ~ 2.13, got {sp}");
 
         let actr = Spi::get_one::<f64>(
-            "SELECT pg_ghola.actr_activation(10, now() - interval '5 days')",
+            "SELECT ghola.actr_activation(10, now() - interval '5 days')",
         )
         .expect("query failed")
         .expect("null");
         assert!(actr > 0.0, "recent frequently accessed mneme should have positive activation");
 
         let decay = Spi::get_one::<f64>(
-            "SELECT pg_ghola.ebbinghaus_decay(now() - interval '7 days', 20, now() - interval '90 days')",
+            "SELECT ghola.ebbinghaus_decay(now() - interval '7 days', 20, now() - interval '90 days')",
         )
         .expect("query failed")
         .expect("null");
@@ -381,7 +381,7 @@ mod tests {
             "ebbinghaus_decay should be in (0, 1], got {decay}"
         );
 
-        let bayes = Spi::get_one::<f64>("SELECT pg_ghola.bayesian_update(0.5, 0.9)")
+        let bayes = Spi::get_one::<f64>("SELECT ghola.bayesian_update(0.5, 0.9)")
             .expect("query failed")
             .expect("null");
         assert!(
@@ -407,14 +407,14 @@ mod tests {
 
         // Recall in workspace A should only see workspace A mnemes
         let count_a = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.recall( \
+            "SELECT count(*) FROM ghola.recall( \
                 '{ws_a}'::uuid, 'alpha', '{emb}'::vector(768), 10, 0.0, NULL)"
         ))
         .expect("query failed")
         .expect("null");
 
         let _count_b = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.recall( \
+            "SELECT count(*) FROM ghola.recall( \
                 '{ws_b}'::uuid, 'alpha', '{emb}'::vector(768), 10, 0.0, NULL)"
         ))
         .expect("query failed")
@@ -440,11 +440,11 @@ mod tests {
         let m_dormant = insert_mneme(ws, "dormant memory", "this should not appear either", 0.5);
 
         Spi::run(&format!(
-            "UPDATE pg_ghola.mnemes SET state = 'archived' WHERE id = '{m_archived}'::uuid"
+            "UPDATE ghola.mnemes SET state = 'archived' WHERE id = '{m_archived}'::uuid"
         ))
         .expect("archive failed");
         Spi::run(&format!(
-            "UPDATE pg_ghola.mnemes SET state = 'dormant' WHERE id = '{m_dormant}'::uuid"
+            "UPDATE ghola.mnemes SET state = 'dormant' WHERE id = '{m_dormant}'::uuid"
         ))
         .expect("dormant failed");
 
@@ -453,7 +453,7 @@ mod tests {
             let rows = client
                 .select(
                     &format!(
-                        "SELECT (r).mneme_id::text FROM pg_ghola.recall( \
+                        "SELECT (r).mneme_id::text FROM ghola.recall( \
                             '{ws}'::uuid, 'memory', '{emb}'::vector(768), \
                             10, 0.0, NULL) AS r"
                     ),
@@ -495,27 +495,27 @@ mod tests {
 
         // First co-activation
         Spi::run(&format!(
-            "SELECT pg_ghola.record_co_activation( \
+            "SELECT ghola.record_co_activation( \
                 '{ws}'::uuid, ARRAY['{m1}','{m2}']::uuid[], ARRAY[0.9, 0.8]::float8[])"
         ))
         .expect("record failed");
-        Spi::run("SELECT pg_ghola.process_all_pending_co_activations()")
+        Spi::run("SELECT ghola.process_all_pending_co_activations()")
             .expect("process failed");
 
-        let weight1 = Spi::get_one::<f64>("SELECT weight FROM pg_ghola.associations LIMIT 1")
+        let weight1 = Spi::get_one::<f64>("SELECT weight FROM ghola.associations LIMIT 1")
             .expect("query failed")
             .expect("null");
 
         // Second co-activation
         Spi::run(&format!(
-            "SELECT pg_ghola.record_co_activation( \
+            "SELECT ghola.record_co_activation( \
                 '{ws}'::uuid, ARRAY['{m1}','{m2}']::uuid[], ARRAY[0.9, 0.8]::float8[])"
         ))
         .expect("record failed");
-        Spi::run("SELECT pg_ghola.process_all_pending_co_activations()")
+        Spi::run("SELECT ghola.process_all_pending_co_activations()")
             .expect("process failed");
 
-        let weight2 = Spi::get_one::<f64>("SELECT weight FROM pg_ghola.associations LIMIT 1")
+        let weight2 = Spi::get_one::<f64>("SELECT weight FROM ghola.associations LIMIT 1")
             .expect("query failed")
             .expect("null");
 
@@ -526,14 +526,14 @@ mod tests {
 
         // Third co-activation
         Spi::run(&format!(
-            "SELECT pg_ghola.record_co_activation( \
+            "SELECT ghola.record_co_activation( \
                 '{ws}'::uuid, ARRAY['{m1}','{m2}']::uuid[], ARRAY[0.9, 0.8]::float8[])"
         ))
         .expect("record failed");
-        Spi::run("SELECT pg_ghola.process_all_pending_co_activations()")
+        Spi::run("SELECT ghola.process_all_pending_co_activations()")
             .expect("process failed");
 
-        let weight3 = Spi::get_one::<f64>("SELECT weight FROM pg_ghola.associations LIMIT 1")
+        let weight3 = Spi::get_one::<f64>("SELECT weight FROM ghola.associations LIMIT 1")
             .expect("query failed")
             .expect("null");
 
@@ -561,7 +561,7 @@ mod tests {
 
         // Score with default weights
         let score_default = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_ghola.recall( \
+            "SELECT (r).score FROM ghola.recall( \
                 '{ws}'::uuid, 'specific topic', '{emb}'::vector(768), \
                 1, 0.0, NULL) AS r LIMIT 1"
         ))
@@ -570,9 +570,9 @@ mod tests {
 
         // Score with all-semantic weights (no FTS contribution)
         let score_semantic = Spi::get_one::<f64>(&format!(
-            "SELECT (r).score FROM pg_ghola.recall( \
+            "SELECT (r).score FROM ghola.recall( \
                 '{ws}'::uuid, 'specific topic', '{emb}'::vector(768), \
-                1, 0.0, (1.0, 0.0, 0.5, 4.0)::pg_ghola.score_weights) AS r LIMIT 1"
+                1, 0.0, (1.0, 0.0, 0.5, 4.0)::ghola.score_weights) AS r LIMIT 1"
         ))
         .expect("query failed")
         .expect("null");
@@ -621,7 +621,7 @@ mod tests {
     #[pg_test]
     fn test_get_worker_stats_returns_initial_state() {
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM pg_ghola.get_worker_stats() AS s",
+            "SELECT (s).state FROM ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -639,7 +639,7 @@ mod tests {
 
         // Insert an association with a known weight, backdated > 1 day
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight, updated_at) \
+            "INSERT INTO ghola.associations (src_id, dst_id, weight, updated_at) \
              SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m2}'::uuid), \
                     0.5, now() - interval '2 days'"
@@ -647,21 +647,21 @@ mod tests {
         .expect("insert association failed");
 
         let weight_before = Spi::get_one::<f64>(
-            "SELECT weight FROM pg_ghola.associations LIMIT 1",
+            "SELECT weight FROM ghola.associations LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
 
         // Run the decay SQL directly (same as worker runs)
         Spi::run(
-            "UPDATE pg_ghola.associations \
+            "UPDATE ghola.associations \
              SET weight = weight * 0.999 \
              WHERE updated_at < now() - interval '1 day'",
         )
         .expect("decay failed");
 
         let weight_after = Spi::get_one::<f64>(
-            "SELECT weight FROM pg_ghola.associations LIMIT 1",
+            "SELECT weight FROM ghola.associations LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
@@ -689,21 +689,21 @@ mod tests {
 
         // Insert one strong association and one below threshold
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
+            "INSERT INTO ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m2}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m2}'::uuid), 0.5"
         ))
         .expect("insert strong assoc failed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
+            "INSERT INTO ghola.associations (src_id, dst_id, weight) \
              SELECT LEAST('{m1}'::uuid, '{m3}'::uuid), \
                     GREATEST('{m1}'::uuid, '{m3}'::uuid), 0.0005"
         ))
         .expect("insert weak assoc failed");
 
         let count_before = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.associations",
+            "SELECT count(*) FROM ghola.associations",
         )
         .expect("query failed")
         .expect("null");
@@ -711,12 +711,12 @@ mod tests {
 
         // Run pruning SQL (same as worker runs)
         Spi::run(
-            "DELETE FROM pg_ghola.associations WHERE weight < 0.001",
+            "DELETE FROM ghola.associations WHERE weight < 0.001",
         )
         .expect("prune failed");
 
         let count_after = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.associations",
+            "SELECT count(*) FROM ghola.associations",
         )
         .expect("query failed")
         .expect("null");
@@ -724,7 +724,7 @@ mod tests {
 
         // The strong association should survive
         let remaining_weight = Spi::get_one::<f64>(
-            "SELECT weight FROM pg_ghola.associations LIMIT 1",
+            "SELECT weight FROM ghola.associations LIMIT 1",
         )
         .expect("query failed")
         .expect("null");
@@ -746,7 +746,7 @@ mod tests {
 
         // Set up: stale + low confidence -> should be archived
         Spi::run(&format!(
-            "UPDATE pg_ghola.mnemes SET \
+            "UPDATE ghola.mnemes SET \
                  last_access = now() - interval '100 days', \
                  confidence = 0.2 \
              WHERE id = '{m_stale}'::uuid"
@@ -755,7 +755,7 @@ mod tests {
 
         // Set up: fresh + high confidence -> should NOT be archived
         Spi::run(&format!(
-            "UPDATE pg_ghola.mnemes SET \
+            "UPDATE ghola.mnemes SET \
                  last_access = now() - interval '1 day', \
                  confidence = 0.9 \
              WHERE id = '{m_fresh}'::uuid"
@@ -764,7 +764,7 @@ mod tests {
 
         // Set up: stale + high confidence -> should NOT be archived
         Spi::run(&format!(
-            "UPDATE pg_ghola.mnemes SET \
+            "UPDATE ghola.mnemes SET \
                  last_access = now() - interval '100 days', \
                  confidence = 0.8 \
              WHERE id = '{m_stale_confident}'::uuid"
@@ -773,7 +773,7 @@ mod tests {
 
         // Run archival SQL (same as worker runs)
         Spi::run(
-            "UPDATE pg_ghola.mnemes \
+            "UPDATE ghola.mnemes \
              SET state = 'dormant' \
              WHERE state = 'active' \
                AND last_access < now() - interval '90 days' \
@@ -783,7 +783,7 @@ mod tests {
 
         // Verify: stale + low confidence should be dormant
         let stale_state = Spi::get_one::<String>(&format!(
-            "SELECT state FROM pg_ghola.mnemes WHERE id = '{m_stale}'::uuid",
+            "SELECT state FROM ghola.mnemes WHERE id = '{m_stale}'::uuid",
         ))
         .expect("query failed")
         .expect("null");
@@ -791,7 +791,7 @@ mod tests {
 
         // Verify: fresh should still be active
         let fresh_state = Spi::get_one::<String>(&format!(
-            "SELECT state FROM pg_ghola.mnemes WHERE id = '{m_fresh}'::uuid",
+            "SELECT state FROM ghola.mnemes WHERE id = '{m_fresh}'::uuid",
         ))
         .expect("query failed")
         .expect("null");
@@ -799,7 +799,7 @@ mod tests {
 
         // Verify: stale but confident should still be active
         let confident_state = Spi::get_one::<String>(&format!(
-            "SELECT state FROM pg_ghola.mnemes WHERE id = '{m_stale_confident}'::uuid",
+            "SELECT state FROM ghola.mnemes WHERE id = '{m_stale_confident}'::uuid",
         ))
         .expect("query failed")
         .expect("null");
@@ -820,18 +820,18 @@ mod tests {
 
         // Insert first mneme (trigger fires but nothing to compare against)
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'python version', 'Python 3.8 is the latest release', '{emb}'::vector(768))"
         )).expect("first insert failed");
 
         // Insert contradicting mneme (trigger should detect and flag)
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(768))"
         )).expect("second insert failed");
 
         let pending = Spi::get_one::<i64>(
-            &format!("SELECT count(*) FROM pg_ghola.contradiction_candidates \
+            &format!("SELECT count(*) FROM ghola.contradiction_candidates \
                       WHERE workspace_id = '{ws}'::uuid AND status = 'pending'")
         ).expect("query failed").expect("null");
 
@@ -847,59 +847,59 @@ mod tests {
         let emb = embedding(0.5);
 
         // Disable trigger for controlled setup
-        Spi::run("ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check")
             .expect("disable trigger");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'rust speed', 'Rust is slow', '{emb}'::vector(768))"
         )).expect("insert 1 failed");
 
         let m2 = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'rust speed', 'Rust is fast', '{emb}'::vector(768)) \
              RETURNING id::text"
         )).expect("insert 2 failed").expect("null");
 
-        Spi::run("ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check")
             .expect("enable trigger");
 
         // Flag contradictions
         let flagged = Spi::get_one::<i64>(&format!(
-            "SELECT pg_ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
         )).expect("flag failed").expect("null");
         assert!(flagged >= 1, "should flag at least 1 contradiction");
 
         // Get pending contradictions
         let pending_count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.get_pending_contradictions('{ws}'::uuid)"
+            "SELECT count(*) FROM ghola.get_pending_contradictions('{ws}'::uuid)"
         )).expect("query failed").expect("null");
         assert!(pending_count >= 1, "should have pending contradictions");
 
         // Get candidate ID
         let candidate_id = Spi::get_one::<i64>(&format!(
-            "SELECT candidate_id FROM pg_ghola.get_pending_contradictions('{ws}'::uuid) LIMIT 1"
+            "SELECT candidate_id FROM ghola.get_pending_contradictions('{ws}'::uuid) LIMIT 1"
         )).expect("query failed").expect("null");
 
         // Get confidence before resolution
         let conf_before = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         )).expect("query failed").expect("null");
 
         // Resolve as confirmed — should penalize the newer mneme (m2)
         Spi::run(&format!(
-            "SELECT pg_ghola.resolve_contradiction({candidate_id}, 'confirmed')"
+            "SELECT ghola.resolve_contradiction({candidate_id}, 'confirmed')"
         )).expect("resolve failed");
 
         // Verify status changed
         let status = Spi::get_one::<String>(&format!(
-            "SELECT status FROM pg_ghola.contradiction_candidates WHERE id = {candidate_id}"
+            "SELECT status FROM ghola.contradiction_candidates WHERE id = {candidate_id}"
         )).expect("query failed").expect("null");
         assert_eq!(status, "confirmed");
 
         // Verify confidence was penalized
         let conf_after = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         )).expect("query failed").expect("null");
         assert!(
             conf_after < conf_before,
@@ -916,30 +916,30 @@ mod tests {
         let emb = embedding(0.5);
 
         // Disable trigger for controlled setup
-        Spi::run("ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check")
             .expect("disable trigger");
 
         // Insert several similar mnemes
         for i in 1..=4 {
             Spi::run(&format!(
-                "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+                "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
                  VALUES ('{ws}', 'topic {i}', 'similar content variant {i}', '{emb}'::vector(768))"
             )).expect("insert failed");
         }
 
-        Spi::run("ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check")
             .expect("enable trigger");
 
         // Scan workspace for contradictions
         let flagged = Spi::get_one::<i64>(&format!(
-            "SELECT pg_ghola.scan_workspace_contradictions('{ws}'::uuid, 0.85)"
+            "SELECT ghola.scan_workspace_contradictions('{ws}'::uuid, 0.85)"
         )).expect("scan failed").expect("null");
 
         assert!(flagged >= 1, "workspace scan should flag contradictions among similar mnemes");
 
         // Verify candidates were actually inserted
         let candidates = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.contradiction_candidates \
+            "SELECT count(*) FROM ghola.contradiction_candidates \
              WHERE workspace_id = '{ws}'::uuid"
         )).expect("query failed").expect("null");
         assert!(candidates >= 1, "candidates should exist after workspace scan");
@@ -956,10 +956,10 @@ mod tests {
     ) -> String {
         let emb = embedding(fill);
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
         ).expect("disable");
 
         let session_clause = match session_id {
@@ -968,7 +968,7 @@ mod tests {
         };
 
         let id = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding, memory_type, tier, session_id) \
              VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(768), \
                      '{memory_type}', '{tier}'{session_clause}) \
@@ -978,10 +978,10 @@ mod tests {
         .expect("null");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
         ).expect("enable");
 
         id
@@ -1001,7 +1001,7 @@ mod tests {
 
         // Filter to factual only
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.recall(\
+            "SELECT count(*) FROM ghola.recall(\
                 '{ws}'::uuid, 'content', '{emb}'::vector(768), \
                 10, 0.0, NULL, 'factual')"
         ))
@@ -1021,14 +1021,14 @@ mod tests {
 
         // Insert a working memory that's already expired
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
         ).expect("disable");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding, memory_type, expires_at) \
              VALUES ('{ws}', 'expired', 'should not appear', '{emb}'::vector(768), \
                      'working', now() - interval '1 hour')"
@@ -1036,21 +1036,21 @@ mod tests {
 
         // Insert a non-expired mneme
         let _m_valid = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'valid', 'should appear', '{emb}'::vector(768)) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
         ).expect("enable");
 
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.recall(\
+            "SELECT count(*) FROM ghola.recall(\
                 '{ws}'::uuid, 'content', '{emb}'::vector(768), 10, 0.0, NULL)"
         ))
         .expect("query failed")
@@ -1070,12 +1070,12 @@ mod tests {
 
         // Mark new as superseding old
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supersedes('{m_new}'::uuid, '{m_old}'::uuid)"
+            "SELECT ghola.mark_supersedes('{m_new}'::uuid, '{m_old}'::uuid)"
         )).expect("supersedes failed");
 
         // Old should be archived
         let state = Spi::get_one::<String>(&format!(
-            "SELECT state FROM pg_ghola.mnemes WHERE id = '{m_old}'::uuid"
+            "SELECT state FROM ghola.mnemes WHERE id = '{m_old}'::uuid"
         )).expect("query failed").expect("null");
         assert_eq!(state, "archived");
 
@@ -1084,7 +1084,7 @@ mod tests {
         let returned = Spi::connect(|client| {
             let rows = client.select(
                 &format!(
-                    "SELECT (r).mneme_id::text FROM pg_ghola.recall(\
+                    "SELECT (r).mneme_id::text FROM ghola.recall(\
                         '{ws}'::uuid, 'version', '{emb}'::vector(768), 10, 0.0, NULL) AS r"
                 ),
                 None, &[],
@@ -1111,12 +1111,12 @@ mod tests {
         // Hit it with extremely weak evidence repeatedly
         for _ in 0..5 {
             Spi::run(&format!(
-                "SELECT pg_ghola.update_confidence('{m_core}'::uuid, 0.01)"
+                "SELECT ghola.update_confidence('{m_core}'::uuid, 0.01)"
             )).expect("update failed");
         }
 
         let conf = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m_core}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m_core}'::uuid"
         )).expect("query failed").expect("null");
 
         assert!(
@@ -1134,37 +1134,37 @@ mod tests {
         let emb = embedding(0.5);
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
         ).expect("disable");
 
         // Insert mnemes with different tags
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding, tags) \
              VALUES ('{ws}', 'rust', 'rust content', '{emb}'::vector(768), \
                      ARRAY['language', 'systems'])"
         )).expect("insert failed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding, tags) \
              VALUES ('{ws}', 'python', 'python content', '{emb}'::vector(768), \
                      ARRAY['language', 'scripting'])"
         )).expect("insert failed");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
         ).expect("enable");
 
         // Filter to 'systems' tag
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.recall(\
+            "SELECT count(*) FROM ghola.recall(\
                 '{ws}'::uuid, 'content', '{emb}'::vector(768), \
                 10, 0.0, NULL, NULL, NULL, ARRAY['systems'])"
         ))

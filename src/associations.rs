@@ -22,7 +22,7 @@ fn mark_supersedes(newer_id: pgrx::Uuid, older_id: pgrx::Uuid) -> &'static str {
         let count = client
             .select(
                 &format!(
-                    "SELECT count(*) FROM pg_ghola.mnemes \
+                    "SELECT count(*) FROM ghola.mnemes \
                      WHERE id IN ('{newer_id}'::uuid, '{older_id}'::uuid)"
                 ),
                 None,
@@ -42,7 +42,7 @@ fn mark_supersedes(newer_id: pgrx::Uuid, older_id: pgrx::Uuid) -> &'static str {
         client
             .update(
                 &format!(
-                    "INSERT INTO pg_ghola.associations \
+                    "INSERT INTO ghola.associations \
                      (src_id, dst_id, association_type, weight, co_activations, updated_at) \
                      VALUES ('{newer_id}'::uuid, '{older_id}'::uuid, 'supersedes', 1.0, 1, now()) \
                      ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
@@ -57,7 +57,7 @@ fn mark_supersedes(newer_id: pgrx::Uuid, older_id: pgrx::Uuid) -> &'static str {
         client
             .update(
                 &format!(
-                    "UPDATE pg_ghola.mnemes SET state = 'archived' \
+                    "UPDATE ghola.mnemes SET state = 'archived' \
                      WHERE id = '{older_id}'::uuid"
                 ),
                 None,
@@ -82,7 +82,7 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
         let count = client
             .select(
                 &format!(
-                    "SELECT count(*) FROM pg_ghola.mnemes \
+                    "SELECT count(*) FROM ghola.mnemes \
                      WHERE id IN ('{supporting_id}'::uuid, '{supported_id}'::uuid)"
                 ),
                 None,
@@ -102,7 +102,7 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
         client
             .update(
                 &format!(
-                    "INSERT INTO pg_ghola.associations \
+                    "INSERT INTO ghola.associations \
                      (src_id, dst_id, association_type, weight, co_activations, updated_at) \
                      VALUES ('{supporting_id}'::uuid, '{supported_id}'::uuid, 'supports', 1.0, 1, now()) \
                      ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
@@ -117,7 +117,7 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
         let prior_row = client
             .select(
                 &format!(
-                    "SELECT confidence, tier FROM pg_ghola.mnemes \
+                    "SELECT confidence, tier FROM ghola.mnemes \
                      WHERE id = '{supported_id}'::uuid FOR UPDATE"
                 ),
                 None,
@@ -138,7 +138,7 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
             client
                 .update(
                     &format!(
-                        "UPDATE pg_ghola.mnemes SET confidence = {clamped} \
+                        "UPDATE ghola.mnemes SET confidence = {clamped} \
                          WHERE id = '{supported_id}'::uuid"
                     ),
                     None,
@@ -176,11 +176,11 @@ fn get_typed_associations(
         let query = format!(
             "SELECT related_id, association_type, weight, direction FROM ( \
                 SELECT dst_id AS related_id, association_type, weight, 'outgoing' AS direction \
-                FROM pg_ghola.associations \
+                FROM ghola.associations \
                 WHERE src_id = '{mneme_id}' AND weight >= {min_weight}{type_filter} \
                 UNION ALL \
                 SELECT src_id AS related_id, association_type, weight, 'incoming' AS direction \
-                FROM pg_ghola.associations \
+                FROM ghola.associations \
                 WHERE dst_id = '{mneme_id}' AND weight >= {min_weight}{type_filter} \
             ) sub \
             ORDER BY weight DESC"
@@ -224,14 +224,14 @@ mod tests {
         let emb = zero_embedding();
         // Disable triggers to avoid interference
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
         ).expect("disable");
 
         let id = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector({DIMS})) \
              RETURNING id::text"
         ))
@@ -239,10 +239,10 @@ mod tests {
         .expect("null");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable");
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_session_association"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
         ).expect("enable");
 
         id
@@ -259,13 +259,13 @@ mod tests {
         let m2 = insert_mneme(ws, "fact", "new version");
 
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supersedes('{m2}'::uuid, '{m1}'::uuid)"
+            "SELECT ghola.mark_supersedes('{m2}'::uuid, '{m1}'::uuid)"
         ))
         .expect("mark_supersedes failed");
 
         // Older mneme should be archived
         let state = Spi::get_one::<String>(&format!(
-            "SELECT state FROM pg_ghola.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT state FROM ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -274,7 +274,7 @@ mod tests {
 
         // Supersedes association should exist
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.associations \
+            "SELECT count(*) FROM ghola.associations \
              WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
                AND association_type = 'supersedes'"
         ))
@@ -293,7 +293,7 @@ mod tests {
         let m1 = insert_mneme(ws, "fact", "content");
 
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supersedes('{m1}'::uuid, '{m1}'::uuid)"
+            "SELECT ghola.mark_supersedes('{m1}'::uuid, '{m1}'::uuid)"
         ))
         .expect("should panic");
     }
@@ -309,18 +309,18 @@ mod tests {
         let m2 = insert_mneme(ws, "claim", "the claim");
 
         let before = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
 
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
+            "SELECT ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
         ))
         .expect("mark_supports failed");
 
         let after = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM pg_ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -332,7 +332,7 @@ mod tests {
 
         // Supports association should exist
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.associations \
+            "SELECT count(*) FROM ghola.associations \
              WHERE src_id = '{m1}'::uuid AND dst_id = '{m2}'::uuid \
                AND association_type = 'supports'"
         ))
@@ -355,15 +355,15 @@ mod tests {
 
         // Create different typed associations
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
+            "SELECT ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
         )).expect("supports failed");
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supersedes('{m3}'::uuid, '{m2}'::uuid)"
+            "SELECT ghola.mark_supersedes('{m3}'::uuid, '{m2}'::uuid)"
         )).expect("supersedes failed");
 
         // Get all associations for m2
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.get_typed_associations('{m2}'::uuid)"
+            "SELECT count(*) FROM ghola.get_typed_associations('{m2}'::uuid)"
         ))
         .expect("query failed")
         .expect("null");
@@ -381,17 +381,17 @@ mod tests {
         let m3 = insert_mneme(ws, "c", "content c");
 
         Spi::run(&format!(
-            "SELECT pg_ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
+            "SELECT ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
         )).expect("supports failed");
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations \
+            "INSERT INTO ghola.associations \
              (src_id, dst_id, association_type, weight) \
              VALUES ('{m2}'::uuid, '{m3}'::uuid, 'hebbian', 0.5)"
         )).expect("insert failed");
 
         // Filter to supports only
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.get_typed_associations('{m2}'::uuid, 'supports')"
+            "SELECT count(*) FROM ghola.get_typed_associations('{m2}'::uuid, 'supports')"
         ))
         .expect("query failed")
         .expect("null");

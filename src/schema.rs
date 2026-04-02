@@ -208,7 +208,7 @@ CREATE INDEX mnemes_expires_at_idx
 /// Must be called on an empty mnemes table (errors if rows exist).
 /// Drops and recreates the HNSW index with the new dimension.
 ///
-/// Example: `SELECT pg_ghola.configure_dimensions(3072)` for OpenAI text-embedding-3-large
+/// Example: `SELECT ghola.configure_dimensions(3072)` for OpenAI text-embedding-3-large
 #[pg_extern]
 fn configure_dimensions(dims: i32) -> &'static str {
     if dims <= 0 || dims > 4096 {
@@ -219,7 +219,7 @@ fn configure_dimensions(dims: i32) -> &'static str {
         // Verify mnemes table is empty
         let count = client
             .select(
-                "SELECT count(*) FROM pg_ghola.mnemes",
+                "SELECT count(*) FROM ghola.mnemes",
                 None,
                 &[],
             )
@@ -239,7 +239,7 @@ fn configure_dimensions(dims: i32) -> &'static str {
         // Drop the HNSW index
         client
             .update(
-                "DROP INDEX IF EXISTS pg_ghola.mnemes_embedding_hnsw_idx",
+                "DROP INDEX IF EXISTS ghola.mnemes_embedding_hnsw_idx",
                 None,
                 &[],
             )
@@ -249,7 +249,7 @@ fn configure_dimensions(dims: i32) -> &'static str {
         client
             .update(
                 &format!(
-                    "ALTER TABLE pg_ghola.mnemes \
+                    "ALTER TABLE ghola.mnemes \
                      ALTER COLUMN embedding TYPE vector({dims})"
                 ),
                 None,
@@ -261,7 +261,7 @@ fn configure_dimensions(dims: i32) -> &'static str {
         client
             .update(
                 "CREATE INDEX mnemes_embedding_hnsw_idx \
-                 ON pg_ghola.mnemes USING hnsw (embedding vector_cosine_ops)",
+                 ON ghola.mnemes USING hnsw (embedding vector_cosine_ops)",
                 None,
                 &[],
             )
@@ -271,7 +271,7 @@ fn configure_dimensions(dims: i32) -> &'static str {
         client
             .update(
                 &format!(
-                    "UPDATE pg_ghola.config SET value = '{dims}' \
+                    "UPDATE ghola.config SET value = '{dims}' \
                      WHERE key = 'embedding_dims'"
                 ),
                 None,
@@ -377,13 +377,13 @@ mod tests {
         // Insert a row and verify search_vector is auto-populated
         let emb = zero_embedding_literal();
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (id, workspace_id, concept, content, embedding)
+            "INSERT INTO ghola.mnemes (id, workspace_id, concept, content, embedding)
              VALUES (gen_random_uuid(), gen_random_uuid(), 'k8s', 'pod scheduling', '{emb}'::vector)"
         ))
         .expect("insert into mnemes should succeed");
 
         let sv = Spi::get_one::<String>(
-            "SELECT search_vector::text FROM pg_ghola.mnemes WHERE concept = 'k8s'",
+            "SELECT search_vector::text FROM ghola.mnemes WHERE concept = 'k8s'",
         )
         .expect("query failed")
         .expect("search_vector should not be null");
@@ -400,7 +400,7 @@ mod tests {
         let emb = zero_embedding_literal();
         // 'dormant' is a valid state
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, state)
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, state)
              VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'dormant')"
         ))
         .expect("inserting with state='dormant' should succeed");
@@ -412,7 +412,7 @@ mod tests {
         let emb = zero_embedding_literal();
         // 'invalid' is not a valid state — should trigger CHECK violation
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, state)
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, state)
              VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
         ))
         .expect("should have failed");
@@ -424,7 +424,7 @@ mod tests {
         let id_a = "00000000-0000-0000-0000-000000000001";
         let id_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (id, workspace_id, concept, content, embedding)
+            "INSERT INTO ghola.mnemes (id, workspace_id, concept, content, embedding)
              VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'a content', '{emb}'::vector),
                     ('{id_b}'::uuid, gen_random_uuid(), 'b', 'b content', '{emb}'::vector)"
         ))
@@ -432,19 +432,19 @@ mod tests {
 
         // Same pair can have multiple association types
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, association_type)
+            "INSERT INTO ghola.associations (src_id, dst_id, association_type)
              VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 'hebbian')"
         ))
         .expect("hebbian association should succeed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, association_type)
+            "INSERT INTO ghola.associations (src_id, dst_id, association_type)
              VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 'supports')"
         ))
         .expect("supports association for same pair should succeed");
 
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.associations"
+            "SELECT count(*) FROM ghola.associations"
         )
         .expect("query failed")
         .expect("null");
@@ -457,7 +457,7 @@ mod tests {
         let id_a = "00000000-0000-0000-0000-000000000001";
         let id_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (id, workspace_id, concept, content, embedding)
+            "INSERT INTO ghola.mnemes (id, workspace_id, concept, content, embedding)
              VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'a content', '{emb}'::vector),
                     ('{id_b}'::uuid, gen_random_uuid(), 'b', 'b content', '{emb}'::vector)"
         ))
@@ -465,7 +465,7 @@ mod tests {
 
         // Directed: A contradicts B (src > dst is allowed for directed types)
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, association_type)
+            "INSERT INTO ghola.associations (src_id, dst_id, association_type)
              VALUES ('{id_b}'::uuid, '{id_a}'::uuid, 'contradicts')"
         ))
         .expect("directed association with src > dst should succeed");
@@ -478,14 +478,14 @@ mod tests {
         let id_a = "00000000-0000-0000-0000-000000000001";
         let id_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (id, workspace_id, concept, content, embedding)
+            "INSERT INTO ghola.mnemes (id, workspace_id, concept, content, embedding)
              VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'a content', '{emb}'::vector),
                     ('{id_b}'::uuid, gen_random_uuid(), 'b', 'b content', '{emb}'::vector)"
         ))
         .expect("inserting mnemes should succeed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, association_type)
+            "INSERT INTO ghola.associations (src_id, dst_id, association_type)
              VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 'invalid_type')"
         ))
         .expect("should have failed");
@@ -518,7 +518,7 @@ mod tests {
     #[pg_test]
     fn test_co_activation_queue_insert() {
         Spi::run(
-            "INSERT INTO pg_ghola.co_activation_queue (workspace_id, mneme_ids, scores)
+            "INSERT INTO ghola.co_activation_queue (workspace_id, mneme_ids, scores)
              VALUES (gen_random_uuid(), ARRAY[gen_random_uuid(), gen_random_uuid()]::uuid[], ARRAY[0.9, 0.7]::float8[])"
         )
         .expect("inserting into co_activation_queue should succeed");
@@ -528,7 +528,7 @@ mod tests {
     fn test_mnemes_default_values() {
         let emb = zero_embedding_literal();
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding)
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding)
              VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector)"
         ))
         .expect("insert should succeed");
@@ -537,7 +537,7 @@ mod tests {
         let row = Spi::get_one::<String>(
             "SELECT concat(confidence::text, '|', access_count::text, '|', state, \
                            '|', memory_type, '|', scope, '|', tier)
-             FROM pg_ghola.mnemes WHERE concept = 'test'",
+             FROM ghola.mnemes WHERE concept = 'test'",
         )
         .expect("query failed")
         .expect("null result");
@@ -550,7 +550,7 @@ mod tests {
     fn test_wrong_vector_dimensions_rejected() {
         // A 3-dim vector should be rejected by the vector(1024) column type
         Spi::run(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES (gen_random_uuid(), 'test', 'content', '[0.1, 0.2, 0.3]'::vector(1024))"
         )
         .expect("should have failed");
@@ -563,7 +563,7 @@ mod tests {
         let fake_a = "00000000-0000-0000-0000-000000000001";
         let fake_b = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
+            "INSERT INTO ghola.associations (src_id, dst_id, weight) \
              VALUES ('{fake_a}'::uuid, '{fake_b}'::uuid, 0.5)"
         ))
         .expect("should have failed with FK violation");
@@ -577,26 +577,26 @@ mod tests {
         let id_a = "00000000-0000-0000-0000-00000000aa01";
         let id_b = "ffffffff-ffff-ffff-ffff-ffffffaa0002";
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (id, workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (id, workspace_id, concept, content, embedding) \
              VALUES ('{id_a}'::uuid, gen_random_uuid(), 'a', 'content', '{emb}'::vector),
                     ('{id_b}'::uuid, gen_random_uuid(), 'b', 'content', '{emb}'::vector)"
         ))
         .expect("insert mnemes");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.associations (src_id, dst_id, weight) \
+            "INSERT INTO ghola.associations (src_id, dst_id, weight) \
              VALUES ('{id_a}'::uuid, '{id_b}'::uuid, 0.5)"
         ))
         .expect("insert assoc");
 
         // Delete one mneme — association should cascade-delete
         Spi::run(&format!(
-            "DELETE FROM pg_ghola.mnemes WHERE id = '{id_a}'::uuid"
+            "DELETE FROM ghola.mnemes WHERE id = '{id_a}'::uuid"
         ))
         .expect("delete mneme");
 
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.associations"
+            "SELECT count(*) FROM ghola.associations"
         )
         .expect("query failed")
         .expect("null");
@@ -611,7 +611,7 @@ mod tests {
     fn test_memory_type_check_invalid() {
         let emb = zero_embedding_literal();
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, memory_type)
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, memory_type)
              VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
         ))
         .expect("should have failed");
@@ -622,7 +622,7 @@ mod tests {
     fn test_scope_check_invalid() {
         let emb = zero_embedding_literal();
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, scope)
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, scope)
              VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
         ))
         .expect("should have failed");
@@ -633,7 +633,7 @@ mod tests {
     fn test_tier_check_invalid() {
         let emb = zero_embedding_literal();
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, tier)
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, tier)
              VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid')"
         ))
         .expect("should have failed");
@@ -649,7 +649,7 @@ mod tests {
             ("working", "personal", "state"),
         ] {
             Spi::run(&format!(
-                "INSERT INTO pg_ghola.mnemes \
+                "INSERT INTO ghola.mnemes \
                  (workspace_id, concept, content, embedding, memory_type, scope, tier) \
                  VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, \
                          '{mtype}', '{scope}', '{tier}')"
@@ -663,7 +663,7 @@ mod tests {
         let emb = zero_embedding_literal();
         let sid = "00000000-0000-0000-0000-000000000099";
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding, tags, session_id) \
              VALUES (gen_random_uuid(), 'tagged', 'content', '{emb}'::vector, \
                      ARRAY['rust', 'async']::text[], '{sid}'::uuid)"
@@ -671,7 +671,7 @@ mod tests {
         .expect("insert with tags and session_id should succeed");
 
         let tag_count = Spi::get_one::<i32>(
-            "SELECT array_length(tags, 1) FROM pg_ghola.mnemes WHERE concept = 'tagged'",
+            "SELECT array_length(tags, 1) FROM ghola.mnemes WHERE concept = 'tagged'",
         )
         .expect("query failed")
         .expect("null");
@@ -682,7 +682,7 @@ mod tests {
     fn test_expires_at_column() {
         let emb = zero_embedding_literal();
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes \
+            "INSERT INTO ghola.mnemes \
              (workspace_id, concept, content, embedding, memory_type, expires_at) \
              VALUES (gen_random_uuid(), 'ephemeral', 'temp content', '{emb}'::vector, \
                      'working', now() + interval '1 hour')"
@@ -690,7 +690,7 @@ mod tests {
         .expect("insert with expires_at should succeed");
 
         let has_expiry = Spi::get_one::<bool>(
-            "SELECT expires_at IS NOT NULL FROM pg_ghola.mnemes WHERE concept = 'ephemeral'",
+            "SELECT expires_at IS NOT NULL FROM ghola.mnemes WHERE concept = 'ephemeral'",
         )
         .expect("query failed")
         .expect("null");
@@ -719,7 +719,7 @@ mod tests {
     #[pg_test]
     fn test_config_table_has_default_dims() {
         let dims = Spi::get_one::<String>(
-            "SELECT value FROM pg_ghola.config WHERE key = 'embedding_dims'",
+            "SELECT value FROM ghola.config WHERE key = 'embedding_dims'",
         )
         .expect("query failed")
         .expect("null");
@@ -738,12 +738,12 @@ mod tests {
 
         // Disable contradiction trigger to avoid interference
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable trigger");
 
         // Insert two mnemes with the same session_id
         let m1 = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, session_id) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, session_id) \
              VALUES ('{ws}', 'topic', 'first note', '{emb}'::vector({DIMS}), '{session}'::uuid) \
              RETURNING id::text"
         ))
@@ -751,7 +751,7 @@ mod tests {
         .expect("null");
 
         let m2 = Spi::get_one::<String>(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding, session_id) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, session_id) \
              VALUES ('{ws}', 'topic', 'second note', '{emb}'::vector({DIMS}), '{session}'::uuid) \
              RETURNING id::text"
         ))
@@ -760,7 +760,7 @@ mod tests {
 
         // Should have created a session association m2 → m1
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM pg_ghola.associations \
+            "SELECT count(*) FROM ghola.associations \
              WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
                AND association_type = 'session'"
         ))
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(count, 1, "session trigger should create association between session peers");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable trigger");
     }
 
@@ -782,24 +782,24 @@ mod tests {
         let emb = zero_embedding_literal();
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
         ).expect("disable trigger");
 
         // Insert two mnemes without session_id
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'topic', 'no session 1', '{emb}'::vector({DIMS}))"
         ))
         .expect("insert failed");
 
         Spi::run(&format!(
-            "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', 'topic', 'no session 2', '{emb}'::vector({DIMS}))"
         ))
         .expect("insert failed");
 
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.associations WHERE association_type = 'session'",
+            "SELECT count(*) FROM ghola.associations WHERE association_type = 'session'",
         )
         .expect("query failed")
         .expect("null");
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(count, 0, "no session associations without session_id");
 
         Spi::run(
-            "ALTER TABLE pg_ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
         ).expect("enable trigger");
     }
 }

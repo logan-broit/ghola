@@ -109,7 +109,7 @@ mod tests {
     fn test_worker_stats_singleton_seeded() {
         // The singleton row should be pre-seeded by the extension install
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pg_ghola.worker_stats",
+            "SELECT count(*) FROM ghola.worker_stats",
         )
         .expect("query failed")
         .expect("null result");
@@ -121,7 +121,7 @@ mod tests {
     fn test_worker_stats_singleton_enforced() {
         // Attempting to insert a second row should fail
         Spi::run(
-            "INSERT INTO pg_ghola.worker_stats (id) VALUES (2)",
+            "INSERT INTO ghola.worker_stats (id) VALUES (2)",
         )
         .expect("should have failed");
     }
@@ -129,7 +129,7 @@ mod tests {
     #[pg_test]
     fn test_worker_stats_default_state() {
         let state = Spi::get_one::<String>(
-            "SELECT state FROM pg_ghola.worker_stats WHERE id = 1",
+            "SELECT state FROM ghola.worker_stats WHERE id = 1",
         )
         .expect("query failed")
         .expect("null result");
@@ -153,7 +153,7 @@ mod tests {
     #[pg_test]
     fn test_get_worker_stats_callable() {
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM pg_ghola.get_worker_stats() AS s",
+            "SELECT (s).state FROM ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -163,7 +163,7 @@ mod tests {
     #[pg_test]
     fn test_get_worker_stats_uptime() {
         let uptime = Spi::get_one::<f64>(
-            "SELECT (s).uptime_seconds FROM pg_ghola.get_worker_stats() AS s",
+            "SELECT (s).uptime_seconds FROM ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -174,7 +174,7 @@ mod tests {
     fn test_worker_stats_upsert() {
         // Simulate the worker updating stats
         Spi::run(
-            "UPDATE pg_ghola.worker_stats SET
+            "UPDATE ghola.worker_stats SET
                 state = 'active',
                 queue_depth = 42,
                 batches_processed = 10,
@@ -188,14 +188,14 @@ mod tests {
         .expect("update should succeed");
 
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM pg_ghola.get_worker_stats() AS s",
+            "SELECT (s).state FROM ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
         assert_eq!(state, "active");
 
         let depth = Spi::get_one::<i64>(
-            "SELECT (s).queue_depth FROM pg_ghola.get_worker_stats() AS s",
+            "SELECT (s).queue_depth FROM ghola.get_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
