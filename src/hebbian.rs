@@ -433,7 +433,7 @@ mod tests {
         Spi::get_one::<String>(&format!(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws_id}', '{concept}', '{content}', \
-             '{vec_literal}'::vector(768)) \
+             '{vec_literal}'::vector) \
              RETURNING id::text"
         ))
         .expect("insert failed")

@@ -20,7 +20,7 @@ CREATE TABLE mnemes (
     workspace_id    uuid NOT NULL,
     concept         text NOT NULL,
     content         text NOT NULL,
-    embedding       vector(768) NOT NULL,
+    embedding       vector(1024) NOT NULL,
     search_vector   tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', concept), 'A') ||
         setweight(to_tsvector('english', content), 'B')
@@ -548,10 +548,10 @@ mod tests {
     #[pg_test]
     #[should_panic(expected = "expected 768 dimensions")]
     fn test_wrong_vector_dimensions_rejected() {
-        // A 3-dim vector should be rejected by the vector(768) column type
+        // A 3-dim vector should be rejected by the vector(1024) column type
         Spi::run(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES (gen_random_uuid(), 'test', 'content', '[0.1, 0.2, 0.3]'::vector(768))"
+             VALUES (gen_random_uuid(), 'test', 'content', '[0.1, 0.2, 0.3]'::vector(1024))"
         )
         .expect("should have failed");
     }

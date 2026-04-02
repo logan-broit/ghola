@@ -18,8 +18,9 @@ const ONE_MINUTE_DAYS: f64 = 1.0 / 1440.0;
 // ---------------------------------------------------------------------------
 // SQL wrapper: recall()
 //
-// Provides the public interface with vector(768) and score_weights types.
+// Provides the public interface with vector and score_weights types.
 // Delegates to recall_inner() which handles the actual computation.
+// Uses untyped vector to support any embedding dimension.
 // ---------------------------------------------------------------------------
 
 extension_sql!(
@@ -27,7 +28,7 @@ extension_sql!(
 CREATE FUNCTION recall(
     workspace_id uuid,
     query_text text,
-    query_embedding vector(768),
+    query_embedding vector,
     limit_n int DEFAULT 10,
     min_confidence float8 DEFAULT 0.0,
     weights pg_ghola.score_weights DEFAULT NULL,
@@ -161,7 +162,7 @@ fn recall_inner(
             "WITH hnsw_candidates AS ( \
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
-                       (1.0 - (embedding <=> '{emb}'::vector(768)))::float8 AS cosine_sim, \
+                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
                        ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
                 FROM pg_ghola.mnemes \
@@ -169,13 +170,13 @@ fn recall_inner(
                   AND state = 'active' \
                   AND confidence >= {min_conf} \
                   {filters} \
-                ORDER BY embedding <=> '{emb}'::vector(768) \
+                ORDER BY embedding <=> '{emb}'::vector \
                 LIMIT {pool} \
             ), \
             fts_candidates AS ( \
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
-                       (1.0 - (embedding <=> '{emb}'::vector(768)))::float8 AS cosine_sim, \
+                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
                        ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
                 FROM pg_ghola.mnemes \
@@ -438,7 +439,7 @@ mod tests {
         Spi::get_one::<String>(&format!(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws_id}', '{concept}', '{content}', \
-             '{embedding}'::vector(768)) \
+             '{embedding}'::vector) \
              RETURNING id::text"
         ))
         .expect("insert failed")
@@ -461,7 +462,7 @@ mod tests {
             "SELECT count(*) FROM pg_ghola.recall(\
                 '{ws_id}'::uuid, \
                 'kubernetes pod scheduling', \
-                '{emb}'::vector(768), \
+                '{emb}'::vector, \
                 10, 0.0, NULL)"
         ))
         .expect("query failed")
@@ -479,7 +480,7 @@ mod tests {
         // Check that all fields of recall_result are accessible
         let score = Spi::get_one::<f64>(&format!(
             "SELECT (r).score FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 10, 0.0, NULL) AS r LIMIT 1"
         ))
         .expect("query failed")
@@ -495,7 +496,7 @@ mod tests {
 
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 2, 0.0, NULL)"
         ))
         .expect("query failed")
@@ -530,7 +531,7 @@ mod tests {
 
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 10, 0.7, NULL)"
         ))
         .expect("query failed")
@@ -553,7 +554,7 @@ mod tests {
         let other_ws = "00000000-0000-0000-0000-000000000042";
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_ghola.recall(\
-                '{other_ws}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{other_ws}'::uuid, 'kubernetes', '{emb}'::vector, \
                 10, 0.0, NULL)"
         ))
         .expect("query failed")
@@ -578,7 +579,7 @@ mod tests {
         // Execute recall
         Spi::run(&format!(
             "SELECT * FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 10, 0.0, NULL)"
         ))
         .expect("recall failed");
@@ -607,7 +608,7 @@ mod tests {
         // No mnemes in this workspace, should return empty but still enqueue
         Spi::run(&format!(
             "SELECT * FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'nonexistent topic', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'nonexistent topic', '{emb}'::vector, \
                 10, 0.0, NULL)"
         ))
         .expect("recall failed");
@@ -633,7 +634,7 @@ mod tests {
         // Score with default weights (semantic=0.6, fts=0.4)
         let score_default = Spi::get_one::<f64>(&format!(
             "SELECT (r).score FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 1, 0.0, NULL) AS r LIMIT 1"
         ))
         .expect("query failed")
@@ -642,7 +643,7 @@ mod tests {
         // Score with semantic-only weights (semantic=1.0, fts=0.0)
         let score_semantic_only = Spi::get_one::<f64>(&format!(
             "SELECT (r).score FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 1, 0.0, (1.0, 0.0, 0.5, 4.0)::pg_ghola.score_weights) AS r LIMIT 1"
         ))
         .expect("query failed")
@@ -677,7 +678,7 @@ mod tests {
         let has_boost = Spi::get_one::<bool>(&format!(
             "SELECT EXISTS( \
                 SELECT 1 FROM pg_ghola.recall( \
-                    '{ws_id}'::uuid, 'kubernetes docker', '{emb}'::vector(768), \
+                    '{ws_id}'::uuid, 'kubernetes docker', '{emb}'::vector, \
                     10, 0.0, NULL) \
                 WHERE hebbian_boost > 0 \
             )"
@@ -708,7 +709,7 @@ mod tests {
         // Execute recall
         Spi::run(&format!(
             "SELECT * FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), 10, 0.0, NULL)"
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, 10, 0.0, NULL)"
         ))
         .expect("recall failed");
 
@@ -737,7 +738,7 @@ mod tests {
                 .select(
                     &format!(
                         "SELECT (r).score FROM pg_ghola.recall(\
-                            '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                            '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                             10, 0.0, NULL) AS r"
                     ),
                     None,
@@ -784,7 +785,7 @@ mod tests {
                     &format!(
                         "SELECT (r).mneme_id::text, (r).score, (r).content_match \
                          FROM pg_ghola.recall( \
-                             '{ws_id}'::uuid, 'query', '{emb}'::vector(768), \
+                             '{ws_id}'::uuid, 'query', '{emb}'::vector, \
                              10, 0.0, NULL \
                          ) AS r"
                     ),
@@ -842,7 +843,7 @@ mod tests {
 
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM pg_ghola.recall(\
-                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector(768), \
+                '{ws_id}'::uuid, 'kubernetes', '{emb}'::vector, \
                 10, 0.0, NULL)"
         ))
         .expect("query failed")

@@ -513,7 +513,7 @@ mod tests {
         let emb = embedding(fill);
         let id = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector(768)) \
+             VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector) \
              RETURNING id::text"
         ))
         .expect("insert failed")
@@ -605,13 +605,13 @@ mod tests {
 
         let _m1 = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'topic a', 'content about dogs', '{emb_a}'::vector(768)) \
+             VALUES ('{ws}', 'topic a', 'content about dogs', '{emb_a}'::vector) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
         let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'topic b', 'content about quantum physics', '{emb_b}'::vector(768)) \
+             VALUES ('{ws}', 'topic b', 'content about quantum physics', '{emb_b}'::vector) \
              RETURNING id::text"
         )).expect("insert failed").expect("null");
 
@@ -947,7 +947,7 @@ mod tests {
         let emb = embedding(0.5);
         Spi::run(&format!(
             "INSERT INTO pg_ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector(768))"
+             VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector)"
         )).expect("insert with trigger failed");
 
         let count = Spi::get_one::<i64>(&format!(
