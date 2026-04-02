@@ -275,6 +275,25 @@ func (s *Server) Tools() []Tool {
 				Required: []string{"session_id"},
 			},
 		},
+		{
+			Name:        "feedback",
+			Description: "Provide explicit positive or negative feedback on a memory to adjust its confidence score. Use 'positive' when a memory was helpful, 'negative' when it was unhelpful, or 'wrong' when it contains incorrect information.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"memory_id": {
+						Type:        "string",
+						Description: "UUID of the memory to provide feedback on.",
+					},
+					"rating": {
+						Type:        "string",
+						Description: "Feedback rating: 'positive' (helpful, boosts confidence), 'negative' (unhelpful, reduces confidence), or 'wrong' (incorrect, strongly reduces confidence).",
+						Enum:        []string{"positive", "negative", "wrong"},
+					},
+				},
+				Required: []string{"memory_id", "rating"},
+			},
+		},
 	}
 }
 
@@ -367,6 +386,8 @@ func (s *Server) callTool(authCtx *auth.Context, params CallToolParams) CallTool
 		result = s.handleSessionSummary(authCtx, params.Arguments)
 	case "session_context":
 		result = s.handleSessionContext(authCtx, params.Arguments)
+	case "feedback":
+		result = s.handleFeedback(authCtx, params.Arguments)
 	default:
 		result = toolError(fmt.Sprintf("Unknown tool: %s", params.Name))
 	}
@@ -435,6 +456,13 @@ func (s *Server) createAuditLog(authCtx *auth.Context, params CallToolParams, re
 	case "session_summary", "session_context":
 		if sid, ok := params.Arguments["session_id"].(string); ok && len(sid) >= 8 {
 			details["target_session"] = sid[:8] + "..."
+		}
+	case "feedback":
+		if memID, ok := params.Arguments["memory_id"].(string); ok {
+			details["memory_id"] = memID
+		}
+		if rating, ok := params.Arguments["rating"].(string); ok {
+			details["rating"] = rating
 		}
 	}
 

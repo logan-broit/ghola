@@ -317,6 +317,48 @@ func (s *Store) ConfirmRecall(ctx context.Context, mnemeIDs []uuid.UUID) error {
 	return err
 }
 
+// WeightedConfirmRecall applies score-weighted Bayesian confidence updates for recalled mnemes.
+// Higher recall scores produce stronger confirmation evidence.
+func (s *Store) WeightedConfirmRecall(ctx context.Context, mnemeIDs []uuid.UUID, scores []float64) error {
+	if len(mnemeIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for i, id := range mnemeIDs {
+		var evidence float64
+		switch {
+		case scores[i] >= 0.8:
+			evidence = 0.80
+		case scores[i] >= 0.5:
+			evidence = 0.65
+		default: // >= 0.3 (caller filters below 0.3)
+			evidence = 0.55
+		}
+		if _, err := tx.Exec(ctx, weightedConfirmSingle, id, evidence); err != nil {
+			return fmt.Errorf("weighted confirm mneme %s: %w", id, err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// FeedbackMemory applies an explicit evidence signal to a mneme's confidence.
+func (s *Store) FeedbackMemory(ctx context.Context, userID, orgID uuid.UUID, mnemeID uuid.UUID, evidence float64) (float64, error) {
+	ws := workspaces(userID, orgID)
+	var confidence float64
+	err := s.pool.QueryRow(ctx, feedbackUpdate, mnemeID, evidence, ws).Scan(&confidence)
+	if err != nil {
+		return 0, fmt.Errorf("feedback update failed: %w", err)
+	}
+	return confidence, nil
+}
+
 // Forget deletes a mneme by ID, verifying ownership via workspace membership.
 func (s *Store) Forget(ctx context.Context, userID, orgID uuid.UUID, mnemeID uuid.UUID) error {
 	// Try personal workspace first, then org

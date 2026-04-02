@@ -99,6 +99,10 @@ ORDER BY MAX(created_at) DESC
 LIMIT $2
 `
 
+const weightedConfirmSingle = `UPDATE pg_recall.mnemes SET confidence = pg_recall.bayesian_update(confidence, $2) WHERE id = $1`
+
+const feedbackUpdate = `UPDATE pg_recall.mnemes SET confidence = pg_recall.bayesian_update(confidence, $2) WHERE id = $1 AND workspace_id = ANY($3) RETURNING confidence`
+
 const getSessionMemories = `
 SELECT id, workspace_id, concept, content, confidence, access_count,
        last_access, created_at, state, memory_type, scope, tier, tags,

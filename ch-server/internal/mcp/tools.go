@@ -187,13 +187,23 @@ func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallTo
 		mnemeIDs = append(mnemeIDs, r.MnemeID)
 	}
 
-	// Confirm recall in background (Bayesian confidence update)
-	if len(mnemeIDs) > 0 {
-		ids := mnemeIDs
+	// Score-weighted confirmation in background (Bayesian confidence update)
+	// Only confirm mnemes with score >= 0.3 to skip noise.
+	var filteredIDs []uuid.UUID
+	var filteredScores []float64
+	for i, r := range results {
+		if r.Score >= 0.3 {
+			filteredIDs = append(filteredIDs, mnemeIDs[i])
+			filteredScores = append(filteredScores, r.Score)
+		}
+	}
+	if len(filteredIDs) > 0 {
+		ids := filteredIDs
+		scores := filteredScores
 		s.goBackground(func() {
 			trackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.store.ConfirmRecall(trackCtx, ids); err != nil {
+			if err := s.store.WeightedConfirmRecall(trackCtx, ids, scores); err != nil {
 				s.logger.Warn("failed to confirm recall",
 					"error", err.Error(),
 				)
@@ -377,6 +387,38 @@ func (s *Server) handleExportMemories(authCtx *auth.Context, args map[string]any
 
 	output := strings.Join(jsonlLines, "\n") + "\n"
 	return toolResult(fmt.Sprintf("Exported %d memories:\n\n%s", len(jsonlLines), output))
+}
+
+var validRatings = map[string]float64{
+	"positive": 0.85,
+	"negative": 0.20,
+	"wrong":    0.05,
+}
+
+func (s *Server) handleFeedback(authCtx *auth.Context, args map[string]any) CallToolResult {
+	memoryIDStr, _ := args["memory_id"].(string)
+	if memoryIDStr == "" {
+		return toolError("memory_id is required")
+	}
+
+	mnemeID, err := uuid.Parse(memoryIDStr)
+	if err != nil {
+		return toolError("memory_id must be a valid UUID")
+	}
+
+	rating, _ := args["rating"].(string)
+	evidence, ok := validRatings[rating]
+	if !ok {
+		return toolError("rating must be 'positive', 'negative', or 'wrong'")
+	}
+
+	ctx := auth.WithContext(context.Background(), authCtx)
+	newConf, err := s.store.FeedbackMemory(ctx, authCtx.UserID, authCtx.OrgID, mnemeID, evidence)
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	return toolResult(fmt.Sprintf("Feedback recorded for %s (%s). New confidence: %.3f", mnemeID, rating, newConf))
 }
 
 // matchesTags returns true if tags contains all entries in filter (AND logic).
