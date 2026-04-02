@@ -204,7 +204,7 @@ const renderScript = `
   const { chromium } = require('${pwPath}');
   (async () => {
     const browser = await chromium.launch({ args: ['--no-sandbox'] });
-    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 }, deviceScaleFactor: 2 });
     await page.goto('file://${tmpHtml}');
     await page.waitForLoadState('networkidle');
     const el = await page.locator('.report');
