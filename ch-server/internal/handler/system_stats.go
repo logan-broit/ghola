@@ -29,7 +29,7 @@ type PostgresStats struct {
 	CanceledAcquireCount int64 `json:"canceled_acquire_count"`
 }
 
-// MemoryStats holds mneme statistics from pg_recall.
+// MemoryStats holds mneme statistics from pg_ghola.
 type MemoryStats struct {
 	UsersWithMemories int64 `json:"users_with_memories"`
 	TotalMemoryBlocks int64 `json:"total_memory_blocks"`
@@ -90,7 +90,7 @@ func (h *SystemStatsHandler) GetSystemStats(w http.ResponseWriter, r *http.Reque
 func (h *SystemStatsHandler) GetMemoryTypeDistribution(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT memory_type, COUNT(*)::bigint AS count
-		FROM pg_recall.mnemes
+		FROM pg_ghola.mnemes
 		WHERE state = 'active'
 		  AND memory_type IS NOT NULL
 		GROUP BY memory_type
@@ -128,7 +128,7 @@ func (h *SystemStatsHandler) GetTopTags(w http.ResponseWriter, r *http.Request) 
 		SELECT tag, COUNT(*)::bigint AS count
 		FROM (
 			SELECT unnest(tags) AS tag
-			FROM pg_recall.mnemes
+			FROM pg_ghola.mnemes
 			WHERE state = 'active'
 			  AND array_length(tags, 1) > 0
 		) AS tags_extracted
@@ -160,7 +160,7 @@ func (h *SystemStatsHandler) GetTopTags(w http.ResponseWriter, r *http.Request) 
 func (h *SystemStatsHandler) GetMemoryScopeDistribution(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT scope, COUNT(*)::bigint AS count
-		FROM pg_recall.mnemes
+		FROM pg_ghola.mnemes
 		WHERE state = 'active'
 		  AND scope IS NOT NULL
 		GROUP BY scope
@@ -193,7 +193,7 @@ func queryMemoryStats(ctx context.Context, pool *pgxpool.Pool) (*MemoryStats, er
 			COUNT(*)::bigint AS total_memory_blocks,
 			COALESCE(SUM(LENGTH(content)), 0)::bigint AS total_content_bytes,
 			COUNT(DISTINCT concept)::bigint AS unique_memory_names
-		FROM pg_recall.mnemes
+		FROM pg_ghola.mnemes
 		WHERE state = 'active'
 	`).Scan(
 		&stats.UsersWithMemories,

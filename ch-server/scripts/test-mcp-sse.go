@@ -111,7 +111,7 @@ func main() {
 		Params: map[string]any{
 			"name": "remember",
 			"arguments": map[string]any{
-				"fact": "The Chapterhouse project uses CloudNativePG for PostgreSQL with the pg_recall extension for vector search",
+				"fact": "The Chapterhouse project uses CloudNativePG for PostgreSQL with the pg_ghola extension for vector search",
 				"tags": []string{"chapterhouse", "infrastructure"},
 			},
 		},

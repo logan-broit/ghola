@@ -120,7 +120,7 @@ func run() error {
 		slog.String("model", cfg.Embedding.Model),
 	)
 
-	// pg_recall store — replaces Qdrant + memory_blocks
+	// pg_ghola store — replaces Qdrant + memory_blocks
 	store := mneme.NewStore(pool, embedder, logger)
 
 	healthHandler := handler.NewHealthHandler(pool)

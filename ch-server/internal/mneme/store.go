@@ -17,7 +17,7 @@ import (
 
 const nearDuplicateThreshold = 0.92
 
-// Mneme represents a single memory unit from pg_recall.mnemes.
+// Mneme represents a single memory unit from pg_ghola.mnemes.
 type Mneme struct {
 	ID          uuid.UUID
 	WorkspaceID uuid.UUID
@@ -43,7 +43,7 @@ type NearDuplicate struct {
 	Similarity float64
 }
 
-// RecallResult represents a single result from pg_recall.recall().
+// RecallResult represents a single result from pg_ghola.recall().
 type RecallResult struct {
 	MnemeID      uuid.UUID
 	Score        float64
@@ -64,14 +64,14 @@ type Session struct {
 	LastActivity  time.Time
 }
 
-// Store provides pg_recall storage operations.
+// Store provides pg_ghola storage operations.
 type Store struct {
 	pool     *pgxpool.Pool
 	embedder embedding.Provider
 	logger   *slog.Logger
 }
 
-// NewStore creates a new pg_recall store.
+// NewStore creates a new pg_ghola store.
 func NewStore(pool *pgxpool.Pool, embedder embedding.Provider, logger *slog.Logger) *Store {
 	return &Store{pool: pool, embedder: embedder, logger: logger}
 }
@@ -169,7 +169,7 @@ func (s *Store) Remember(ctx context.Context, userID, orgID uuid.UUID, fact, mem
 		oldID = &existing.ID
 	}
 
-	// 3. INSERT into pg_recall.mnemes
+	// 3. INSERT into pg_ghola.mnemes
 	vecStr := vectorToString(vec)
 	insertRow := s.pool.QueryRow(ctx, insertMneme,
 		wsID, concept, fact, vecStr,
@@ -215,7 +215,7 @@ func (s *Store) Remember(ctx context.Context, userID, orgID uuid.UUID, fact, mem
 	return m, dup, nil
 }
 
-// Recall searches memories using pg_recall.recall(), querying both personal and org workspaces.
+// Recall searches memories using pg_ghola.recall(), querying both personal and org workspaces.
 func (s *Store) Recall(ctx context.Context, userID, orgID uuid.UUID, query string, limit int, mode, memType string, tags []string, sessionID *uuid.UUID) ([]RecallResult, error) {
 	vec, err := s.embedder.Embed(ctx, query)
 	if err != nil {

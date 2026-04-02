@@ -52,13 +52,13 @@ func run() error {
 	}
 	logger.Info("database connectivity verified")
 
-	// Verify pg_recall extension is available
+	// Verify pg_ghola extension is available
 	var extVersion string
-	err = pool.QueryRow(ctx, "SELECT extversion FROM pg_extension WHERE extname = 'pg_recall'").Scan(&extVersion)
+	err = pool.QueryRow(ctx, "SELECT extversion FROM pg_extension WHERE extname = 'pg_ghola'").Scan(&extVersion)
 	if err != nil {
-		return fmt.Errorf("pg_recall extension not found — ensure the custom CNPG image includes pg_recall: %w", err)
+		return fmt.Errorf("pg_ghola extension not found — ensure the custom CNPG image includes pg_ghola: %w", err)
 	}
-	logger.Info("pg_recall extension verified", slog.String("version", extVersion))
+	logger.Info("pg_ghola extension verified", slog.String("version", extVersion))
 
 	logger.Info("init complete")
 	return nil
