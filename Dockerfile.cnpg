@@ -45,8 +45,7 @@ COPY Cargo.toml Cargo.lock pg_ghola.control ./
 COPY src/ src/
 COPY .cargo/ .cargo/
 
-# Build and install pg_ghola (target x86-64-v2 for NUC compatibility)
-ENV RUSTFLAGS="-C target-cpu=x86-64-v2"
+# Build and install pg_ghola (no target-cpu override; bullseye default is safe for NUC)
 RUN cargo pgrx install --pg-config /usr/bin/pg_config --release
 
 # --- Stage 2: Runtime ---
