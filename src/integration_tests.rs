@@ -824,18 +824,32 @@ mod tests {
              VALUES ('{ws}', 'python version', 'Python 3.8 is the latest release', '{emb}'::vector(768))"
         )).expect("first insert failed");
 
-        // Insert contradicting mneme (trigger should detect and flag)
-        Spi::run(&format!(
+        // Insert contradicting mneme (trigger should enqueue, not flag directly)
+        let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(768))"
-        )).expect("second insert failed");
+             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(768)) \
+             RETURNING id::text"
+        )).expect("second insert failed").expect("null");
 
+        // Verify the trigger enqueued to contradiction_queue (async behavior)
+        let queued = Spi::get_one::<i64>(
+            &format!("SELECT count(*) FROM ghola.contradiction_queue \
+                      WHERE workspace_id = '{ws}'::uuid")
+        ).expect("query failed").expect("null");
+        assert!(queued >= 1, "trigger should have enqueued to contradiction_queue, got {queued}");
+
+        // Simulate worker: manually call flag_contradictions
+        let flagged = Spi::get_one::<i64>(&format!(
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+        )).expect("flag failed").expect("null");
+        assert!(flagged >= 1, "flag_contradictions should find candidates");
+
+        // Verify candidates now exist
         let pending = Spi::get_one::<i64>(
             &format!("SELECT count(*) FROM ghola.contradiction_candidates \
                       WHERE workspace_id = '{ws}'::uuid AND status = 'pending'")
         ).expect("query failed").expect("null");
-
-        assert!(pending >= 1, "trigger should have flagged a contradiction candidate, got {pending}");
+        assert!(pending >= 1, "should have pending contradiction candidates after manual flagging");
     }
 
     #[pg_test]

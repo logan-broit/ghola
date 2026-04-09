@@ -945,12 +945,25 @@ mod tests {
         // Insert first mneme with trigger disabled
         let _m1 = insert_mneme_no_trigger(ws, "db", "PostgreSQL is relational", 0.5);
 
-        // Insert second mneme WITH trigger enabled — should auto-flag
+        // Insert second mneme WITH trigger enabled -- should enqueue
         let emb = embedding(0.5);
-        Spi::run(&format!(
+        let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector)"
-        )).expect("insert with trigger failed");
+             VALUES ('{ws}', 'db', 'PostgreSQL is document-oriented', '{emb}'::vector) \
+             RETURNING id::text"
+        )).expect("insert with trigger failed").expect("null");
+
+        // Verify enqueue (async behavior)
+        let queued = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM ghola.contradiction_queue \
+             WHERE workspace_id = '{ws}'::uuid"
+        )).expect("query failed").expect("null");
+        assert!(queued >= 1, "trigger should enqueue to contradiction_queue");
+
+        // Simulate worker processing
+        Spi::run(&format!(
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+        )).expect("manual flag failed");
 
         let count = Spi::get_one::<i64>(&format!(
             "SELECT count(*) FROM ghola.contradiction_candidates \
@@ -958,8 +971,7 @@ mod tests {
         ))
         .expect("query failed")
         .expect("null");
-
-        assert!(count >= 1, "trigger should auto-flag contradiction candidate");
+        assert!(count >= 1, "should have candidates after manual flagging");
     }
 
     #[pg_test]
