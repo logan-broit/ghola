@@ -31,7 +31,7 @@ RUN cargo pgrx init --pg18=/usr/bin/pg_config
 
 # Build pgvector
 RUN cd /tmp && git clone https://github.com/pgvector/pgvector.git && \
-    cd pgvector && make PG_CONFIG=/usr/bin/pg_config && \
+    cd pgvector && make PG_CONFIG=/usr/bin/pg_config OPTFLAGS="-march=x86-64-v2" && \
     make PG_CONFIG=/usr/bin/pg_config install
 
 # Copy pg_ghola source
