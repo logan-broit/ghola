@@ -1,8 +1,8 @@
-# Build pg_ghola for CNPG PG18 (Debian trixie)
+# Build pg_ghola for CNPG PG18 (Debian bullseye to match CNPG runtime glibc 2.31)
 # Two-stage: build in Rust+PG dev image, copy .so into CNPG base
 
 # --- Stage 1: Build ---
-FROM debian:trixie-slim AS builder
+FROM debian:bullseye-slim AS builder
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -45,7 +45,8 @@ COPY Cargo.toml Cargo.lock pg_ghola.control ./
 COPY src/ src/
 COPY .cargo/ .cargo/
 
-# Build and install pg_ghola
+# Build and install pg_ghola (target x86-64-v2 for NUC compatibility)
+ENV RUSTFLAGS="-C target-cpu=x86-64-v2"
 RUN cargo pgrx install --pg-config /usr/bin/pg_config --release
 
 # --- Stage 2: Runtime ---
