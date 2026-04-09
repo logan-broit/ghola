@@ -309,15 +309,15 @@ mod tests {
         let ws = "20000000-0000-0000-0000-000000000001";
         let m1 = insert_mneme(ws, "rust", "systems programming language", 0.20);
 
-        // Initial confidence should be the default 0.5
+        // Initial confidence should be the default 1.0 (trust by default)
         let conf_initial = Spi::get_one::<f64>(&format!(
             "SELECT confidence FROM ghola.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
         assert!(
-            (conf_initial - 0.5).abs() < 0.01,
-            "initial confidence should be 0.5, got {conf_initial}"
+            (conf_initial - 1.0).abs() < 0.01,
+            "initial confidence should be 1.0, got {conf_initial}"
         );
 
         // Confirm recall should increase confidence

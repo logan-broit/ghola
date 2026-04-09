@@ -25,7 +25,7 @@ CREATE TABLE mnemes (
         setweight(to_tsvector('english', concept), 'A') ||
         setweight(to_tsvector('english', content), 'B')
     ) STORED,
-    confidence      double precision NOT NULL DEFAULT 0.5,
+    confidence      double precision NOT NULL DEFAULT 1.0,
     access_count    integer NOT NULL DEFAULT 0,
     last_access     timestamptz NOT NULL DEFAULT now(),
     created_at      timestamptz NOT NULL DEFAULT now(),
