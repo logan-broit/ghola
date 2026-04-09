@@ -463,7 +463,8 @@ extension_sql!(
 CREATE OR REPLACE FUNCTION contradiction_check_trigger()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM @extschema@.flag_contradictions(NEW.id, 0.85);
+    INSERT INTO @extschema@.contradiction_queue (workspace_id, mneme_id)
+    VALUES (NEW.workspace_id, NEW.id);
     RETURN NEW;
 END;
 $$;
@@ -477,6 +478,7 @@ CREATE TRIGGER mneme_contradiction_check
     requires = [
         "create_mnemes_table",
         "create_contradiction_candidates_table",
+        "create_contradiction_queue_table",
     ],
 );
 
