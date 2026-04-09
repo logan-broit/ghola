@@ -1,8 +1,11 @@
-# Build pg_ghola for CNPG PG18 (Debian bullseye to match CNPG runtime glibc 2.31)
-# Two-stage: build in Rust+PG dev image, copy .so into CNPG base
+# Build pg_ghola for CNPG PG18
+# Single-base: use CNPG image for BOTH build and runtime to guarantee ABI compatibility
+# Build tools installed temporarily, then removed in runtime stage via multi-stage copy
 
-# --- Stage 1: Build ---
-FROM debian:bullseye-slim AS builder
+# --- Stage 1: Build (on the CNPG base itself) ---
+FROM ghcr.io/cloudnative-pg/postgresql:18 AS builder
+
+USER root
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -13,28 +16,20 @@ RUN apt-get update && apt-get install -y \
     libclang-dev \
     clang \
     gnupg \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/*
-
-# Add PGDG repo for PG18
-RUN sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' && \
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg && \
-    apt-get update && apt-get install -y \
     postgresql-server-dev-18 \
-    postgresql-18 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust (pin to 1.90.0 to match local build that produced working 0.0.1)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.90.0
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install cargo-pgrx
 RUN cargo install cargo-pgrx@0.17.0
 
-# Init pgrx with system PG18
+# Init pgrx with CNPG's PG18
 RUN cargo pgrx init --pg18=/usr/bin/pg_config
 
-# Build pgvector from HEAD (needed for PG18 compat)
+# Build pgvector
 RUN cd /tmp && git clone https://github.com/pgvector/pgvector.git && \
     cd pgvector && make PG_CONFIG=/usr/bin/pg_config && \
     make PG_CONFIG=/usr/bin/pg_config install
@@ -45,10 +40,10 @@ COPY Cargo.toml Cargo.lock pg_ghola.control ./
 COPY src/ src/
 COPY .cargo/ .cargo/
 
-# Build and install pg_ghola (no target-cpu override; bullseye default is safe for NUC)
+# Build and install pg_ghola
 RUN cargo pgrx install --pg-config /usr/bin/pg_config --release
 
-# --- Stage 2: Runtime ---
+# --- Stage 2: Clean runtime (same base, no build tools) ---
 FROM ghcr.io/cloudnative-pg/postgresql:18
 
 USER root
@@ -58,8 +53,6 @@ COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /usr/lib/postgresql/18/
 COPY --from=builder /usr/share/postgresql/18/extension/vector* /usr/share/postgresql/18/extension/
 
 # Copy pg_ghola from builder
-# NOTE: extension installs as pg_ghola but production DB uses pg_recall schema.
-# For backward compat, create symlinks so both names work.
 COPY --from=builder /usr/lib/postgresql/18/lib/pg_ghola.so /usr/lib/postgresql/18/lib/
 COPY --from=builder /usr/share/postgresql/18/extension/pg_ghola* /usr/share/postgresql/18/extension/
 RUN ln -sf /usr/lib/postgresql/18/lib/pg_ghola.so /usr/lib/postgresql/18/lib/pg_recall.so && \
