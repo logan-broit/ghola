@@ -61,7 +61,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_tables_exist() {
-        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config"] {
+        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
                  WHERE table_schema = 'pg_ghola' AND table_name = '{table}')"
@@ -824,18 +824,32 @@ mod tests {
              VALUES ('{ws}', 'python version', 'Python 3.8 is the latest release', '{emb}'::vector(768))"
         )).expect("first insert failed");
 
-        // Insert contradicting mneme (trigger should detect and flag)
-        Spi::run(&format!(
+        // Insert contradicting mneme (trigger should enqueue, not flag directly)
+        let m2 = Spi::get_one::<String>(&format!(
             "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
-             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(768))"
-        )).expect("second insert failed");
+             VALUES ('{ws}', 'python version', 'Python 3.12 is the latest release', '{emb}'::vector(768)) \
+             RETURNING id::text"
+        )).expect("second insert failed").expect("null");
 
+        // Verify the trigger enqueued to contradiction_queue (async behavior)
+        let queued = Spi::get_one::<i64>(
+            &format!("SELECT count(*) FROM ghola.contradiction_queue \
+                      WHERE workspace_id = '{ws}'::uuid")
+        ).expect("query failed").expect("null");
+        assert!(queued >= 1, "trigger should have enqueued to contradiction_queue, got {queued}");
+
+        // Simulate worker: manually call flag_contradictions
+        let flagged = Spi::get_one::<i64>(&format!(
+            "SELECT ghola.flag_contradictions('{m2}'::uuid, 0.85)"
+        )).expect("flag failed").expect("null");
+        assert!(flagged >= 1, "flag_contradictions should find candidates");
+
+        // Verify candidates now exist
         let pending = Spi::get_one::<i64>(
             &format!("SELECT count(*) FROM ghola.contradiction_candidates \
                       WHERE workspace_id = '{ws}'::uuid AND status = 'pending'")
         ).expect("query failed").expect("null");
-
-        assert!(pending >= 1, "trigger should have flagged a contradiction candidate, got {pending}");
+        assert!(pending >= 1, "should have pending contradiction candidates after manual flagging");
     }
 
     #[pg_test]
@@ -1172,5 +1186,51 @@ mod tests {
         .expect("null");
 
         assert_eq!(count, 1, "tag filter should return 1 result, got {count}");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v0.5 Integration Tests: Async contradiction queue enqueue/dequeue
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[pg_test]
+    fn test_contradiction_queue_enqueue_and_dequeue() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector setup");
+
+        let ws = "d4000000-0000-0000-0000-000000000001";
+
+        // Disable session trigger to avoid interference
+        Spi::run(
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
+        ).expect("disable session trigger");
+
+        // Insert a test mneme (fires the contradiction trigger which enqueues)
+        let emb = embedding(0.10);
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'test_contra', 'test contradiction queue', '{emb}'::vector(768))"
+        )).expect("insert mneme");
+
+        // Verify queue has an entry
+        let queue_count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM ghola.contradiction_queue"
+        ).expect("query").expect("null");
+
+        assert!(queue_count >= 1, "expected at least 1 queue entry, got {queue_count}");
+
+        // Dequeue one item using the CTE pattern
+        let dequeued = Spi::get_one::<i64>(
+            "WITH d AS ( \
+                 DELETE FROM ghola.contradiction_queue \
+                 WHERE id = (SELECT id FROM ghola.contradiction_queue ORDER BY id LIMIT 1) \
+                 RETURNING mneme_id \
+             ) SELECT count(*) FROM d"
+        ).expect("query").expect("null");
+
+        assert_eq!(dequeued, 1, "expected to dequeue 1 item");
+
+        // Re-enable triggers
+        Spi::run(
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
+        ).expect("enable session trigger");
     }
 }

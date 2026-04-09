@@ -22,6 +22,7 @@ pub mod recall;
 pub mod worker_stats;
 pub mod worker;
 pub mod contradiction;
+pub mod contradiction_worker;
 pub mod associations;
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -59,6 +60,15 @@ pub extern "C-unwind" fn _PG_init() {
 
     BackgroundWorkerBuilder::new("pg_ghola Hebbian Worker")
         .set_function("worker_main")
+        .set_library("pg_ghola")
+        .set_argument(0i32.into_datum())
+        .enable_spi_access()
+        .set_start_time(BgWorkerStartTime::RecoveryFinished)
+        .set_restart_time(Some(Duration::from_secs(10)))
+        .load();
+
+    BackgroundWorkerBuilder::new("pg_ghola Contradiction Worker")
+        .set_function("contradiction_worker_main")
         .set_library("pg_ghola")
         .set_argument(0i32.into_datum())
         .enable_spi_access()

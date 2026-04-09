@@ -80,6 +80,41 @@ CREATE TABLE co_activation_queue (
 );
 
 // ---------------------------------------------------------------------------
+// Contradiction queue: pending contradiction scans for async processing
+// ---------------------------------------------------------------------------
+
+extension_sql!(
+    r#"
+CREATE TABLE contradiction_queue (
+    id           bigserial PRIMARY KEY,
+    workspace_id uuid NOT NULL,
+    mneme_id     uuid NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+"#,
+    name = "create_contradiction_queue_table",
+);
+
+extension_sql!(
+    r#"
+CREATE TABLE contradiction_worker_stats (
+    id                integer PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    state             text NOT NULL DEFAULT 'stopped',
+    queue_depth       bigint NOT NULL DEFAULT 0,
+    scans_completed   bigint NOT NULL DEFAULT 0,
+    candidates_found  bigint NOT NULL DEFAULT 0,
+    last_scan_at      timestamptz,
+    poll_interval_ms  integer NOT NULL DEFAULT 5000,
+    started_at        timestamptz,
+    updated_at        timestamptz DEFAULT now()
+);
+
+INSERT INTO @extschema@.contradiction_worker_stats (id) VALUES (1) ON CONFLICT DO NOTHING;
+"#,
+    name = "create_contradiction_worker_stats_table",
+);
+
+// ---------------------------------------------------------------------------
 // Contradiction detection
 // ---------------------------------------------------------------------------
 
