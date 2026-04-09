@@ -66,6 +66,15 @@ pub extern "C-unwind" fn _PG_init() {
         .set_start_time(BgWorkerStartTime::RecoveryFinished)
         .set_restart_time(Some(Duration::from_secs(10)))
         .load();
+
+    BackgroundWorkerBuilder::new("pg_ghola Contradiction Worker")
+        .set_function("contradiction_worker_main")
+        .set_library("pg_ghola")
+        .set_argument(0i32.into_datum())
+        .enable_spi_access()
+        .set_start_time(BgWorkerStartTime::RecoveryFinished)
+        .set_restart_time(Some(Duration::from_secs(10)))
+        .load();
 }
 
 #[cfg(test)]
