@@ -181,38 +181,81 @@ fn recall_inner(
         " AND (expires_at IS NULL OR expires_at > now())"
     );
 
-    // Step 1: Fetch candidate pool with thalamic gating
-    // Tier 1 (fast gate): FTS pre-filter narrows candidates before HNSW
-    // If FTS finds >= min_gated_candidates, HNSW searches only the gated set
-    // If FTS finds fewer, fall back to full workspace HNSW scan
-    let min_gated_candidates = 50;
-    let gate_pool = pool_size * 5; // Cast a wider FTS net for the gate
+    // Step 1: Fetch candidate pool via multi-pathway retrieval
+    // Four independent pathways, all additive, none blocks another
+
+    // Extract entity tokens from query for entity pathway
+    let query_entities = crate::gating_worker::extract_entities(&escaped_text);
+
+    // Build entity pathway CTE (only if query has entities)
+    let entity_cte = if !query_entities.is_empty() {
+        let ent_literals: Vec<String> = query_entities
+            .iter()
+            .map(|e| format!("'{}'", e.replace('\'', "''")))
+            .collect();
+        format!(
+            "entity_matches AS ( \
+                SELECT id, concept, content, confidence::float8, access_count, \
+                       GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       memory_type, session_id::text \
+                FROM ghola.mnemes \
+                WHERE workspace_id = '{ws}' \
+                  AND state = 'active' \
+                  AND confidence >= {min_conf} \
+                  {filters} \
+                  AND entities && ARRAY[{ents}]::text[] \
+                ORDER BY embedding <=> '{emb}'::vector \
+                LIMIT {pool} \
+            ), ",
+            min_age = ONE_MINUTE_DAYS, emb = query_embedding_text, qt = escaped_text,
+            ws = workspace_id, min_conf = min_confidence, filters = extra_filters,
+            ents = ent_literals.join(","), pool = pool_size,
+        )
+    } else {
+        String::new()
+    };
+    let entity_union = if !query_entities.is_empty() {
+        "UNION ALL SELECT * FROM entity_matches "
+    } else {
+        ""
+    };
+
+    // Build cluster pathway CTE (graceful: returns empty when no centroids exist)
+    let cluster_k = 3; // tunable: number of nearest clusters to search
+    let cluster_cte = format!(
+        "nearest_clusters AS ( \
+            SELECT id FROM ghola.cluster_centroids \
+            WHERE workspace_id = '{ws}' \
+            ORDER BY centroid <=> '{emb}'::vector \
+            LIMIT {k} \
+        ), \
+        cluster_matches AS ( \
+            SELECT m.id, m.concept, m.content, m.confidence::float8, m.access_count, \
+                   GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                   (1.0 - (m.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                   ts_rank(m.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                   m.memory_type, m.session_id::text \
+            FROM ghola.mnemes m \
+            WHERE m.workspace_id = '{ws}' \
+              AND m.state = 'active' \
+              AND m.confidence >= {min_conf} \
+              {filters} \
+              AND m.cluster_id IN (SELECT id FROM nearest_clusters) \
+              AND (SELECT count(*) FROM nearest_clusters) > 0 \
+            ORDER BY m.embedding <=> '{emb}'::vector \
+            LIMIT {pool} \
+        ), ",
+        ws = workspace_id, emb = query_embedding_text, qt = escaped_text,
+        min_age = ONE_MINUTE_DAYS, min_conf = min_confidence, filters = extra_filters,
+        k = cluster_k, pool = pool_size,
+    );
 
     let candidates: Vec<Candidate> = Spi::connect(|client| {
         let query = format!(
-            "WITH fts_gate AS ( \
-                SELECT id \
-                FROM ghola.mnemes \
-                WHERE workspace_id = '{ws}' \
-                  AND state = 'active' \
-                  AND confidence >= {min_conf} \
-                  {filters} \
-                  AND search_vector @@ plainto_tsquery('english', '{qt}') \
-                ORDER BY ts_rank_cd(search_vector, plainto_tsquery('english', '{qt}')) DESC \
-                LIMIT {gate_pool} \
-            ), \
-            gated_hnsw AS ( \
-                SELECT id, concept, content, confidence::float8, access_count, \
-                       GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
-                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
-                       memory_type, session_id::text \
-                FROM ghola.mnemes \
-                WHERE id IN (SELECT id FROM fts_gate) \
-                ORDER BY embedding <=> '{emb}'::vector \
-                LIMIT {pool} \
-            ), \
-            ungated_hnsw AS ( \
+            "WITH \
+            semantic AS ( \
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
@@ -226,7 +269,7 @@ fn recall_inner(
                 ORDER BY embedding <=> '{emb}'::vector \
                 LIMIT {pool} \
             ), \
-            fts_fallback AS ( \
+            lexical AS ( \
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
@@ -240,17 +283,18 @@ fn recall_inner(
                   AND search_vector @@ plainto_tsquery('english', '{qt}') \
                 ORDER BY ts_rank(search_vector, plainto_tsquery('english', '{qt}')) DESC \
                 LIMIT {pool} \
-            ) \
+            ), \
+            {entity_cte} \
+            {cluster_cte} \
             SELECT DISTINCT ON (id) id, concept, content, confidence, access_count, \
                    age_days, cosine_sim, fts_rank, memory_type, session_id \
             FROM ( \
-                SELECT * FROM gated_hnsw \
-                WHERE (SELECT count(*) FROM fts_gate) >= {min_gate} \
+                SELECT * FROM semantic \
                 UNION ALL \
-                SELECT * FROM ungated_hnsw \
-                WHERE (SELECT count(*) FROM fts_gate) < {min_gate} \
+                SELECT * FROM lexical \
+                {entity_union} \
                 UNION ALL \
-                SELECT * FROM fts_fallback \
+                SELECT * FROM cluster_matches \
             ) combined",
             ws = workspace_id,
             qt = escaped_text,
@@ -258,9 +302,10 @@ fn recall_inner(
             min_conf = min_confidence,
             min_age = ONE_MINUTE_DAYS,
             pool = pool_size,
-            gate_pool = gate_pool,
-            min_gate = min_gated_candidates,
             filters = extra_filters,
+            entity_cte = entity_cte,
+            cluster_cte = cluster_cte,
+            entity_union = entity_union,
         );
 
         let rows = client
