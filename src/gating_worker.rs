@@ -428,15 +428,51 @@ fn process_one_gating_item() -> i64 {
                     "UPDATE ghola.mnemes SET cluster_id = {cluster_id} WHERE id = '{mneme_id}'"
                 )).unwrap_or_else(|e| log!("gating worker: cluster assign failed: {e}"));
 
-                // Incrementally update centroid (running average)
-                // pgvector supports vector * scalar and vector + vector, but not vector / scalar
-                Spi::run(&format!(
-                    "UPDATE ghola.cluster_centroids SET \
-                         centroid = centroid + ((SELECT embedding FROM ghola.mnemes WHERE id = '{mneme_id}') - centroid) * (1.0 / (member_count + 1)::float8), \
-                         member_count = member_count + 1, \
-                         updated_at = now() \
-                     WHERE id = {cluster_id}"
-                )).unwrap_or_else(|e| log!("gating worker: centroid update failed: {e}"));
+                // Incrementally update centroid via running average in Rust.
+                // pgvector lacks scalar multiplication, so we read both vectors,
+                // compute new_centroid = old + (point - old) / (n+1) in ndarray,
+                // then write back.
+                let update_result: Result<(), String> = (|| {
+                    let row = Spi::get_two::<String, i32>(&format!(
+                        "SELECT centroid::text, member_count FROM ghola.cluster_centroids WHERE id = {cluster_id}"
+                    )).ok().and_then(|(c, n)| Some((c?, n?)));
+
+                    let emb_text = Spi::get_one::<String>(&format!(
+                        "SELECT embedding::text FROM ghola.mnemes WHERE id = '{mneme_id}'"
+                    )).ok().flatten();
+
+                    if let (Some((centroid_text, member_count)), Some(emb_text)) = (row, emb_text) {
+                        let parse_vec = |s: &str| -> Vec<f64> {
+                            s.trim_matches(|c| c == '[' || c == ']')
+                                .split(',')
+                                .filter_map(|v| v.trim().parse().ok())
+                                .collect()
+                        };
+                        let old: Vec<f64> = parse_vec(&centroid_text);
+                        let point: Vec<f64> = parse_vec(&emb_text);
+
+                        if old.len() == point.len() && !old.is_empty() {
+                            let n = (member_count + 1) as f64;
+                            let new_centroid: Vec<String> = old.iter().zip(point.iter())
+                                .map(|(o, p)| format!("{}", o + (p - o) / n))
+                                .collect();
+                            let vec_str = format!("[{}]", new_centroid.join(","));
+
+                            Spi::run(&format!(
+                                "UPDATE ghola.cluster_centroids SET \
+                                     centroid = '{vec_str}'::vector, \
+                                     member_count = {mc}, \
+                                     updated_at = now() \
+                                 WHERE id = {cluster_id}",
+                                mc = member_count + 1,
+                            )).unwrap_or_else(|e| log!("gating worker: centroid write failed: {e}"));
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = update_result {
+                    log!("gating worker: centroid update failed: {e}");
+                }
             }
 
             1
