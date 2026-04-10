@@ -23,6 +23,7 @@ pub mod worker_stats;
 pub mod worker;
 pub mod contradiction;
 pub mod contradiction_worker;
+pub mod gating_worker;
 pub mod associations;
 
 #[cfg(any(test, feature = "pg_test"))]
