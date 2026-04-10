@@ -380,7 +380,7 @@ fn process_one_gating_item() -> i64 {
     );
 
     match result {
-        Ok((Some(mneme_id), Some(_ws_id))) => {
+        Ok((Some(mneme_id), Some(ws_id))) => {
             let content = Spi::get_one::<String>(&format!(
                 "SELECT content FROM ghola.mnemes WHERE id = '{mneme_id}'"
             ));
@@ -414,6 +414,30 @@ fn process_one_gating_item() -> i64 {
                     )).unwrap_or_else(|e| log!("gating worker: update failed: {e}"));
                 }
             }
+
+            // Assign cluster_id if centroids exist for this workspace
+            let cluster_assignment = Spi::get_one::<i32>(&format!(
+                "SELECT c.id FROM ghola.cluster_centroids c \
+                 WHERE c.workspace_id = '{ws_id}' \
+                 ORDER BY c.centroid <=> (SELECT embedding FROM ghola.mnemes WHERE id = '{mneme_id}') \
+                 LIMIT 1"
+            ));
+
+            if let Ok(Some(cluster_id)) = cluster_assignment {
+                Spi::run(&format!(
+                    "UPDATE ghola.mnemes SET cluster_id = {cluster_id} WHERE id = '{mneme_id}'"
+                )).unwrap_or_else(|e| log!("gating worker: cluster assign failed: {e}"));
+
+                // Incrementally update centroid (running average)
+                Spi::run(&format!(
+                    "UPDATE ghola.cluster_centroids SET \
+                         centroid = centroid + ((SELECT embedding FROM ghola.mnemes WHERE id = '{mneme_id}') - centroid) / (member_count + 1), \
+                         member_count = member_count + 1, \
+                         updated_at = now() \
+                     WHERE id = {cluster_id}"
+                )).unwrap_or_else(|e| log!("gating worker: centroid update failed: {e}"));
+            }
+
             1
         }
         _ => 0,
