@@ -1,20 +1,20 @@
-// pg_ghola::worker_stats — Worker statistics table and query function
+// pg_ghola::worker_stats — Consolidation worker statistics table and query function
 //
-// Provides a singleton table for the background worker to report its state,
+// Provides a singleton table for the consolidation worker to report its state,
 // and a SQL-callable function for users to query worker status.
 //
-// The worker_stats table is a single-row table (enforced by CHECK id = 1)
-// that the background worker upserts after every processing cycle.
+// The consolidation_worker_stats table is a single-row table (enforced by CHECK id = 1)
+// that the consolidation worker upserts after every processing cycle.
 
 use pgrx::prelude::*;
 
 // ---------------------------------------------------------------------------
-// Table: worker_stats (singleton row for bgworker state)
+// Table: consolidation_worker_stats (singleton row for bgworker state)
 // ---------------------------------------------------------------------------
 
 extension_sql!(
     r#"
-CREATE TABLE worker_stats (
+CREATE TABLE consolidation_worker_stats (
     id                 integer PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     state              text NOT NULL DEFAULT 'stopped',
     queue_depth        bigint NOT NULL DEFAULT 0,
@@ -28,19 +28,19 @@ CREATE TABLE worker_stats (
     updated_at         timestamptz NOT NULL DEFAULT now()
 );
 
--- Seed the singleton row so get_worker_stats() never returns empty
-INSERT INTO @extschema@.worker_stats (id) VALUES (1);
+-- Seed the singleton row so get_consolidation_worker_stats() never returns empty
+INSERT INTO @extschema@.consolidation_worker_stats (id) VALUES (1);
 "#,
-    name = "create_worker_stats_table",
+    name = "create_consolidation_worker_stats_table",
 );
 
 // ---------------------------------------------------------------------------
-// Composite type: worker_status (returned by get_worker_stats)
+// Composite type: consolidation_worker_status (returned by get_consolidation_worker_stats)
 // ---------------------------------------------------------------------------
 
 extension_sql!(
     r#"
-CREATE TYPE worker_status AS (
+CREATE TYPE consolidation_worker_status AS (
     state              text,
     queue_depth        bigint,
     batches_processed  bigint,
@@ -53,17 +53,17 @@ CREATE TYPE worker_status AS (
     uptime_seconds     float8
 );
 "#,
-    name = "create_type_worker_status",
+    name = "create_type_consolidation_worker_status",
 );
 
 // ---------------------------------------------------------------------------
-// Function: get_worker_stats() -> worker_status
+// Function: get_consolidation_worker_stats() -> consolidation_worker_status
 // ---------------------------------------------------------------------------
 
 extension_sql!(
     r#"
-CREATE OR REPLACE FUNCTION get_worker_stats()
-RETURNS @extschema@.worker_status
+CREATE OR REPLACE FUNCTION get_consolidation_worker_stats()
+RETURNS @extschema@.consolidation_worker_status
 LANGUAGE sql STABLE
 AS $$
     SELECT
@@ -77,12 +77,12 @@ AS $$
         poll_interval_ms,
         started_at,
         EXTRACT(EPOCH FROM (now() - started_at))::float8 AS uptime_seconds
-    FROM @extschema@.worker_stats
+    FROM @extschema@.consolidation_worker_stats
     WHERE id = 1;
 $$;
 "#,
-    name = "create_fn_get_worker_stats",
-    requires = ["create_worker_stats_table", "create_type_worker_status"],
+    name = "create_fn_get_consolidation_worker_stats",
+    requires = ["create_consolidation_worker_stats_table", "create_type_consolidation_worker_status"],
 );
 
 // ---------------------------------------------------------------------------
@@ -98,18 +98,18 @@ mod tests {
     fn test_worker_stats_table_exists() {
         let count = Spi::get_one::<i64>(
             "SELECT count(*) FROM information_schema.tables
-             WHERE table_schema = 'pg_ghola' AND table_name = 'worker_stats'",
+             WHERE table_schema = 'pg_ghola' AND table_name = 'consolidation_worker_stats'",
         )
         .expect("query failed")
         .expect("null result");
-        assert_eq!(count, 1, "worker_stats table should exist in pg_ghola schema");
+        assert_eq!(count, 1, "consolidation_worker_stats table should exist in pg_ghola schema");
     }
 
     #[pg_test]
     fn test_worker_stats_singleton_seeded() {
         // The singleton row should be pre-seeded by the extension install
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM ghola.worker_stats",
+            "SELECT count(*) FROM ghola.consolidation_worker_stats",
         )
         .expect("query failed")
         .expect("null result");
@@ -121,7 +121,7 @@ mod tests {
     fn test_worker_stats_singleton_enforced() {
         // Attempting to insert a second row should fail
         Spi::run(
-            "INSERT INTO ghola.worker_stats (id) VALUES (2)",
+            "INSERT INTO ghola.consolidation_worker_stats (id) VALUES (2)",
         )
         .expect("should have failed");
     }
@@ -129,7 +129,7 @@ mod tests {
     #[pg_test]
     fn test_worker_stats_default_state() {
         let state = Spi::get_one::<String>(
-            "SELECT state FROM ghola.worker_stats WHERE id = 1",
+            "SELECT state FROM ghola.consolidation_worker_stats WHERE id = 1",
         )
         .expect("query failed")
         .expect("null result");
@@ -142,18 +142,18 @@ mod tests {
             "SELECT EXISTS(
                 SELECT 1 FROM pg_type t
                 JOIN pg_namespace n ON t.typnamespace = n.oid
-                WHERE n.nspname = 'pg_ghola' AND t.typname = 'worker_status'
+                WHERE n.nspname = 'pg_ghola' AND t.typname = 'consolidation_worker_status'
             )",
         )
         .unwrap()
         .unwrap();
-        assert!(exists, "worker_status type should exist in pg_ghola schema");
+        assert!(exists, "consolidation_worker_status type should exist in pg_ghola schema");
     }
 
     #[pg_test]
     fn test_get_worker_stats_callable() {
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM ghola.get_worker_stats() AS s",
+            "SELECT (s).state FROM ghola.get_consolidation_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -163,7 +163,7 @@ mod tests {
     #[pg_test]
     fn test_get_worker_stats_uptime() {
         let uptime = Spi::get_one::<f64>(
-            "SELECT (s).uptime_seconds FROM ghola.get_worker_stats() AS s",
+            "SELECT (s).uptime_seconds FROM ghola.get_consolidation_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
@@ -174,7 +174,7 @@ mod tests {
     fn test_worker_stats_upsert() {
         // Simulate the worker updating stats
         Spi::run(
-            "UPDATE ghola.worker_stats SET
+            "UPDATE ghola.consolidation_worker_stats SET
                 state = 'active',
                 queue_depth = 42,
                 batches_processed = 10,
@@ -188,14 +188,14 @@ mod tests {
         .expect("update should succeed");
 
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM ghola.get_worker_stats() AS s",
+            "SELECT (s).state FROM ghola.get_consolidation_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
         assert_eq!(state, "active");
 
         let depth = Spi::get_one::<i64>(
-            "SELECT (s).queue_depth FROM ghola.get_worker_stats() AS s",
+            "SELECT (s).queue_depth FROM ghola.get_consolidation_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");

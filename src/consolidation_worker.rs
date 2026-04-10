@@ -1,10 +1,13 @@
-// pg_ghola::worker — Autonomous background worker for Hebbian processing
+// pg_ghola::consolidation_worker — Autonomous background worker for memory consolidation
 //
 // Implements a pgrx background worker that:
 // 1. Automatically drains the co_activation_queue via process_co_activation_batch
 // 2. Adapts polling interval based on queue activity (Active/Idle/Dormant)
 // 3. Runs periodic association decay, pruning, and dormant archival
 // 4. Drains in-flight work on graceful shutdown (SIGTERM)
+// 5. Triggers initial k-means clustering and periodic rebalancing
+//
+// Neuroscience analog: sleep consolidation — offline reorganization of memory traces.
 //
 // Requires shared_preload_libraries = 'pg_ghola' in postgresql.conf.
 // The target database is configured via the pg_ghola.database GUC.
@@ -131,7 +134,7 @@ fn run_decay_pruning() {
          SET weight = weight * 0.999 \
          WHERE updated_at < now() - interval '1 day'",
     )
-    .unwrap_or_else(|e| log!("pg_ghola worker: decay failed: {e}"));
+    .unwrap_or_else(|e| log!("pg_ghola consolidation worker: decay failed: {e}"));
 
     // Prune: remove associations below threshold
     let pruned = Spi::get_one::<i64>(
@@ -146,7 +149,7 @@ fn run_decay_pruning() {
 
     if pruned > 0 {
         log!(
-            "pg_ghola worker: decay/prune cycle complete, pruned {pruned} associations"
+            "pg_ghola consolidation worker: decay/prune cycle complete, pruned {pruned} associations"
         );
     }
 }
@@ -168,7 +171,7 @@ fn run_archival() {
 
     if archived > 0 {
         log!(
-            "pg_ghola worker: archived {archived} dormant memories"
+            "pg_ghola consolidation worker: archived {archived} dormant memories"
         );
     }
 }
@@ -191,7 +194,7 @@ fn run_working_memory_expiration() {
 
     if expired > 0 {
         log!(
-            "pg_ghola worker: archived {expired} expired working memories"
+            "pg_ghola consolidation worker: archived {expired} expired working memories"
         );
     }
 }
@@ -214,7 +217,7 @@ fn run_state_cleanup() {
 
     if cleaned > 0 {
         log!(
-            "pg_ghola worker: archived {cleaned} stale state-tier mnemes"
+            "pg_ghola consolidation worker: archived {cleaned} stale state-tier mnemes"
         );
     }
 }
@@ -248,7 +251,7 @@ fn write_stats_row(
     };
 
     Spi::run(&format!(
-        "UPDATE ghola.worker_stats SET \
+        "UPDATE ghola.consolidation_worker_stats SET \
              state = '{state}', \
              queue_depth = {queue_depth}, \
              batches_processed = {batches}, \
@@ -260,7 +263,7 @@ fn write_stats_row(
              updated_at = now() \
          WHERE id = 1",
     ))
-    .unwrap_or_else(|e| log!("pg_ghola worker: failed to update stats: {e}"));
+    .unwrap_or_else(|e| log!("pg_ghola consolidation worker: failed to update stats: {e}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +277,7 @@ fn drain_via_transactions() -> i64 {
     let mut total: i64 = 0;
     loop {
         if Instant::now() >= deadline {
-            log!("pg_ghola worker: drain timeout reached, exiting");
+            log!("pg_ghola consolidation worker: drain timeout reached, exiting");
             break;
         }
         let processed = BackgroundWorker::transaction(|| {
@@ -298,7 +301,7 @@ fn drain_via_transactions() -> i64 {
 
 #[pg_guard]
 #[no_mangle]
-pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
+pub extern "C-unwind" fn consolidation_worker_main(_arg: pg_sys::Datum) {
     // Attach signal handlers for SIGHUP (config reload) and SIGTERM (shutdown)
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
@@ -314,7 +317,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     log!(
-        "pg_ghola worker: started, connected to database '{db_name}'"
+        "pg_ghola consolidation worker: started, connected to database '{db_name}'"
     );
 
     let mut sm = StateMachine::new();
@@ -323,19 +326,19 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
     // Mark worker as running
     BackgroundWorker::transaction(|| {
         Spi::run(
-            "UPDATE ghola.worker_stats SET \
+            "UPDATE ghola.consolidation_worker_stats SET \
                  state = 'active', \
                  started_at = now(), \
                  updated_at = now() \
              WHERE id = 1",
         )
-        .unwrap_or_else(|e| log!("pg_ghola worker: failed to set initial state: {e}"));
+        .unwrap_or_else(|e| log!("pg_ghola consolidation worker: failed to set initial state: {e}"));
     });
 
     loop {
         // Check for termination signal
         if BackgroundWorker::sigterm_received() {
-            log!("pg_ghola worker: SIGTERM received, draining queue");
+            log!("pg_ghola consolidation worker: SIGTERM received, draining queue");
             let drain_total = drain_via_transactions();
             stats.rows_processed += drain_total;
             // Final stats update
@@ -347,7 +350,7 @@ pub extern "C-unwind" fn worker_main(_arg: pg_sys::Datum) {
                 write_stats_row("shutdown", 0, batches, rows, pairs, poll_ms, false);
             });
             log!(
-                "pg_ghola worker: shutdown complete, processed {} total rows",
+                "pg_ghola consolidation worker: shutdown complete, processed {} total rows",
                 stats.rows_processed
             );
             break;

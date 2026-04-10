@@ -7,8 +7,8 @@
 // 1. PG18 reserves pg_ prefix for system schemas (requires allow_system_table_mods)
 // 2. The control file handles schema placement automatically
 //
-// v0.2: Background worker for autonomous Hebbian processing.
-// Requires shared_preload_libraries = 'pg_ghola' for the worker to start.
+// v0.2: Background workers for autonomous memory consolidation.
+// Requires shared_preload_libraries = 'pg_ghola' for workers to start.
 // Configure target database via postgresql.conf: pg_ghola.database = 'memories'
 // (defaults to 'postgres' if not set)
 
@@ -20,7 +20,7 @@ pub mod schema;
 pub mod hebbian;
 pub mod recall;
 pub mod worker_stats;
-pub mod worker;
+pub mod consolidation_worker;
 pub mod contradiction;
 pub mod contradiction_worker;
 pub mod gating_worker;
@@ -53,14 +53,14 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
         c"ghola.database",
         c"Target database for the pg_ghola background worker.",
-        c"The background worker will connect to this database for Hebbian processing.",
+        c"The background worker will connect to this database for memory consolidation.",
         &PG_GHOLA_DATABASE,
         GucContext::Sighup,
         GucFlags::default(),
     );
 
-    BackgroundWorkerBuilder::new("pg_ghola Hebbian Worker")
-        .set_function("worker_main")
+    BackgroundWorkerBuilder::new("pg_ghola Consolidation Worker")
+        .set_function("consolidation_worker_main")
         .set_library("pg_ghola")
         .set_argument(0i32.into_datum())
         .enable_spi_access()

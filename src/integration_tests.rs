@@ -61,7 +61,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_tables_exist() {
-        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats", "gating_queue", "gating_worker_stats"] {
+        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats", "gating_queue", "gating_worker_stats", "consolidation_worker_stats"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
                  WHERE table_schema = 'pg_ghola' AND table_name = '{table}')"
@@ -74,7 +74,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_types_exist() {
-        for typ in &["recall_result", "score_weights", "contradiction_candidate_result", "contradiction_detail"] {
+        for typ in &["recall_result", "score_weights", "contradiction_candidate_result", "contradiction_detail", "consolidation_worker_status"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS( \
                     SELECT 1 FROM pg_type t \
@@ -113,6 +113,7 @@ mod tests {
             "mark_supersedes",
             "mark_supports",
             "get_typed_associations",
+            "get_consolidation_worker_stats",
         ];
         for func in &functions {
             let exists = Spi::get_one::<bool>(&format!(
@@ -592,40 +593,40 @@ mod tests {
     // ══════════════════════════════════════════════════════════════════════
 
     #[pg_test]
-    fn test_worker_stats_table_in_schema() {
+    fn test_consolidation_worker_stats_table_in_schema() {
         let exists = Spi::get_one::<bool>(
             "SELECT EXISTS(
                 SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'pg_ghola' AND table_name = 'worker_stats'
+                WHERE table_schema = 'pg_ghola' AND table_name = 'consolidation_worker_stats'
             )",
         )
         .unwrap()
         .unwrap();
-        assert!(exists, "worker_stats table should exist in pg_ghola schema");
+        assert!(exists, "consolidation_worker_stats table should exist in pg_ghola schema");
     }
 
     #[pg_test]
-    fn test_worker_status_type_in_schema() {
+    fn test_consolidation_worker_status_type_in_schema() {
         let exists = Spi::get_one::<bool>(
             "SELECT EXISTS(
                 SELECT 1 FROM pg_type t
                 JOIN pg_namespace n ON t.typnamespace = n.oid
-                WHERE n.nspname = 'pg_ghola' AND t.typname = 'worker_status'
+                WHERE n.nspname = 'pg_ghola' AND t.typname = 'consolidation_worker_status'
             )",
         )
         .unwrap()
         .unwrap();
-        assert!(exists, "worker_status type should exist in pg_ghola schema");
+        assert!(exists, "consolidation_worker_status type should exist in pg_ghola schema");
     }
 
     #[pg_test]
-    fn test_get_worker_stats_returns_initial_state() {
+    fn test_get_consolidation_worker_stats_returns_initial_state() {
         let state = Spi::get_one::<String>(
-            "SELECT (s).state FROM ghola.get_worker_stats() AS s",
+            "SELECT (s).state FROM ghola.get_consolidation_worker_stats() AS s",
         )
         .expect("query failed")
         .expect("null result");
-        assert_eq!(state, "stopped", "initial worker state should be 'stopped'");
+        assert_eq!(state, "stopped", "initial consolidation worker state should be 'stopped'");
     }
 
     #[pg_test]
