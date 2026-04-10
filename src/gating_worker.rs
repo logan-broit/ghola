@@ -210,7 +210,24 @@ pub fn extract_entities(text: &str) -> Vec<String> {
 
     entities.sort();
     entities.dedup();
-    entities
+
+    // Expand compound entities into individual tokens
+    let mut expanded = Vec::new();
+    for entity in &entities {
+        expanded.push(entity.clone());
+        let words: Vec<&str> = entity.split_whitespace().collect();
+        if words.len() >= 2 {
+            for word in &words {
+                let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '@');
+                if !w.is_empty() && !COMMON_STARTERS.contains(&w.to_lowercase().as_str()) {
+                    expanded.push(w.to_lowercase());
+                }
+            }
+        }
+    }
+    expanded.sort();
+    expanded.dedup();
+    expanded
 }
 
 /// Check if a word is CamelCase or mixed-case (has uppercase letters after the first char).
@@ -649,6 +666,33 @@ mod tests {
     }
 
     // ── Intent classification tests ──
+
+    #[test]
+    fn test_extract_entities_individual_tokens() {
+        let entities = extract_entities("I met Sarah Chen at the conference.");
+        assert!(entities.contains(&"sarah".to_string()),
+            "should contain individual token 'sarah', got: {:?}", entities);
+        assert!(entities.contains(&"chen".to_string()),
+            "should contain individual token 'chen', got: {:?}", entities);
+        assert!(entities.contains(&"sarah chen".to_string()),
+            "should contain compound form 'sarah chen', got: {:?}", entities);
+    }
+
+    #[test]
+    fn test_extract_entities_title_prefix_tokens() {
+        let entities = extract_entities("I saw Dr. Smith at the clinic.");
+        assert!(entities.contains(&"dr. smith".to_string()),
+            "should contain compound 'dr. smith', got: {:?}", entities);
+        assert!(entities.contains(&"smith".to_string()),
+            "should contain individual 'smith', got: {:?}", entities);
+    }
+
+    #[test]
+    fn test_extract_entities_single_word_no_duplicate_token() {
+        let entities = extract_entities("I talked to Sarah about the project.");
+        let sarah_count = entities.iter().filter(|e| e.contains("sarah")).count();
+        assert_eq!(sarah_count, 1, "single-word entity should appear once, got: {:?}", entities);
+    }
 
     #[test]
     fn test_classify_intent_decision() {
