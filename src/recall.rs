@@ -246,7 +246,7 @@ fn recall_inner(
               AND (SELECT count(*) FROM nearest_clusters) > 0 \
             ORDER BY m.embedding <=> '{emb}'::vector \
             LIMIT {pool} \
-        ), ",
+        ) ",
         ws = workspace_id, emb = query_embedding_text, qt = escaped_text,
         min_age = ONE_MINUTE_DAYS, min_conf = min_confidence, filters = extra_filters,
         k = cluster_k, pool = pool_size,
