@@ -35,7 +35,9 @@ CREATE FUNCTION recall(
     memory_type text DEFAULT NULL,
     scope text DEFAULT NULL,
     tags text[] DEFAULT NULL,
-    session_id uuid DEFAULT NULL
+    session_id uuid DEFAULT NULL,
+    filter_entities text[] DEFAULT NULL,
+    filter_intent text DEFAULT NULL
 ) RETURNS SETOF ghola.recall_result
 LANGUAGE SQL
 STABLE
@@ -48,7 +50,8 @@ AS $$
         COALESCE((weights).fts, 0.4),
         COALESCE((weights).actr_decay, 0.5),
         COALESCE((weights).hebbian_scale, 4.0),
-        memory_type, scope, tags, session_id
+        memory_type, scope, tags, session_id,
+        filter_entities, filter_intent
     );
 $$;
 "#,
@@ -112,6 +115,8 @@ fn recall_inner(
     filter_scope: default!(Option<String>, "NULL"),
     filter_tags: default!(Option<Vec<String>>, "NULL"),
     filter_session_id: default!(Option<pgrx::Uuid>, "NULL"),
+    filter_entities: default!(Option<Vec<String>>, "NULL"),
+    filter_intent: default!(Option<String>, "NULL"),
 ) -> TableIterator<
     'static,
     (
@@ -150,6 +155,26 @@ fn recall_inner(
     }
     if let Some(ref sid) = filter_session_id {
         extra_filters.push_str(&format!(" AND session_id = '{sid}'::uuid"));
+    }
+    // Tier 2 deep gate: entity and intent filters (graceful degradation)
+    // NULL columns (unprocessed mnemes) always pass through
+    if let Some(ref ents) = filter_entities {
+        if !ents.is_empty() {
+            let ent_literals: Vec<String> = ents
+                .iter()
+                .map(|e| format!("'{}'", e.replace('\'', "''")))
+                .collect();
+            extra_filters.push_str(&format!(
+                " AND (entities IS NULL OR entities && ARRAY[{}]::text[])",
+                ent_literals.join(",")
+            ));
+        }
+    }
+    if let Some(ref intent_val) = filter_intent {
+        extra_filters.push_str(&format!(
+            " AND (intent IS NULL OR intent = '{}')",
+            intent_val.replace('\'', "''")
+        ));
     }
     // Always exclude expired working memories
     extra_filters.push_str(
