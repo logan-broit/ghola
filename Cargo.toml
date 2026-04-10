@@ -17,6 +17,9 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.17.0"
+linfa = "0.7"
+linfa-clustering = "0.7"
+ndarray = "0.16"
 
 [dev-dependencies]
 pgrx-tests = "=0.17.0"

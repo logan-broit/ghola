@@ -155,6 +155,28 @@ INSERT INTO @extschema@.gating_worker_stats (id) VALUES (1) ON CONFLICT DO NOTHI
 );
 
 // ---------------------------------------------------------------------------
+// Cluster centroids: k-means cluster centers for HNSW-within-cluster retrieval
+// ---------------------------------------------------------------------------
+
+extension_sql!(
+    r#"
+CREATE TABLE cluster_centroids (
+    id           serial PRIMARY KEY,
+    workspace_id uuid NOT NULL,
+    centroid     vector(1024) NOT NULL,
+    member_count integer NOT NULL DEFAULT 0,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX cluster_centroids_workspace_idx
+    ON cluster_centroids (workspace_id);
+"#,
+    name = "create_cluster_centroids_table",
+    requires = ["create_mnemes_table"],
+);
+
+// ---------------------------------------------------------------------------
 // Contradiction detection
 // ---------------------------------------------------------------------------
 
@@ -954,6 +976,16 @@ mod tests {
         .expect("query failed")
         .expect("null");
         assert_eq!(gq_count, 1, "gating_queue should have 1 entry");
+    }
+
+    #[pg_test]
+    fn test_cluster_centroids_table_insert() {
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO ghola.cluster_centroids (workspace_id, centroid, member_count) \
+             VALUES (gen_random_uuid(), '{emb}'::vector, 10)"
+        ))
+        .expect("inserting into cluster_centroids should succeed");
     }
 
     #[pg_test]
