@@ -61,7 +61,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_tables_exist() {
-        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats", "gating_queue", "gating_worker_stats", "consolidation_worker_stats"] {
+        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats", "gating_queue", "gating_worker_stats", "consolidation_worker_stats", "cluster_centroids"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
                  WHERE table_schema = 'pg_ghola' AND table_name = '{table}')"
@@ -1303,5 +1303,91 @@ mod tests {
         )).expect("query").expect("null");
 
         assert_eq!(count, 0, "empty workspace should return 0 results even with filters");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v0.5 Integration Tests: Multi-pathway retrieval
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[pg_test]
+    fn test_recall_multi_pathway_no_clusters() {
+        // Verify recall works with no clusters (cluster pathway is a no-op)
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "e0000000-0000-0000-0000-000000000001";
+
+        Spi::run(
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
+        ).expect("disable");
+        Spi::run(
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
+        ).expect("disable");
+
+        let emb = embedding(0.5);
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
+             VALUES ('{ws}', 'multi pathway test', 'some content here', '{emb}'::vector(768))"
+        )).expect("insert failed");
+
+        Spi::run(
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
+        ).expect("enable");
+        Spi::run(
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
+        ).expect("enable");
+
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM ghola.recall(\
+                '{ws}'::uuid, 'multi pathway test', '{emb}'::vector(768), \
+                10, 0.0, NULL)"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert!(count > 0, "recall should return results even without clusters");
+    }
+
+    #[pg_test]
+    fn test_recall_entity_pathway_surfaces_matches() {
+        // Insert a mneme with known entities, verify the entity pathway
+        // surfaces it when the query mentions those entities
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector")
+            .expect("vector extension setup failed");
+
+        let ws = "e0000000-0000-0000-0000-000000000002";
+
+        Spi::run(
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
+        ).expect("disable");
+        Spi::run(
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
+        ).expect("disable");
+
+        let emb = embedding(0.5);
+        // Insert a mneme with entities set (simulating gating worker output)
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, entities) \
+             VALUES ('{ws}', 'meeting notes', 'discussed project timeline with team', \
+                     '{emb}'::vector(768), ARRAY['sarah', 'sarah chen']::text[])"
+        )).expect("insert failed");
+
+        Spi::run(
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
+        ).expect("enable");
+        Spi::run(
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
+        ).expect("enable");
+
+        // Query mentioning Sarah -- entity pathway should find it
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM ghola.recall(\
+                '{ws}'::uuid, 'what did Sarah say', '{emb}'::vector(768), \
+                10, 0.0, NULL)"
+        ))
+        .expect("query failed")
+        .expect("null");
+
+        assert!(count > 0, "entity pathway should surface mneme matching query entities");
     }
 }
