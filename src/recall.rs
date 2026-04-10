@@ -156,10 +156,38 @@ fn recall_inner(
         " AND (expires_at IS NULL OR expires_at > now())"
     );
 
-    // Step 1: Fetch candidate pool — union of HNSW nearest neighbors and FTS matches
+    // Step 1: Fetch candidate pool with thalamic gating
+    // Tier 1 (fast gate): FTS pre-filter narrows candidates before HNSW
+    // If FTS finds >= min_gated_candidates, HNSW searches only the gated set
+    // If FTS finds fewer, fall back to full workspace HNSW scan
+    let min_gated_candidates = 50;
+    let gate_pool = pool_size * 5; // Cast a wider FTS net for the gate
+
     let candidates: Vec<Candidate> = Spi::connect(|client| {
         let query = format!(
-            "WITH hnsw_candidates AS ( \
+            "WITH fts_gate AS ( \
+                SELECT id \
+                FROM ghola.mnemes \
+                WHERE workspace_id = '{ws}' \
+                  AND state = 'active' \
+                  AND confidence >= {min_conf} \
+                  {filters} \
+                  AND search_vector @@ plainto_tsquery('english', '{qt}') \
+                ORDER BY ts_rank_cd(search_vector, plainto_tsquery('english', '{qt}')) DESC \
+                LIMIT {gate_pool} \
+            ), \
+            gated_hnsw AS ( \
+                SELECT id, concept, content, confidence::float8, access_count, \
+                       GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       memory_type, session_id::text \
+                FROM ghola.mnemes \
+                WHERE id IN (SELECT id FROM fts_gate) \
+                ORDER BY embedding <=> '{emb}'::vector \
+                LIMIT {pool} \
+            ), \
+            ungated_hnsw AS ( \
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
@@ -173,7 +201,7 @@ fn recall_inner(
                 ORDER BY embedding <=> '{emb}'::vector \
                 LIMIT {pool} \
             ), \
-            fts_candidates AS ( \
+            fts_fallback AS ( \
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
@@ -191,9 +219,13 @@ fn recall_inner(
             SELECT DISTINCT ON (id) id, concept, content, confidence, access_count, \
                    age_days, cosine_sim, fts_rank, memory_type, session_id \
             FROM ( \
-                SELECT * FROM hnsw_candidates \
+                SELECT * FROM gated_hnsw \
+                WHERE (SELECT count(*) FROM fts_gate) >= {min_gate} \
                 UNION ALL \
-                SELECT * FROM fts_candidates \
+                SELECT * FROM ungated_hnsw \
+                WHERE (SELECT count(*) FROM fts_gate) < {min_gate} \
+                UNION ALL \
+                SELECT * FROM fts_fallback \
             ) combined",
             ws = workspace_id,
             qt = escaped_text,
@@ -201,6 +233,8 @@ fn recall_inner(
             min_conf = min_confidence,
             min_age = ONE_MINUTE_DAYS,
             pool = pool_size,
+            gate_pool = gate_pool,
+            min_gate = min_gated_candidates,
             filters = extra_filters,
         );
 
