@@ -61,7 +61,7 @@ mod tests {
 
     #[pg_test]
     fn test_all_tables_exist() {
-        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats"] {
+        for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats", "gating_queue", "gating_worker_stats"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
                  WHERE table_schema = 'pg_ghola' AND table_name = '{table}')"
@@ -1232,5 +1232,75 @@ mod tests {
         Spi::run(
             "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
         ).expect("enable session trigger");
+    }
+
+    // ── Thalamic gating integration tests ──
+
+    #[pg_test]
+    fn test_gating_queue_enqueued_on_insert() {
+        // Verify mneme INSERT triggers gating_queue enqueue
+        Spi::run("DELETE FROM ghola.gating_queue").expect("clear gating queue");
+
+        let _id = insert_mneme(WS, "gating enqueue test", "some content", 0.5);
+
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM ghola.gating_queue"
+        ).expect("query").expect("null");
+
+        assert!(count >= 1, "gating_queue should have at least 1 entry after insert, got {count}");
+    }
+
+    #[pg_test]
+    fn test_gating_queue_dequeue_pattern() {
+        // Verify the CTE dequeue pattern works for gating_queue
+        Spi::run("DELETE FROM ghola.gating_queue").expect("clear");
+
+        // Enqueue directly
+        Spi::run(
+            "INSERT INTO ghola.gating_queue (workspace_id, mneme_id) \
+             VALUES (gen_random_uuid(), gen_random_uuid())"
+        ).expect("enqueue");
+
+        let dequeued = Spi::get_one::<i64>(
+            "WITH d AS ( \
+                 DELETE FROM ghola.gating_queue \
+                 WHERE id = (SELECT id FROM ghola.gating_queue ORDER BY id LIMIT 1) \
+                 RETURNING mneme_id \
+             ) SELECT count(*) FROM d"
+        ).expect("query").expect("null");
+
+        assert_eq!(dequeued, 1, "expected to dequeue 1 item from gating_queue");
+
+        let remaining = Spi::get_one::<i64>(
+            "SELECT count(*) FROM ghola.gating_queue"
+        ).expect("query").expect("null");
+
+        assert_eq!(remaining, 0, "gating_queue should be empty after dequeue");
+    }
+
+    #[pg_test]
+    fn test_gating_worker_stats_initial_state() {
+        let state = Spi::get_one::<String>(
+            "SELECT state FROM ghola.gating_worker_stats WHERE id = 1"
+        ).expect("query").expect("null");
+
+        assert_eq!(state, "stopped", "initial gating worker state should be 'stopped'");
+    }
+
+    #[pg_test]
+    fn test_recall_with_entity_filter_compiles() {
+        // Verify the new filter_entities parameter is accepted by recall()
+        // Uses empty workspace so we just verify no SQL error, not results
+        Spi::run("CREATE EXTENSION IF NOT EXISTS vector").expect("vector");
+
+        let emb = embedding(0.1);
+        let count = Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM ghola.recall( \
+                 '{WS}'::uuid, 'test query', '{emb}'::vector(768), \
+                 10, 0.0, NULL, NULL, NULL, NULL, NULL, \
+                 ARRAY['sarah']::text[], 'decision')"
+        )).expect("query").expect("null");
+
+        assert_eq!(count, 0, "empty workspace should return 0 results even with filters");
     }
 }
