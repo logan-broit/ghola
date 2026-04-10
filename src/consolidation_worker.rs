@@ -16,6 +16,10 @@ use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::time::{Duration, Instant};
 
+use linfa::prelude::*;
+use linfa_clustering::KMeans;
+use ndarray::Array2;
+
 use crate::PG_GHOLA_DATABASE;
 
 // ---------------------------------------------------------------------------
@@ -125,6 +129,9 @@ const DECAY_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const ARCHIVAL_INTERVAL: Duration = Duration::from_secs(21600); // 6 hours
 const EXPIRATION_INTERVAL: Duration = Duration::from_secs(600); // 10 minutes
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const CLUSTERING_CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
+const REBALANCE_INTERVAL: Duration = Duration::from_secs(86400); // 24 hours
+const MIN_MNEMES_FOR_CLUSTERING: i64 = 500;
 
 /// Run association decay and pruning (called inside a transaction).
 fn run_decay_pruning() {
@@ -220,6 +227,170 @@ fn run_state_cleanup() {
             "pg_ghola consolidation worker: archived {cleaned} stale state-tier mnemes"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// K-means clustering
+// ---------------------------------------------------------------------------
+
+/// Compute initial k-means clusters for a workspace.
+/// Called when mneme count exceeds threshold and no centroids exist.
+fn compute_initial_clusters(workspace_id: &str) {
+    let count = Spi::get_one::<i64>(&format!(
+        "SELECT count(*) FROM ghola.mnemes \
+         WHERE workspace_id = '{workspace_id}' AND state = 'active'"
+    ))
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if count < MIN_MNEMES_FOR_CLUSTERING {
+        return;
+    }
+
+    let k = ((count as f64 / 10.0).sqrt()).max(2.0) as usize;
+    log!(
+        "pg_ghola consolidation worker: computing initial clusters, k={k}, mnemes={count}"
+    );
+
+    // Read embedding dimensions from config
+    let dims_str = Spi::get_one::<String>(
+        "SELECT value FROM ghola.config WHERE key = 'embedding_dims'",
+    )
+    .unwrap_or(Some("1024".to_string()))
+    .unwrap_or("1024".to_string());
+    let dims: usize = dims_str.parse().unwrap_or(1024);
+
+    let mut data = Vec::new();
+    let mut mneme_ids = Vec::new();
+
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                &format!(
+                    "SELECT id::text, embedding::text FROM ghola.mnemes \
+                     WHERE workspace_id = '{workspace_id}' AND state = 'active'"
+                ),
+                None,
+                &[],
+            )
+            .expect("failed to read embeddings");
+
+        for row in rows {
+            let id: String = row.get::<String>(1).expect("err").expect("null");
+            let emb_text: String = row.get::<String>(2).expect("err").expect("null");
+            let values: Vec<f64> = emb_text
+                .trim_matches(|c| c == '[' || c == ']')
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if values.len() == dims {
+                data.extend_from_slice(&values);
+                mneme_ids.push(id);
+            }
+        }
+    });
+
+    let n = mneme_ids.len();
+    if n < k * 10 {
+        return; // insufficient data
+    }
+
+    let array = match Array2::from_shape_vec((n, dims), data) {
+        Ok(a) => a,
+        Err(e) => {
+            log!("pg_ghola consolidation worker: failed to create ndarray: {e}");
+            return;
+        }
+    };
+    let dataset = linfa::DatasetBase::new(array, ndarray::Array1::from_elem(n, ()));
+
+    let model = match KMeans::params(k)
+        .max_n_iterations(100)
+        .tolerance(1e-4)
+        .fit(&dataset)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log!("pg_ghola consolidation worker: k-means failed: {e}");
+            return;
+        }
+    };
+
+    let centroids = model.centroids();
+    let predicted = model.predict(&dataset);
+    let assignments = predicted.as_targets();
+
+    // Clear old centroids and write new ones
+    Spi::run(&format!(
+        "DELETE FROM ghola.cluster_centroids WHERE workspace_id = '{workspace_id}'"
+    ))
+    .expect("failed to clear old centroids");
+
+    for i in 0..k {
+        let centroid_vec: Vec<String> = centroids
+            .row(i)
+            .iter()
+            .map(|v| format!("{v}"))
+            .collect();
+        let centroid_str = format!("[{}]", centroid_vec.join(","));
+        let member_count = assignments.iter().filter(|&a| *a == i).count();
+
+        Spi::run(&format!(
+            "INSERT INTO ghola.cluster_centroids (workspace_id, centroid, member_count) \
+             VALUES ('{workspace_id}', '{centroid_str}'::vector, {member_count})"
+        ))
+        .expect("failed to insert centroid");
+    }
+
+    // Re-read centroid IDs (serial, so they're sequential)
+    let centroid_ids: Vec<i32> = Spi::connect(|client| {
+        let rows = client
+            .select(
+                &format!(
+                    "SELECT id FROM ghola.cluster_centroids \
+                     WHERE workspace_id = '{workspace_id}' ORDER BY id"
+                ),
+                None,
+                &[],
+            )
+            .expect("failed to read centroid ids");
+        rows.into_iter()
+            .map(|r| r.get::<i32>(1).expect("err").expect("null"))
+            .collect()
+    });
+
+    // Assign cluster_ids to all mnemes
+    for (idx, mneme_id) in mneme_ids.iter().enumerate() {
+        let cluster_idx = assignments[idx] as usize;
+        let cluster_db_id = centroid_ids[cluster_idx];
+        Spi::run(&format!(
+            "UPDATE ghola.mnemes SET cluster_id = {cluster_db_id} WHERE id = '{mneme_id}'::uuid"
+        ))
+        .unwrap_or_else(|e| log!("cluster assign failed: {e}"));
+    }
+
+    log!(
+        "pg_ghola consolidation worker: initial clustering complete, {k} clusters, {n} mnemes assigned"
+    );
+}
+
+/// Rebalance clusters for a workspace using full k-means recomputation.
+fn rebalance_clusters(workspace_id: &str) {
+    let existing_k = Spi::get_one::<i64>(&format!(
+        "SELECT count(*) FROM ghola.cluster_centroids WHERE workspace_id = '{workspace_id}'"
+    ))
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    if existing_k == 0 {
+        return;
+    }
+
+    log!(
+        "pg_ghola consolidation worker: rebalancing clusters, k={existing_k}"
+    );
+    // For v1, full recomputation is the rebalance strategy
+    compute_initial_clusters(workspace_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +493,8 @@ pub extern "C-unwind" fn consolidation_worker_main(_arg: pg_sys::Datum) {
 
     let mut sm = StateMachine::new();
     let mut stats = StatsAccumulator::new();
+    let mut last_clustering_check = Instant::now();
+    let mut last_rebalance = Instant::now();
 
     // Mark worker as running
     BackgroundWorker::transaction(|| {
@@ -402,6 +575,60 @@ pub extern "C-unwind" fn consolidation_worker_main(_arg: pg_sys::Datum) {
                 run_working_memory_expiration();
             });
             stats.last_expiration_at = Some(Instant::now());
+        }
+
+        // Periodic: check if initial clustering needed (every hour)
+        if last_clustering_check.elapsed() >= CLUSTERING_CHECK_INTERVAL {
+            BackgroundWorker::transaction(|| {
+                let workspaces: Vec<String> = Spi::connect(|client| {
+                    let rows = client
+                        .select(
+                            "SELECT DISTINCT workspace_id::text FROM ghola.mnemes WHERE state = 'active'",
+                            None,
+                            &[],
+                        )
+                        .expect("failed to list workspaces");
+                    rows.into_iter()
+                        .map(|r| r.get::<String>(1).expect("err").expect("null"))
+                        .collect()
+                });
+
+                for ws in &workspaces {
+                    let has_centroids = Spi::get_one::<i64>(&format!(
+                        "SELECT count(*) FROM ghola.cluster_centroids WHERE workspace_id = '{ws}'"
+                    ))
+                    .unwrap_or(Some(0))
+                    .unwrap_or(0);
+
+                    if has_centroids == 0 {
+                        compute_initial_clusters(ws);
+                    }
+                }
+            });
+            last_clustering_check = Instant::now();
+        }
+
+        // Periodic: rebalance clusters (every 24 hours)
+        if last_rebalance.elapsed() >= REBALANCE_INTERVAL {
+            BackgroundWorker::transaction(|| {
+                let workspaces: Vec<String> = Spi::connect(|client| {
+                    let rows = client
+                        .select(
+                            "SELECT DISTINCT workspace_id::text FROM ghola.cluster_centroids",
+                            None,
+                            &[],
+                        )
+                        .expect("failed to list clustered workspaces");
+                    rows.into_iter()
+                        .map(|r| r.get::<String>(1).expect("err").expect("null"))
+                        .collect()
+                });
+
+                for ws in &workspaces {
+                    rebalance_clusters(ws);
+                }
+            });
+            last_rebalance = Instant::now();
         }
 
         // Update stats row
