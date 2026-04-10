@@ -429,9 +429,10 @@ fn process_one_gating_item() -> i64 {
                 )).unwrap_or_else(|e| log!("gating worker: cluster assign failed: {e}"));
 
                 // Incrementally update centroid (running average)
+                // pgvector supports vector * scalar and vector + vector, but not vector / scalar
                 Spi::run(&format!(
                     "UPDATE ghola.cluster_centroids SET \
-                         centroid = centroid + ((SELECT embedding FROM ghola.mnemes WHERE id = '{mneme_id}') - centroid) / (member_count + 1), \
+                         centroid = centroid + ((SELECT embedding FROM ghola.mnemes WHERE id = '{mneme_id}') - centroid) * (1.0 / (member_count + 1)::float8), \
                          member_count = member_count + 1, \
                          updated_at = now() \
                      WHERE id = {cluster_id}"
@@ -519,14 +520,24 @@ pub extern "C-unwind" fn gating_worker_main(_arg: pg_sys::Datum) {
             break;
         }
 
-        let processed = BackgroundWorker::transaction(|| {
-            process_one_gating_item()
-        });
-
-        if processed > 0 {
+        // Process up to 50 items per cycle for throughput
+        let mut cycle_processed: i64 = 0;
+        for _ in 0..50 {
+            let processed = BackgroundWorker::transaction(|| {
+                process_one_gating_item()
+            });
+            if processed == 0 {
+                break; // queue empty
+            }
+            cycle_processed += processed;
             total_items += 1;
+
+            // Check for shutdown between items
+            if BackgroundWorker::sigterm_received() {
+                break;
+            }
         }
-        sm.transition(processed);
+        sm.transition(cycle_processed);
 
         let state_name = sm.state.name().to_string();
         let poll_ms = sm.state.poll_interval_ms() as i32;
@@ -535,7 +546,13 @@ pub extern "C-unwind" fn gating_worker_main(_arg: pg_sys::Datum) {
             write_gating_stats(&state_name, items, poll_ms);
         });
 
-        BackgroundWorker::wait_latch(Some(sm.poll_interval()));
+        // Short sleep when active (100ms), longer when idle
+        let sleep_duration = if cycle_processed > 0 {
+            Duration::from_millis(100)
+        } else {
+            sm.poll_interval()
+        };
+        BackgroundWorker::wait_latch(Some(sleep_duration));
     }
 }
 
