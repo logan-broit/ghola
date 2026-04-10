@@ -6,6 +6,7 @@ Simplex v0.5 specification for neuroscience-grounded memory retrieval in pg_ghol
 
 Memory retrieval in the brain uses multiple parallel pathways that converge and compete.
 No single pathway silences another. The thalamus modulates signal gain, it does not filter.
+Cluster reorganization happens during consolidation (offline), not during encoding.
 
 | Pathway | Brain Analog | Reference |
 |---|---|---|
@@ -13,6 +14,25 @@ No single pathway silences another. The thalamus modulates signal gain, it does 
 | Lexical (FTS) | Cortical phonological/lexical route | Hickok & Poeppel, 2007 |
 | Entity (GIN) | Cue-driven episodic retrieval | Tulving, 1983 (encoding specificity) |
 | Cluster (HNSW-within-cluster) | Cortical column voting | Hawkins et al., 2024 (Thousand Brains) |
+
+## Worker Architecture
+
+Three background workers, renamed to reflect their neuroscience roles:
+
+| Worker | Role | Neuroscience analog |
+|---|---|---|
+| **Gating worker** | Per-mneme attribute extraction + cluster assignment | Thalamic encoding |
+| **Contradiction worker** | Per-mneme similarity scanning + flagging | Conflict detection |
+| **Consolidation worker** (renamed from Hebbian worker) | Hebbian learning, decay, archival, clustering, rebalancing | Sleep consolidation |
+
+## Design Decisions
+
+1. **Entity matching**: store both compound and individual tokens. "Sarah Chen" -> ["sarah chen", "sarah", "chen"]. GIN array overlap matches partial entity mentions from queries.
+2. **Cluster count**: 3 nearest clusters searched. Tunable parameter, measured before committing.
+3. **Scoring**: unchanged from existing formula. Source pathway added as debug field in RecallResult to analyze which pathway contributes winning candidates.
+4. **K-means implementation**: use the `linfa` Rust crate. Anticipate needing other algorithms (hierarchical clustering, community detection) soon.
+5. **Rebalancing**: full k-means recomputation for v1 (no merge/split heuristics). Simpler, avoids convergence issues.
+6. **Clustering trigger**: consolidation worker checks hourly. If mneme count > threshold and no centroids exist, run initial clustering. Rebalancing runs every 24 hours.
 
 ---
 
@@ -27,9 +47,11 @@ DATA: Candidate
   fts_rank: float8, full-text search rank against query
   memory_type: factual | experiential | working
   session_id: uuid, optional
+  source_pathway: semantic | lexical | entity | cluster, which pathway contributed this candidate
 
 DATA: ClusterCentroid
   id: integer, sequential
+  workspace_id: uuid
   centroid: vector, mean embedding of cluster members
   member_count: integer, number of mnemes assigned
   created_at: timestamptz
@@ -63,6 +85,12 @@ CONSTRAINT: scoring_unchanged
   candidate generation changes; candidate scoring does not
   this isolates the effect of multi-pathway retrieval from scoring changes
 
+CONSTRAINT: entity_tokenization
+  entities are stored as both compound forms and individual tokens
+  "Sarah Chen" produces ["sarah chen", "sarah", "chen"]
+  query-time entity extraction uses the same tokenization
+  GIN array overlap (&&) matches on any shared token
+
 ---
 
 FUNCTION: recall_multi_pathway(workspace_id, query_text, query_embedding, limit_n, min_confidence, weights, filters) -> list of RecallResult
@@ -88,14 +116,14 @@ FUNCTION: recall_multi_pathway(workspace_id, query_text, query_embedding, limit_
     grading: code
 
   RULES:
-    - extract entity mentions from query_text using the same heuristic as the gating worker
-    - find nearest cluster centroids to query_embedding (top 3) if cluster_centroids table is populated
+    - extract entity mentions from query_text using the same heuristic as the gating worker (with individual token expansion)
+    - find nearest cluster centroids to query_embedding (top 3, tunable) if cluster_centroids table is populated for this workspace
     - run four retrieval pathways in parallel, each returning up to pool_size candidates:
       - semantic: HNSW nearest neighbors across full workspace (no restrictions)
       - lexical: FTS matches on search_vector, ranked by ts_rank
-      - entity: GIN scan on entities column where query entities overlap mneme entities
-      - cluster: HNSW nearest neighbors restricted to mnemes in the 3 nearest clusters
-    - union all pathway results, deduplicate by mneme id
+      - entity: GIN scan on entities column where query entity tokens overlap mneme entity tokens
+      - cluster: HNSW nearest neighbors restricted to mnemes in the nearest clusters
+    - union all pathway results, deduplicate by mneme id (keep highest cosine_sim on collision)
     - fetch Hebbian association boosts for all candidates in the pool
     - compute composite scores using existing formula unchanged
     - sort by score descending, truncate to limit_n
@@ -121,10 +149,16 @@ FUNCTION: recall_multi_pathway(workspace_id, query_text, query_embedding, limit_
     (empty_ws, "query", emb, 10, 0.0, defaults) -> [] and co_activation_queue has one new entry
 
     -- evolved: entity pathway adds candidates
-    -- query mentions "Sarah", mneme with entity "sarah" exists but is not in HNSW top-N
-    -- entity pathway surfaces it, composite scoring ranks it
+    -- query mentions "Sarah", mneme has entity tokens including "sarah"
+    -- entity pathway surfaces it via GIN overlap, scoring ranks it
     (ws_with_sarah, "what did Sarah say about the project", emb, 10, 0.0, defaults)
       -> results include the sarah mneme if it scores well
+
+    -- evolved: entity partial match works
+    -- query extracts "sarah", mneme has ["sarah chen", "sarah", "chen"]
+    -- GIN overlap on "sarah" matches
+    (ws_with_sarah_chen, "ask Sarah about it", emb, 10, 0.0, defaults)
+      -> entity pathway finds mnemes with "sarah" token
 
     -- evolved: cluster pathway adds candidates
     -- query about cooking, cooking cluster exists, mneme in cooking cluster
@@ -157,11 +191,12 @@ FUNCTION: compute_initial_clusters(workspace_id, k) -> list of ClusterCentroid
   RULES:
     - select all active mneme embeddings in the workspace
     - if fewer than k * 10 mnemes exist, return empty (insufficient data for meaningful clusters)
-    - run k-means clustering on the embeddings with k centroids
+    - run k-means clustering on the embeddings with k centroids using linfa
     - k defaults to sqrt(N / 10) where N is the active mneme count
-    - store centroids in cluster_centroids table
+    - store centroids in cluster_centroids table with workspace_id
     - assign each mneme its nearest centroid as cluster_id
     - record member_count for each centroid
+    - triggered by consolidation worker when mneme count > threshold and no centroids exist
 
   DONE_WHEN:
     - cluster_centroids table has k rows for this workspace
@@ -176,6 +211,7 @@ FUNCTION: compute_initial_clusters(workspace_id, k) -> list of ClusterCentroid
   ERRORS:
     - workspace has zero active mnemes -> return empty list
     - k <= 0 -> fail with "k must be positive"
+    - linfa k-means fails to converge -> log warning, retry with k-1
     - any unhandled condition -> fail with descriptive message
 
 ---
@@ -189,6 +225,7 @@ FUNCTION: assign_cluster(mneme_id) -> cluster_id or null
     - assign that centroid's id as the mneme's cluster_id
     - update the centroid incrementally: new_centroid = old + (point - old) / (n + 1)
     - increment the centroid's member_count
+    - called by the gating worker as part of per-mneme extraction
 
   DONE_WHEN:
     - mneme's cluster_id column is set (or null if no centroids)
@@ -210,26 +247,25 @@ FUNCTION: assign_cluster(mneme_id) -> cluster_id or null
 FUNCTION: rebalance_clusters(workspace_id) -> rebalance stats
 
   RULES:
-    - re-run k-means on all active mneme embeddings using current centroid count
+    - read all active mneme embeddings in the workspace
+    - re-run full k-means using linfa with current centroid count as k
+    - replace all rows in cluster_centroids for this workspace with new centroids
     - reassign all mnemes to their nearest new centroid
-    - if any cluster has fewer than 5 members, merge it into the nearest neighboring cluster
-    - if any cluster has more than 3x the mean member count, split it by running k-means(k=2) within it
-    - update cluster_centroids table with new centroids and counts
-    - this function runs during sleep consolidation (periodic maintenance in the Hebbian worker)
+    - update member_counts
+    - runs as a periodic job in the consolidation worker (every 24 hours)
 
   DONE_WHEN:
-    - all centroids updated to reflect current data distribution
+    - all centroids recomputed from current data distribution
     - all mnemes reassigned to nearest centroid
-    - no cluster has fewer than 5 members
     - cluster_centroids member_counts are accurate
 
   EXAMPLES:
-    (workspace with 44 clusters, balanced) -> 44 clusters, minor centroid adjustments
-    (workspace with 44 clusters, one has 2 members) -> 43 clusters after merge
-    (workspace with 44 clusters, one has 1500 members avg=430) -> 45 clusters after split
+    (workspace with 44 clusters, data distribution shifted) -> 44 new centroids, all mnemes reassigned
+    (workspace with no centroids) -> no-op
 
   ERRORS:
-    - no centroids exist -> no-op, return empty stats
+    - no centroids exist for workspace -> no-op, return empty stats
+    - linfa k-means fails to converge -> log warning, keep existing centroids
     - any unhandled condition -> fail with descriptive message
 
 ---
@@ -237,9 +273,15 @@ FUNCTION: rebalance_clusters(workspace_id) -> rebalance stats
 CONSTRAINT: cluster_cold_start
   the system must produce correct results with zero clusters
   cluster_id = null is a valid and expected state for all mnemes before initial clustering
-  initial clustering is triggered by a threshold, not required at install time
+  initial clustering is triggered by the consolidation worker checking hourly
 
 CONSTRAINT: incremental_centroid_accuracy
-  centroid drift from incremental updates is corrected by periodic rebalancing
+  centroid drift from incremental updates is corrected by periodic full rebalancing (every 24h)
   the system tolerates moderate drift between rebalances
   rebalancing frequency is a tuning parameter, not a correctness requirement
+
+CONSTRAINT: worker_naming
+  the Hebbian worker is renamed to consolidation worker throughout codebase
+  the function name worker_main and BackgroundWorkerBuilder name are updated
+  the worker_stats table is renamed to consolidation_worker_stats
+  all log messages use "consolidation worker" prefix
