@@ -460,25 +460,28 @@ fn scan_workspace_contradictions(
 
 extension_sql!(
     r#"
-CREATE OR REPLACE FUNCTION contradiction_check_trigger()
+CREATE OR REPLACE FUNCTION mneme_insert_enqueue_trigger()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     INSERT INTO @extschema@.contradiction_queue (workspace_id, mneme_id)
+    VALUES (NEW.workspace_id, NEW.id);
+    INSERT INTO @extschema@.gating_queue (workspace_id, mneme_id)
     VALUES (NEW.workspace_id, NEW.id);
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER mneme_contradiction_check
+CREATE TRIGGER mneme_insert_enqueue
     AFTER INSERT ON mnemes
     FOR EACH ROW
-    EXECUTE FUNCTION contradiction_check_trigger();
+    EXECUTE FUNCTION mneme_insert_enqueue_trigger();
 "#,
-    name = "create_contradiction_trigger",
+    name = "create_mneme_insert_enqueue_trigger",
     requires = [
         "create_mnemes_table",
         "create_contradiction_candidates_table",
         "create_contradiction_queue_table",
+        "create_gating_queue_table",
     ],
 );
 
@@ -509,7 +512,7 @@ mod tests {
     fn insert_mneme_no_trigger(ws: &str, concept: &str, content: &str, fill: f64) -> String {
         // Disable the trigger temporarily to control when detection runs
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("failed to disable trigger");
 
         let emb = embedding(fill);
@@ -522,7 +525,7 @@ mod tests {
         .expect("null id");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("failed to enable trigger");
 
         id
@@ -602,7 +605,7 @@ mod tests {
         let emb_b = directional_embedding(200, 50);  // dims 200..250
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable trigger");
 
         let _m1 = Spi::get_one::<String>(&format!(
@@ -618,7 +621,7 @@ mod tests {
         )).expect("insert failed").expect("null");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable trigger");
 
         let count = Spi::get_one::<i64>(&format!(

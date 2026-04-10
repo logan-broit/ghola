@@ -39,7 +39,13 @@ CREATE TABLE mnemes (
         CHECK (tier IN ('core', 'index', 'state')),
     tags            text[] NOT NULL DEFAULT '{}',
     session_id      uuid,
-    expires_at      timestamptz
+    expires_at      timestamptz,
+    -- Thalamic gating columns (nullable; populated by async gating worker)
+    entities        text[] DEFAULT NULL,
+    content_dates   timestamptz[] DEFAULT NULL,
+    cluster_id      integer DEFAULT NULL,
+    intent          text DEFAULT NULL
+        CHECK (intent IN ('decision', 'preference', 'fact', 'question', 'plan', 'experience'))
 );
 "#,
     name = "create_mnemes_table",
@@ -112,6 +118,40 @@ CREATE TABLE contradiction_worker_stats (
 INSERT INTO @extschema@.contradiction_worker_stats (id) VALUES (1) ON CONFLICT DO NOTHING;
 "#,
     name = "create_contradiction_worker_stats_table",
+);
+
+// ---------------------------------------------------------------------------
+// Gating queue: pending mnemes for async attribute extraction
+// ---------------------------------------------------------------------------
+
+extension_sql!(
+    r#"
+CREATE TABLE gating_queue (
+    id           bigserial PRIMARY KEY,
+    workspace_id uuid NOT NULL,
+    mneme_id     uuid NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+"#,
+    name = "create_gating_queue_table",
+);
+
+extension_sql!(
+    r#"
+CREATE TABLE gating_worker_stats (
+    id                integer PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    state             text NOT NULL DEFAULT 'stopped',
+    queue_depth       bigint NOT NULL DEFAULT 0,
+    items_processed   bigint NOT NULL DEFAULT 0,
+    last_process_at   timestamptz,
+    poll_interval_ms  integer NOT NULL DEFAULT 5000,
+    started_at        timestamptz,
+    updated_at        timestamptz DEFAULT now()
+);
+
+INSERT INTO @extschema@.gating_worker_stats (id) VALUES (1) ON CONFLICT DO NOTHING;
+"#,
+    name = "create_gating_worker_stats_table",
 );
 
 // ---------------------------------------------------------------------------
@@ -229,6 +269,19 @@ CREATE INDEX mnemes_tags_idx
 -- B-tree index for working memory expiration
 CREATE INDEX mnemes_expires_at_idx
     ON mnemes (expires_at) WHERE expires_at IS NOT NULL;
+
+-- Gating indexes (partial -- only index populated rows)
+CREATE INDEX mnemes_entities_gin_idx
+    ON mnemes USING gin (entities) WHERE entities IS NOT NULL;
+
+CREATE INDEX mnemes_content_dates_gin_idx
+    ON mnemes USING gin (content_dates) WHERE content_dates IS NOT NULL;
+
+CREATE INDEX mnemes_cluster_id_idx
+    ON mnemes (cluster_id) WHERE cluster_id IS NOT NULL;
+
+CREATE INDEX mnemes_intent_idx
+    ON mnemes (intent) WHERE intent IS NOT NULL;
 "#,
     name = "create_indexes",
     requires = ["create_mnemes_table", "create_associations_table", "create_contradiction_candidates_table"],
@@ -751,6 +804,177 @@ mod tests {
         }
     }
 
+    // ── Thalamic gating schema tests ──
+
+    #[pg_test]
+    fn test_gating_columns_exist() {
+        let emb = zero_embedding_literal();
+        // Insert with gating columns set to non-null values
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes \
+             (workspace_id, concept, content, embedding, entities, content_dates, cluster_id, intent) \
+             VALUES (gen_random_uuid(), 'gating test', 'content', '{emb}'::vector, \
+                     ARRAY['sarah chen', 'new york']::text[], \
+                     ARRAY['2026-04-09'::timestamptz]::timestamptz[], \
+                     42, 'decision')"
+        ))
+        .expect("insert with gating columns should succeed");
+
+        // Verify values round-trip
+        let entity_count = Spi::get_one::<i32>(
+            "SELECT array_length(entities, 1) FROM ghola.mnemes WHERE concept = 'gating test'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(entity_count, 2, "should have 2 entities");
+
+        let intent = Spi::get_one::<String>(
+            "SELECT intent FROM ghola.mnemes WHERE concept = 'gating test'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(intent, "decision");
+
+        let cluster = Spi::get_one::<i32>(
+            "SELECT cluster_id FROM ghola.mnemes WHERE concept = 'gating test'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(cluster, 42);
+    }
+
+    #[pg_test]
+    fn test_gating_columns_nullable() {
+        let emb = zero_embedding_literal();
+        // Gating columns should default to NULL
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
+             VALUES (gen_random_uuid(), 'null gating', 'content', '{emb}'::vector)"
+        ))
+        .expect("insert without gating columns should succeed");
+
+        let is_null = Spi::get_one::<bool>(
+            "SELECT entities IS NULL AND content_dates IS NULL \
+                    AND cluster_id IS NULL AND intent IS NULL \
+             FROM ghola.mnemes WHERE concept = 'null gating'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert!(is_null, "gating columns should default to NULL");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "violates check constraint")]
+    fn test_intent_check_invalid() {
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding, intent) \
+             VALUES (gen_random_uuid(), 'test', 'content', '{emb}'::vector, 'invalid_intent')"
+        ))
+        .expect("should have failed");
+    }
+
+    #[pg_test]
+    fn test_intent_check_valid_values() {
+        let emb = zero_embedding_literal();
+        for intent in &["decision", "preference", "fact", "question", "plan", "experience"] {
+            Spi::run(&format!(
+                "INSERT INTO ghola.mnemes \
+                 (workspace_id, concept, content, embedding, intent) \
+                 VALUES (gen_random_uuid(), 'intent test {intent}', 'content', '{emb}'::vector, '{intent}')"
+            ))
+            .unwrap_or_else(|_| panic!("should accept intent='{intent}'"));
+        }
+    }
+
+    #[pg_test]
+    fn test_gating_queue_table_exists() {
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = 'pg_ghola' AND table_name = 'gating_queue'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(count, 1, "gating_queue table should exist in pg_ghola schema");
+    }
+
+    #[pg_test]
+    fn test_gating_queue_insert() {
+        Spi::run(
+            "INSERT INTO ghola.gating_queue (workspace_id, mneme_id) \
+             VALUES (gen_random_uuid(), gen_random_uuid())"
+        )
+        .expect("inserting into gating_queue should succeed");
+    }
+
+    #[pg_test]
+    fn test_gating_worker_stats_table_exists() {
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = 'pg_ghola' AND table_name = 'gating_worker_stats'",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(count, 1, "gating_worker_stats table should exist in pg_ghola schema");
+    }
+
+    #[pg_test]
+    fn test_gating_worker_stats_has_initial_row() {
+        let state = Spi::get_one::<String>(
+            "SELECT state FROM ghola.gating_worker_stats WHERE id = 1",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(state, "stopped", "initial gating worker state should be 'stopped'");
+    }
+
+    #[pg_test]
+    fn test_gating_enqueue_trigger_fires() {
+        // Verify mneme insert enqueues to BOTH contradiction_queue and gating_queue
+        Spi::run("DELETE FROM ghola.contradiction_queue").expect("clear");
+        Spi::run("DELETE FROM ghola.gating_queue").expect("clear");
+
+        let emb = zero_embedding_literal();
+        Spi::run(&format!(
+            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
+             VALUES (gen_random_uuid(), 'trigger test', 'content', '{emb}'::vector)"
+        ))
+        .expect("insert should succeed");
+
+        let cq_count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM ghola.contradiction_queue",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(cq_count, 1, "contradiction_queue should have 1 entry");
+
+        let gq_count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM ghola.gating_queue",
+        )
+        .expect("query failed")
+        .expect("null");
+        assert_eq!(gq_count, 1, "gating_queue should have 1 entry");
+    }
+
+    #[pg_test]
+    fn test_gating_indexes_exist() {
+        let indexes = vec![
+            "mnemes_entities_gin_idx",
+            "mnemes_content_dates_gin_idx",
+            "mnemes_cluster_id_idx",
+            "mnemes_intent_idx",
+        ];
+        for idx_name in indexes {
+            let count = Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM pg_indexes \
+                 WHERE schemaname = 'pg_ghola' AND indexname = '{idx_name}'"
+            ))
+            .expect("query failed")
+            .expect("null");
+            assert_eq!(count, 1, "index {idx_name} should exist in pg_ghola schema");
+        }
+    }
+
     #[pg_test]
     fn test_config_table_has_default_dims() {
         let dims = Spi::get_one::<String>(
@@ -773,7 +997,7 @@ mod tests {
 
         // Disable contradiction trigger to avoid interference
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable trigger");
 
         // Insert two mnemes with the same session_id
@@ -805,7 +1029,7 @@ mod tests {
         assert_eq!(count, 1, "session trigger should create association between session peers");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable trigger");
     }
 
@@ -817,7 +1041,7 @@ mod tests {
         let emb = zero_embedding_literal();
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable trigger");
 
         // Insert two mnemes without session_id
@@ -842,7 +1066,7 @@ mod tests {
         assert_eq!(count, 0, "no session associations without session_id");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable trigger");
     }
 }

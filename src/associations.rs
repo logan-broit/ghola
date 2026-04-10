@@ -224,7 +224,7 @@ mod tests {
         let emb = zero_embedding();
         // Disable triggers to avoid interference
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable");
         Spi::run(
             "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
@@ -239,7 +239,7 @@ mod tests {
         .expect("null");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable");
         Spi::run(
             "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"

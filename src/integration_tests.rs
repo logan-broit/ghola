@@ -861,7 +861,7 @@ mod tests {
         let emb = embedding(0.5);
 
         // Disable trigger for controlled setup
-        Spi::run("ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue")
             .expect("disable trigger");
 
         Spi::run(&format!(
@@ -875,7 +875,7 @@ mod tests {
              RETURNING id::text"
         )).expect("insert 2 failed").expect("null");
 
-        Spi::run("ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue")
             .expect("enable trigger");
 
         // Flag contradictions
@@ -930,7 +930,7 @@ mod tests {
         let emb = embedding(0.5);
 
         // Disable trigger for controlled setup
-        Spi::run("ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue")
             .expect("disable trigger");
 
         // Insert several similar mnemes
@@ -941,7 +941,7 @@ mod tests {
             )).expect("insert failed");
         }
 
-        Spi::run("ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check")
+        Spi::run("ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue")
             .expect("enable trigger");
 
         // Scan workspace for contradictions
@@ -970,7 +970,7 @@ mod tests {
     ) -> String {
         let emb = embedding(fill);
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable");
         Spi::run(
             "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
@@ -992,7 +992,7 @@ mod tests {
         .expect("null");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable");
         Spi::run(
             "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
@@ -1035,7 +1035,7 @@ mod tests {
 
         // Insert a working memory that's already expired
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable");
         Spi::run(
             "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
@@ -1057,7 +1057,7 @@ mod tests {
         )).expect("insert failed").expect("null");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable");
         Spi::run(
             "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
@@ -1148,7 +1148,7 @@ mod tests {
         let emb = embedding(0.5);
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
         ).expect("disable");
         Spi::run(
             "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
@@ -1170,7 +1170,7 @@ mod tests {
         )).expect("insert failed");
 
         Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_contradiction_check"
+            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
         ).expect("enable");
         Spi::run(
             "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
