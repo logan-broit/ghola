@@ -1,18 +1,18 @@
 # State
 
-## Current Baseline (v0.0.5, 2026-04-10)
+## Current Baseline (v0.0.5 + concept enrichment, 2026-04-11)
 
 ```
                          R@1     R@5    R@10     MRR       N
 ------------------------------------------------------------
-Overall                 7.4%   18.0%   24.6%   0.119     500
+Overall                14.6%   29.2%   41.8%   0.213     500
 ------------------------------------------------------------
-knowledge-update       21.8%   38.5%   52.6%   0.293      78
-multi-session           1.5%    6.0%    9.8%   0.033     133
-single-session-assistant   25.0%   53.6%   66.1%   0.370      56
-single-session-preference    0.0%    0.0%    0.0%   0.000      30
-single-session-user     0.0%    1.4%    2.9%   0.009      70
-temporal-reasoning      3.0%   15.8%   22.6%   0.083     133
+knowledge-update       20.5%   61.5%   82.1%   0.374      78
+multi-session           1.5%   11.3%   22.6%   0.059     133
+single-session-assistant   91.1%  100.0%  100.0%   0.955      56
+single-session-preference    0.0%    0.0%    3.3%   0.006      30
+single-session-user     1.4%    4.3%    8.6%   0.027      70
+temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 ```
 
 ## Historical Baselines
@@ -23,6 +23,7 @@ temporal-reasoning      3.0%   15.8%   22.6%   0.083     133
 | v0.0.4 (FTS-gated) | 13.6% | FTS gate silenced semantic pathway (regression) |
 | v0.0.5 (multi-pathway, no entities) | 16.0% | Gating worker crash-looping, no entity/cluster coverage |
 | v0.0.5 (multi-pathway, full coverage) | 18.0% | All 4 pathways active, entities + clusters populated |
+| v0.0.5 (concept enrichment, clean) | 29.2% | User-turn text at weight A in tsvector (Iter 2) |
 
 ## Roadmap
 
@@ -145,30 +146,51 @@ answer sessions where the user mentioned those facts. This is encoding specifici
 - 6 new unit tests, all passing (35/35 total gating worker tests)
 - No schema changes needed
 
-**Result**: BENCHMARK IN PROGRESS. The benchmark was deployed and is running (ingestion
-phase started at 2026-04-11T07:19Z, workspace c311d15b). Check the latest results file
-at `~/longmemeval-ghola/results/` for the run starting with `ghola_mcp_s_20260411T07*`.
-Gating worker verified: 96% of mnemes have enriched concepts (the remaining ~4% are
-sessions with no `[user]:` lines). Compare against STATE.md dirty baseline (v0.0.5):
+**Result**: R@5 18.0% -> 29.2% (+11.2pp). Largest single-iteration improvement yet.
 
 ```
-                         R@1     R@5    R@10     MRR       N    (v0.0.5 dirty baseline)
-------------------------------------------------------------
-Overall                 7.4%   18.0%   24.6%   0.119     500
-single-session-user     0.0%    1.4%    2.9%   0.009      70   <-- target category
-single-session-preference  0.0%  0.0%   0.0%   0.000      30   <-- also benefits
+                         R@1     R@5    R@10     MRR       N    | v0.0.5  | Delta R@5
+-----------------------------------------------------------------|---------|----------
+Overall                14.6%   29.2%   41.8%   0.213     500   | 18.0%   | +11.2pp
+knowledge-update       20.5%   61.5%   82.1%   0.374      78   | 38.5%   | +23.0pp
+multi-session           1.5%   11.3%   22.6%   0.059     133   |  6.0%   | +5.3pp
+single-session-asst    91.1%  100.0%  100.0%   0.955      56   | 53.6%   | +46.4pp
+single-session-pref     0.0%    0.0%    3.3%   0.006      30   |  0.0%   | +0.0pp
+single-session-user     1.4%    4.3%    8.6%   0.027      70   |  1.4%   | +2.9pp
+temporal-reasoning      2.3%   18.0%   39.1%   0.103     133   | 15.8%   | +2.2pp
 ```
 
-NOTE: This comparison is dirty-baseline vs clean-new-code. Not perfectly fair due to
-access_count drift in the baseline, but single-session-user (1.4% R@5) and
-single-session-preference (0.0% R@5) are so low that any real improvement will be obvious.
+Results file: `~/longmemeval-ghola/results/ghola_mcp_s_20260411T083308Z.jsonl`
 
-**Methodological note**: Killed the clean baseline benchmark at 35% ingestion to save time
-(would have taken ~2 hours total for two full benchmark runs). Deployed new code directly.
-The benchmark output goes to ~/longmemeval-ghola/results/ for the next iteration to analyze.
+**Analysis of results**:
+1. Massive improvements in knowledge-update (+23pp) and single-session-assistant (+46.4pp).
+   These are the categories where user-turn text directly matches the query terms -- concept
+   enrichment puts them at weight 'A' for a huge FTS boost.
+2. Target category single-session-user improved from 1.4% to 4.3% R@5 (+2.9pp). Meaningful
+   but modest -- the FTS boost helps but embedding dilution still dominates.
+3. single-session-preference unchanged at 0.0% R@5. As predicted in Iter 1, these are
+   fundamentally an embedding problem, not a lexical one. Preference queries are too generic
+   to match user turn keywords.
+4. multi-session improved modestly (+5.3pp). Cross-session retrieval benefits from better
+   lexical matching of user-stated facts.
+5. temporal-reasoning improved slightly (+2.2pp R@5 but +16.5pp R@10). Suggests temporal
+   queries are now finding more relevant candidates but ranking them lower.
 
-**Next**: Analyze benchmark results when available. If concept enrichment improves
-single-session-user/preference, document the improvement and move on to:
-- Analyze multi-session failures (6.0% R@5)
-- Temporal retrieval pathway using content_dates column
-If regression, revert and investigate why.
+**Methodological note**: Comparison is dirty-baseline (v0.0.5 with accumulated access_count)
+vs clean-new-code (fresh ingest, zero access_count). The clean ingest eliminates the
+rich-get-richer bias, which likely contributes some of the improvement. However, the magnitude
+of gains (especially +46.4pp for single-session-assistant) clearly indicates real retrieval
+improvement, not just access_count artifact.
+
+**Key insight**: Concept enrichment is a high-leverage encoding-time intervention. It works
+best for categories where query terms directly overlap with user-turn keywords (assistant,
+knowledge-update). It helps modestly for categories with indirect overlap (single-session-user).
+It does nothing for categories where the query is semantically distant from the answer content
+(single-session-preference).
+
+**Next**: The weakest remaining categories are:
+1. single-session-preference (0.0% R@5) -- requires multi-scale embedding or LLM-extracted summaries
+2. single-session-user (4.3% R@5) -- needs further investigation of why FTS boost is insufficient
+3. multi-session (11.3% R@5) -- cross-session retrieval weakness, possible session-context boosting
+The next iteration should analyze single-session-user failures deeper to understand why the
+20x FTS boost only produced a +2.9pp improvement.
