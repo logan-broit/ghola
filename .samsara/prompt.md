@@ -48,5 +48,5 @@ No conversation history. State persists only in files on disk.
 ## Current branch
 
 Branch: `{{.Branch}}`
-Last commit: `{{.LastCommitSHA}}`
+Last commit: `{{.LastCommit}}`
 Timestamp: `{{.Timestamp}}`
