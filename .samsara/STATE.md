@@ -35,7 +35,8 @@ temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 - [x] Analyze single-session-user failures (1.4% R@5) -- Iter 2: same diluted-embedding problem, fixed by concept enrichment
 - [x] Investigate FTS saturation -- Iter 3: ts_rank_cd breaks ties but regresses overall (-0.6pp), reverted
 - [x] Analyze multi-session failures (11.3% R@5) -- Iter 4: AND filter too strict, but OR filter dilutes pool; retrieval-time fix insufficient
-- [ ] Temporal retrieval pathway -- use content_dates column in recall CTE
+- [x] Temporal stop word stripping -- Iter 5: relaxed FTS filter helps specific queries but regresses overall (-0.8pp), reverted
+- [ ] Additive temporal lexical pathway -- separate CTE with cleaned query, fires only when strict lexical returns 0
 - [ ] Session-context boosting -- leverage session associations for same-session queries
 - [ ] Multi-granularity encoding -- extract atomic facts per-turn during gating for sub-mneme embedding
 
@@ -385,3 +386,96 @@ The next productive direction is likely:
    by creating finer-grained retrieval targets.
 3. **Larger pool size** -- simply increasing pool_size from 3*limit_n to 5*limit_n would give
    more candidates a chance. Low-risk change that might help at the margins.
+
+### Iteration 5 (2026-04-11, samsara)
+
+**What**: Temporal stop word stripping in lexical FTS filter. Modified the lexical CTE's
+`@@` filter to use a cleaned query (temporal framing words removed) while keeping the
+original query for `ts_rank` ranking and scoring.
+
+**Hypothesis**: The AND-based `plainto_tsquery` requires ALL query terms to match.
+Temporal-reasoning queries contain framing words ("ago", "weeks", "many", "passed", "days")
+that NEVER appear in answer session content. For example, "How many weeks ago did I attend
+the friends and family sale at Nordstrom" produces `'mani' & 'week' & 'ago' & 'attend' &
+'friend' & 'famili' & 'sale' & 'nordstrom'`. The answer session matches 5/8 terms but NOT
+"week", "ago", "many" -- pure temporal framing. Stripping these words from the FTS filter
+query would relax the AND conjunction to `'attend' & 'friend' & 'famili' & 'sale' &
+'nordstrom'`, admitting answer sessions that match on content words alone.
+
+**Neuroscience grounding**: Encoding specificity (Tulving, 1972) -- temporal framing words
+are retrieval-context cues with no corresponding encoding in stored memories. Removing
+non-encoded cues aligns retrieval with encoding. Also cue overload (Watkins & Watkins, 1975)
+-- excessive retrieval cues reduce effectiveness.
+
+**Implementation**:
+- Added `strip_temporal_stop_words()` function to recall.rs
+- 17 temporal stop words: ago, passed, between, many, much, day(s), week(s), month(s),
+  year(s), total, spent, long, earliest, latest
+- Returns None when no temporal words found or <2 content words remain
+- Modified lexical CTE to use cleaned query for `@@` filter, original for `ts_rank`
+- 6 unit tests, all passing
+
+**Verification on specific query**: The Nordstrom answer session (answer_b51b6115_1) moved
+from not-in-top-10 to rank 2 with score 2.03. Confirms the hypothesis: temporal stop word
+stripping lets the answer session pass the lexical FTS filter.
+
+**Result**: R@5 29.2% -> 28.4% (-0.8pp). **REGRESSION**. Reverted.
+
+```
+                         R@1     R@5    R@10     MRR       N    | Iter 2  | Delta R@5
+-----------------------------------------------------------------|---------|----------
+Overall                14.0%   28.4%   41.2%   0.206     500   | 29.2%   | -0.8pp
+knowledge-update       17.9%   61.5%   84.6%   0.360      78   | 61.5%   | +0.0pp
+multi-session           0.8%    9.8%   21.8%   0.051     133   | 11.3%   | -1.5pp
+single-session-asst    89.3%  100.0%  100.0%   0.943      56   | 100.0%  | +0.0pp
+single-session-pref     0.0%    0.0%    3.3%   0.005      30   |  0.0%   | +0.0pp
+single-session-user     1.4%    4.3%    8.6%   0.028      70   |  4.3%   | +0.0pp
+temporal-reasoning      3.0%   16.5%   36.1%   0.101     133   | 18.0%   | -1.5pp
+```
+
+Results file: `~/longmemeval-ghola/results/ghola_mcp_s_20260411T172807Z.jsonl`
+
+**Per-query analysis (temporal-reasoning, R@5)**: gained 1, lost 3, net -2.
+- GAINED: "How many days ago did I harvest my first batch of fresh herbs from the herb garden kit?"
+- LOST: 3 queries where answer session shifted from rank 5 to rank 6:
+  - "How many days did it take for me to find a house I loved after starting to work with Rachel?"
+    (rank 5 -> 6; session `answer_sharegpt_2BSXlAr_0` jumped from rank 6 to rank 5, displacing answer)
+  - "Which airline did I fly with the most in March and April?"
+    (rank 5 -> 6; session `524abbae_2` appeared at rank 2 from nowhere -- entered via relaxed filter)
+  - "Which event did I participate in first, the volleyball league or the charity 5K run?"
+    (rank 5 -> 6; session `602ad002_1` jumped from rank 6 to rank 5)
+
+**Root cause of regression**: The approach of modifying the existing lexical pathway's `@@`
+filter is too blunt. It changes lexical pool composition for ALL queries, not just ones where
+the strict filter fails. The relaxed filter admits competing sessions (high cosine_sim, partial
+FTS match) that either:
+1. Displace existing sessions from the lexical pool (pool_size limit), or
+2. Score higher than answer sessions in the final ranking round
+
+Three temporal queries had answers at exactly rank 5 -- the change pushed each to rank 6.
+Multi-session lost 2 queries via the same mechanism (gained 0, lost 2).
+
+**Key insights**:
+1. The AND FTS filter IS too strict for temporal queries: 5/8 content terms match but 3
+   temporal framing terms ("week", "ago", "many") cause filter failure. Confirmed on
+   Nordstrom query (0 strict matches -> answer at rank 2 with cleaned filter).
+2. BUT modifying the existing lexical pathway changes pool composition globally, causing
+   marginal regression in queries where the strict filter already works.
+3. The correct approach is a SEPARATE additive pathway (new CTE, UNION ALL) that only
+   fires when the existing lexical pathway returns zero results. This preserves baseline
+   behavior while adding candidates for queries that fail the strict AND filter.
+4. Alternatively, encoding-time changes (fact extraction, sub-mneme embeddings) would be
+   more impactful -- the real problem is session-level embedding dilution, not FTS filter
+   strictness.
+
+**Reverted**: Yes -- code reverted, baseline redeployed.
+
+**Next**: Two options for next iteration:
+1. **Additive temporal lexical pathway** (same hypothesis, better implementation): Add a
+   NEW CTE with the cleaned FTS filter, conditioned on the strict filter returning zero
+   results. Requires detecting empty lexical results at SQL level (e.g., IF NOT EXISTS
+   subquery or UNION ALL with a priority column). More complex but avoids the displacement
+   mechanism. However, gain potential is limited (+1 query in this benchmark).
+2. **Multi-granularity encoding** (encoding-time): Extract per-turn or per-fact sub-mnemes
+   during gating. Higher impact potential (helps temporal, multi-session, single-session-user
+   simultaneously) but requires schema changes and embedding generation during gating.

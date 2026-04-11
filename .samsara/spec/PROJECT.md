@@ -73,6 +73,10 @@ These are the building blocks. Each improvement should map to one of these:
 - Two-pass (AND then OR fallback) also regresses: OR tier adds expensive cosine_sim computation for thousands of rows (Iter 4)
 - Multi-session answer sessions are thematically indistinguishable from non-answer sessions at the session level (Iter 4)
 - 83% of multi-session queries are aggregation queries ("how many/much/total") requiring cross-session synthesis (Iter 4)
+- Temporal queries contain framing words ("ago", "weeks", "many", "passed") that fail AND filter: 5/8 terms match but 3 temporal terms missing from answer content (Iter 5)
+- Modifying existing lexical pathway filter is UNSAFE: changes pool composition globally, marginal hits at rank 5 shift to rank 6 (Iter 5)
+- Safe approach: additive separate pathway (new CTE) rather than modifying existing pathway's filter (Iter 5)
+- Retrieval-time improvements are now 0/3 on net gains (Iters 3-5). Encoding-time changes likely needed for further progress.
 
 ## Tech Stack
 
