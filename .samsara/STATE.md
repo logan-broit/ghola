@@ -33,7 +33,7 @@ temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 - [x] Clean benchmark protocol -- truncate + re-ingest before measuring (eliminates access_count drift)
 - [x] Encoding-time concept enrichment -- Iter 2: user-turn text prepended to concept for weight 'A' FTS boost
 - [x] Analyze single-session-user failures (1.4% R@5) -- Iter 2: same diluted-embedding problem, fixed by concept enrichment
-- [x] Fix FTS saturation via ts_rank_cd -- Iter 3: cover density ranking breaks score ties in lexical pathway
+- [x] Investigate FTS saturation -- Iter 3: ts_rank_cd breaks ties but regresses overall (-0.6pp), reverted
 - [ ] Analyze multi-session failures (11.3% R@5) -- cross-session retrieval weakness
 - [ ] Temporal retrieval pathway -- use content_dates column in recall CTE
 - [ ] Session-context boosting -- leverage session associations for same-session queries
@@ -234,15 +234,52 @@ than sessions where terms are scattered (unbound features).
 The scoring formula (`content_match = w_semantic * cosine_sim + w_fts * tanh(fts_rank)`)
 is unchanged -- only the input FTS rank values change.
 
-**Result**: BENCHMARK IN PROGRESS -- clean ingest running (19,195 sessions via MCP API).
-Ingestion started 2026-04-11T09:17Z, expected completion ~2026-04-11T10:25Z.
-Results file will be in ~/longmemeval-ghola/results/ with timestamp ~20260411T10*.
-The next samsara iteration should check for this results file and record the outcome.
+**Result**: R@5 29.2% -> 28.6% (-0.6pp). **REGRESSION**. Reverted.
 
-**Next (for next iteration)**:
-1. Check benchmark results. If regression, revert ts_rank_cd and investigate why.
-2. If improvement, analyze which categories benefited most.
-3. If single-session-user is still low, the remaining problem is embedding dilution
-   (session-level embeddings don't represent specific facts). Next fix would be multi-scale
-   embedding or fact extraction at indexing time.
-4. If no change, the problem is deeper than candidate selection -- scoring is the bottleneck.
+```
+                         R@1     R@5    R@10     MRR       N    | Iter 2  | Delta R@5
+-----------------------------------------------------------------|---------|----------
+Overall                15.6%   28.6%   38.6%   0.217     500   | 29.2%   | -0.6pp
+knowledge-update       26.9%   55.1%   69.2%   0.393      78   | 61.5%   | -6.4pp
+multi-session           2.3%    9.8%   19.5%   0.058     133   | 11.3%   | -1.5pp
+single-session-asst    89.3%  100.0%  100.0%   0.942      56   | 100.0%  | +0.0pp
+single-session-pref     0.0%    3.3%    6.7%   0.022      30   |  0.0%   | +3.3pp
+single-session-user     0.0%    4.3%    8.6%   0.023      70   |  4.3%   | +0.0pp
+temporal-reasoning      3.0%   20.3%   36.8%   0.114     133   | 18.0%   | +2.3pp
+```
+
+Results file: `~/longmemeval-ghola/results/ghola_mcp_s_20260411T103203Z.jsonl`
+
+**Root cause of regression**: ts_rank_cd produces smaller absolute FTS values for most matches.
+While it successfully breaks ties in the lexical ORDER BY (verified: 29 ties above 0.90 with
+ts_rank vs 0 with ts_rank_cd), the smaller values reduce the FTS contribution to scoring via
+`tanh(fts_rank)`. Knowledge-update category took the biggest hit (-6.4pp) because it relied on
+high FTS scores (from concept enrichment at weight A) to boost answer sessions above semantic
+competitors. With ts_rank_cd, the semantic pathway dominates more, and knowledge-update's
+lexical advantage is diminished.
+
+**Key insight**: Fixing candidate selection alone is insufficient. The target category
+(single-session-user) was unchanged at 4.3% even with perfect tie-breaking. The answer sessions
+DO enter the pool via the lexical pathway, but they get outscored by competing sessions with
+higher cosine similarity. The problem is two-fold:
+1. Session-level embeddings are diluted -- a 15K char conversation about task management apps
+   doesn't produce an embedding close to "What degree did I graduate with?"
+2. The 0.6/0.4 semantic/FTS weight ratio means even perfect FTS matches can't overcome a
+   cosine_sim advantage of >0.33 (0.4 * tanh(max_rank) < 0.6 * 0.33 cosine difference)
+
+**Reverted**: Yes -- code change reverted, original ts_rank version redeployed.
+
+**Next**: The single-session-user problem requires encoding-time changes, not retrieval-time:
+1. **Multi-scale embedding** -- store per-turn or per-paragraph embeddings alongside session-level.
+   Query matching against turn-level embeddings would find "I graduated with a degree in Business
+   Administration" directly. Requires schema changes (new embedding column or sub-mneme table).
+2. **Fact extraction at gating time** -- extract atomic facts ("User graduated with Business
+   Administration degree") and store as separate sub-mnemes with their own embeddings.
+3. **Increase FTS weight for lexically-dominated queries** -- detect when FTS matches are strong
+   but semantic matches are weak, and dynamically adjust the 0.6/0.4 ratio. But this violates
+   the "scoring formula frozen" constraint.
+4. **Increase lexical pool size** -- simpler than ts_rank_cd, just increase the pool to include
+   more candidates. But this was the secondary hypothesis, not the primary one.
+   
+For multi-session (9.8% R@5), the next iteration should investigate cross-session retrieval
+failure modes before attempting fixes.
