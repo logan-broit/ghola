@@ -67,6 +67,12 @@ These are the building blocks. Each improvement should map to one of these:
 - ts_rank saturates when many sessions share common terms at weight A (Iter 3: switched to ts_rank_cd)
 - ts_rank_cd produces values >1.0 for best matches; tanh() saturates similarly to ts_rank for top candidates
 - ts_rank_cd produces smaller absolute values for weak matches, reducing FTS contribution via tanh()
+- plainto_tsquery uses AND conjunction: all terms must match for @@ to be true (Iter 4)
+- Multi-session queries have 5-7 terms; AND filter excludes answer sessions matching most but not all (Iter 4)
+- Switching to OR-based @@ filter dilutes the lexical pool with 10K+ weak matches, causing severe regression (Iter 4)
+- Two-pass (AND then OR fallback) also regresses: OR tier adds expensive cosine_sim computation for thousands of rows (Iter 4)
+- Multi-session answer sessions are thematically indistinguishable from non-answer sessions at the session level (Iter 4)
+- 83% of multi-session queries are aggregation queries ("how many/much/total") requiring cross-session synthesis (Iter 4)
 
 ## Tech Stack
 

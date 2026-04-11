@@ -34,9 +34,10 @@ temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 - [x] Encoding-time concept enrichment -- Iter 2: user-turn text prepended to concept for weight 'A' FTS boost
 - [x] Analyze single-session-user failures (1.4% R@5) -- Iter 2: same diluted-embedding problem, fixed by concept enrichment
 - [x] Investigate FTS saturation -- Iter 3: ts_rank_cd breaks ties but regresses overall (-0.6pp), reverted
-- [ ] Analyze multi-session failures (11.3% R@5) -- cross-session retrieval weakness
+- [x] Analyze multi-session failures (11.3% R@5) -- Iter 4: AND filter too strict, but OR filter dilutes pool; retrieval-time fix insufficient
 - [ ] Temporal retrieval pathway -- use content_dates column in recall CTE
 - [ ] Session-context boosting -- leverage session associations for same-session queries
+- [ ] Multi-granularity encoding -- extract atomic facts per-turn during gating for sub-mneme embedding
 
 ### Architecture (larger efforts, plan before implementing)
 
@@ -283,3 +284,104 @@ higher cosine similarity. The problem is two-fold:
    
 For multi-session (9.8% R@5), the next iteration should investigate cross-session retrieval
 failure modes before attempting fixes.
+
+### Iteration 4 (2026-04-11, samsara)
+
+**What**: Deep analysis of multi-session retrieval failures (11.3% R@5). Attempted two
+retrieval-time fixes: (a) pure OR-based FTS filter, (b) two-pass AND-then-OR lexical pool.
+Both regressed. Reverted to baseline.
+
+**Hypothesis**: `plainto_tsquery` uses AND conjunction, requiring ALL query terms to match
+for the `@@` operator. Multi-session queries have 5-7 terms, and answer sessions matching
+most but not all terms are completely excluded from the lexical pathway. Switching to an
+OR-based filter (spreading activation, Collins & Loftus 1975) should admit partial-match
+answer sessions, improving multi-session recall.
+
+**Analysis findings (multi-session, 11.3% R@5, 15/133)**:
+1. 83% of multi-session queries are aggregation queries ("how many/much/total")
+2. Answer sessions share a common base ID (e.g., `593bdffd_1`, `593bdffd_2`) -- they're from
+   the same user's conversation history, each containing one fragment of the answer
+3. Answer sessions are thematically IDENTICAL to non-answer sessions (both about model building,
+   closet organization, etc.). The distinguishing signal is a brief personal mention embedded
+   in a broader conversation.
+4. For "How many model kits have I worked on or bought?": `plainto_tsquery` produces
+   `'mani' & 'model' & 'kit' & 'work' & 'bought'` -- 5 AND-conjuncted terms. Answer sessions
+   match 'model' & 'kit' but NOT 'work' & 'bought'. Result: 0/4 answer sessions pass the filter.
+   With OR filter: all 4 pass, ranking at positions 21, 24, 70, 962 by ts_rank.
+5. 321 sessions match "model kit" FTS -- answer sessions are just 4 among hundreds of similar
+   model-building sessions from different users.
+6. Successful multi-session queries (15/133) barely make it: GT at ranks 4-5 with scores
+   significantly below the top result. They succeed only when query vocabulary is sufficiently
+   specific (e.g., named entities like "SaveMart", "Sephora", "Jimmy Choo").
+
+**Approach A: Pure OR filter**:
+- Changed lexical CTE to use `search_vector @@ or_tsquery` (any term matches)
+- Kept `ts_rank(search_vector, plainto_tsquery(...))` for ranking (AND-based scoring)
+
+**Result A**: R@5 29.2% -> 12.4% (-16.8pp). **SEVERE REGRESSION**. Reverted.
+```
+                         R@1     R@5    R@10     MRR       N    | Iter 2  | Delta R@5
+-----------------------------------------------------------------|---------|----------
+Overall                 2.4%   12.4%   19.2%   0.064     500   | 29.2%   | -16.8pp
+knowledge-update        6.4%   34.6%   48.7%   0.167      78   | 61.5%   | -26.9pp
+multi-session           0.8%    6.8%    9.8%   0.030     133   | 11.3%   | -4.5pp
+single-session-asst     1.8%   12.5%   28.6%   0.075      56   | 100.0%  | -87.5pp
+single-session-pref     0.0%    0.0%    0.0%   0.000      30   |  0.0%   | +0.0pp
+single-session-user     1.4%    4.3%    4.3%   0.023      70   |  4.3%   | +0.0pp
+temporal-reasoning      3.0%   12.0%   19.5%   0.070     133   | 18.0%   | -6.0pp
+```
+Results file: `~/longmemeval-ghola/results/ghola_mcp_s_20260411T124509Z.jsonl`
+
+**Root cause of Approach A regression**: OR filter admits 10K-16K sessions to lexical pool
+(vs 50-200 with AND). Even though top 30 by ts_rank are selected, the massive pool creates
+more ties at high ts_rank values, and answer sessions are pushed out of the candidate pool.
+107 queries that hit in baseline now miss. single-session-assistant crashed from 100% to 12.5%
+because its answer sessions lost the tie-breaking lottery in the expanded pool.
+
+**Approach B: Two-pass (AND priority, OR fallback)**:
+- Tier 1: AND matches (priority 1, preserves baseline behavior)
+- Tier 2: OR-only matches (priority 2, fills remaining pool slots)
+- `ORDER BY match_tier, fts_rank DESC LIMIT pool_size`
+
+**Result B**: R@5 29.2% -> 10.6% (-18.6pp). **WORSE REGRESSION**. Reverted.
+```
+                         R@1     R@5    R@10     MRR       N    | Iter 2  | Delta R@5
+-----------------------------------------------------------------|---------|----------
+Overall                 1.6%   10.6%   16.4%   0.054     500   | 29.2%   | -18.6pp
+knowledge-update        2.6%   26.9%   42.3%   0.130      78   | 61.5%   | -34.6pp
+multi-session           0.8%    9.0%   12.8%   0.040     133   | 11.3%   | -2.3pp
+single-session-asst     3.6%    5.4%    7.1%   0.041      56   | 100.0%  | -94.6pp
+single-session-pref     0.0%    0.0%    0.0%   0.000      30   |  0.0%   | +0.0pp
+single-session-user     1.4%    4.3%    5.7%   0.027      70   |  4.3%   | +0.0pp
+temporal-reasoning      1.5%   10.5%   18.0%   0.057     133   | 18.0%   | -7.5pp
+```
+Results file: `~/longmemeval-ghola/results/ghola_mcp_s_20260411T144834Z.jsonl`
+
+**Root cause of Approach B regression**: The OR fallback sub-query computes cosine_sim
+(`1.0 - (embedding <=> query)`) for ALL OR-matching rows (~10K), making queries 2-3x slower
+(4.6s/query vs 1.4s baseline). The tier 2 OR rows entering the candidate pool also appear
+to contaminate scoring through DISTINCT ON deduplication with semantic pathway results.
+
+**Key insights**:
+1. Multi-session retrieval is NOT a retrieval-time problem. The answer sessions are
+   thematically indistinguishable from non-answer sessions at the session level.
+2. Broadening the lexical filter (OR) hurts more than it helps: the precision loss from
+   admitting thousands of weak matches outweighs the recall gain from admitting answer sessions.
+3. The AND-based lexical filter is correct for categories where it works (knowledge-update,
+   single-session-assistant). The problem is specific to multi-session where answer facts are
+   fragments spread across sessions.
+4. Multi-session requires ENCODING-TIME changes: either multi-granularity storage (per-turn
+   embeddings alongside session-level) or fact extraction (atomic facts as sub-mnemes).
+
+**Reverted**: Yes -- both approaches reverted, baseline code redeployed.
+
+**Next**: The remaining low-hanging fruit for retrieval-time improvements may be exhausted.
+The next productive direction is likely:
+1. **Temporal retrieval pathway** -- use content_dates column to boost sessions from relevant
+   time periods. Many temporal-reasoning queries (18.0% R@5) include temporal cues that could
+   be leveraged. This is a new pathway addition, not a modification to existing pathways.
+2. **Multi-granularity encoding** -- store per-turn or per-fact embeddings during gating.
+   This is an encoding-time change that would help both single-session-user and multi-session
+   by creating finer-grained retrieval targets.
+3. **Larger pool size** -- simply increasing pool_size from 3*limit_n to 5*limit_n would give
+   more candidates a chance. Low-risk change that might help at the margins.
