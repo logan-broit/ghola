@@ -279,9 +279,29 @@ CONSTRAINT: incremental_centroid_accuracy
   centroid drift from incremental updates is corrected by periodic full rebalancing (every 24h)
   the system tolerates moderate drift between rebalances
   rebalancing frequency is a tuning parameter, not a correctness requirement
+  NOTE (learned): pgvector lacks scalar multiplication (vector * float) and division (vector / int).
+  Incremental centroid update must be computed in Rust: read vectors as text, compute in ndarray,
+  write back as vector literal. Cannot be done in pure SQL with pgvector.
 
 CONSTRAINT: worker_naming
   the Hebbian worker is renamed to consolidation worker throughout codebase
   the function name worker_main and BackgroundWorkerBuilder name are updated
   the worker_stats table is renamed to consolidation_worker_stats
   all log messages use "consolidation worker" prefix
+
+CONSTRAINT: gating_worker_throughput
+  the gating worker must process items in batches (up to 50 per cycle)
+  active poll interval must be sub-second (100ms) not multi-second
+  at 1 item per 5-second cycle, a 19K queue takes 25+ hours to drain
+  at 50 items per 100ms cycle, the same queue drains in ~7 minutes
+
+CONSTRAINT: extension_function_lifecycle
+  pgrx #[pg_extern] functions are created during CREATE EXTENSION, not on .so reload
+  if recall functions are detached from the extension (ALTER EXTENSION DROP FUNCTION)
+  and dropped for migration, they must be manually recreated after deploy via CREATE FUNCTION
+  pointing to the .so symbol (e.g. AS 'pg_ghola', 'recall_inner_wrapper')
+
+CONSTRAINT: linfa_ndarray_version
+  linfa 0.7 depends on ndarray 0.15, not 0.16
+  using a different ndarray version creates incompatible types (Records trait not satisfied)
+  always pin ndarray to match linfa's dependency

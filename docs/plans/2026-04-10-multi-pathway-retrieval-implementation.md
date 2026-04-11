@@ -806,6 +806,73 @@ Compare R@5 against:
 
 ---
 
+## Implementation Outcomes
+
+### Benchmark Results (2026-04-10)
+
+First run (gating worker crash-looping, no entity/cluster coverage):
+
+```
+                         R@1     R@5    R@10     MRR       N
+------------------------------------------------------------
+Overall                 6.2%   16.0%   24.8%   0.108     500
+------------------------------------------------------------
+knowledge-update        7.7%   23.1%   39.7%   0.149      78
+multi-session           3.8%    9.8%   16.5%   0.065     133
+single-session-assistant   25.0%   53.6%   67.9%   0.379      56
+single-session-preference    0.0%    3.3%    3.3%   0.008      30
+single-session-user     0.0%    2.9%    5.7%   0.014      70
+temporal-reasoning      4.5%   12.0%   21.1%   0.083     133
+```
+
+| Metric | Pre-gating (v0.0.3) | FTS-gated (v0.0.4) | Multi-pathway (v0.0.5) |
+|--------|--------------------|--------------------|------------------------|
+| R@5    | 19.4%              | 13.6%              | 16.0%                  |
+
+R@5 recovered from 13.6% to 16.0%. Not yet back to 19.4% baseline.
+Second benchmark run pending with full entity/cluster coverage after hotfixes.
+
+### Bugs Found During Deployment
+
+**1. Trailing comma in cluster CTE (SQL syntax error)**
+- Cluster pathway CTE ended with `, ` before `SELECT DISTINCT`, producing invalid SQL
+- Fix: removed trailing comma from cluster_cte format string
+- Commit: `555d4f4`
+
+**2. pgvector lacks scalar arithmetic operators**
+- Incremental centroid update used `vector / integer` and `vector * float` -- neither supported by pgvector
+- Gating worker crash-looped on every restart, stuck on the same queue item
+- Fix: read centroid + embedding as text, compute running average in Rust (ndarray), write back as vector literal
+- Commit: `a97836e`
+
+**3. Gating worker throughput bottleneck**
+- Processed 1 item per 5-second cycle = ~720/hour
+- With 18K+ items in queue, would take 25+ hours to drain
+- Fix: batch up to 50 items per cycle, 100ms active poll
+- Throughput now ~30K+/hour, drains full backlog in ~7 minutes
+- Commit: `a97836e`
+
+**4. recall functions not recreated after pod restart**
+- Migration dropped recall/recall_inner from extension, new binary .so has the symbols but `CREATE EXTENSION` only runs once
+- Must manually `CREATE FUNCTION ... LANGUAGE c AS 'pg_ghola', 'recall_inner_wrapper'` after each deploy
+- TODO: add recall functions to migration SQL or find a pgrx pattern that survives restart
+
+**5. ndarray version mismatch**
+- Plan specified ndarray 0.16, but linfa 0.7 depends on ndarray 0.15
+- Different ndarray versions = different types, Records trait not satisfied
+- Fix: pinned ndarray = "0.15" in Cargo.toml
+- Commit: `137dec2`
+
+### Architecture Decisions Confirmed
+
+- Entity extraction with compound + individual tokens works correctly (TDD, 29/29 tests)
+- Cluster pathway gracefully degrades to no-op when no centroids exist
+- Consolidation worker successfully triggers k-means (37 clusters for ~19K mnemes)
+- Gating worker assigns cluster_id and updates centroids in real-time once clusters exist
+- Four-pathway union compiles and executes correctly (semantic, lexical, entity, cluster)
+
+---
+
 ## Task Dependency Summary
 
 ```
