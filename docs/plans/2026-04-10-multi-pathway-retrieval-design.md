@@ -305,3 +305,26 @@ CONSTRAINT: linfa_ndarray_version
   linfa 0.7 depends on ndarray 0.15, not 0.16
   using a different ndarray version creates incompatible types (Records trait not satisfied)
   always pin ndarray to match linfa's dependency
+
+CONSTRAINT: session_level_embedding_dilution (discovered 2026-04-11)
+  session-level embeddings for long multi-turn conversations (18+ turns, 25K chars)
+  produce diluted representations that don't match specific queries well.
+  a generic query "video editing resources" has moderate cosine_sim (~0.4-0.5) with a
+  25K-char Premiere Pro discussion. this is lower than many topically similar but wrong sessions.
+  retrieval-time pathway additions cannot overcome this -- the scoring formula sees the
+  correct answer as genuinely less relevant. requires encoding-time intervention:
+  either multi-scale embeddings or preference/topic extraction during gating.
+
+CONSTRAINT: benchmark_access_count_drift (discovered 2026-04-11)
+  each benchmark run generates ~5000 co-activation events that modify access_count for
+  returned mnemes. over multiple runs, frequently-retrieved mnemes accumulate access_count
+  advantages (rich-get-richer / Matthew effect). this makes iteration-to-iteration
+  comparisons unreliable. observed 11.6pp R@5 swing in knowledge-update category between
+  consecutive runs with NO code change. MUST truncate + re-ingest for fair comparison.
+
+CONSTRAINT: intent_classification_accuracy (discovered 2026-04-11)
+  the heuristic intent classifier (keyword counting) only correctly classifies 59% of
+  preference answer sessions as intent='preference'. the remaining 41% are classified as
+  'question' (32%) or 'plan' (9%). this is because long sessions contain many question marks
+  and future-tense statements, which outnumber preference keywords. an intent-aware pathway
+  that filters on intent='preference' would miss 41% of targets.

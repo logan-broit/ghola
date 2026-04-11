@@ -58,6 +58,9 @@ These are the building blocks. Each improvement should map to one of these:
 - linfa 0.7 requires ndarray 0.15, not 0.16
 - recall functions must be manually recreated after extension .so reload
 - pgrx pg_test framework has vector dimension mismatch (schema says 1024, tests use 768)
+- Session-level embeddings for long sessions (18+ turns) produce diluted representations (Iter 1)
+- Benchmark requires truncate + re-ingest for fair comparison (access_count drift otherwise)
+- Intent classifier misses 41% of preference sessions due to competing question/plan keywords
 
 ## Tech Stack
 

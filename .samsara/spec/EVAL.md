@@ -90,6 +90,36 @@ FROM ghola.recall(
 ) AS r;"
 ```
 
+## Clean Benchmark Protocol
+
+IMPORTANT: Each benchmark run modifies access_count through co-activation events,
+creating rich-get-richer drift that makes iteration-to-iteration comparison unreliable.
+Observed 11.6pp R@5 swing between consecutive runs with NO code change (Iter 1).
+
+For fair before/after comparison, ALWAYS start from a clean state:
+
+```bash
+# 1. Clean the database (REQUIRED before every benchmark)
+kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
+BEGIN;
+TRUNCATE ghola.co_activation_queue;
+TRUNCATE ghola.contradiction_queue;
+TRUNCATE ghola.gating_queue;
+TRUNCATE ghola.contradiction_candidates;
+TRUNCATE ghola.cluster_centroids;
+TRUNCATE ghola.associations CASCADE;
+TRUNCATE ghola.mnemes CASCADE;
+COMMIT;"
+
+# 2. Run full pipeline (ingest + gating + query)
+cd ~/longmemeval-ghola && .venv/bin/python run.py all --backend ghola_mcp --dataset s
+
+# 3. Wait for gating worker to complete (~7 min)
+# Check: queue_depth = 0 AND with_entities ~= total
+```
+
+Adds ~17 minutes but produces reliable comparisons. Skip at your own risk.
+
 ## Recording Results
 
 After each benchmark run, update `.samsara/STATE.md`:
