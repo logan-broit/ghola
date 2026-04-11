@@ -25,6 +25,7 @@ temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 | 3 | 28.6% | -0.6 | ts_rank_cd for tie-breaking -- smaller FTS values regressed | reverted | [003.md](iterations/003.md) |
 | 4 | 12.4% | -16.8 | OR-based lexical filter -- precision loss > recall gain | reverted | [004.md](iterations/004.md) |
 | 5 | 28.4% | -0.8 | Temporal stop word stripping -- displaced marginal hits | reverted | [005.md](iterations/005.md) |
+| 6 | 16.6%* | n/a | Additive relaxed lexical fallback -- *benchmark non-deterministic on re-ingest | reverted | [006.md](iterations/006.md) |
 
 ## Key Constraints Discovered
 
@@ -36,27 +37,46 @@ temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 - OR-based FTS filter floods pool, precision loss > recall gain (Iter 4)
 - Modifying existing lexical pathway displaces marginal hits globally (Iter 5)
 - Retrieval-time fixes have diminishing returns; encoding-time changes needed (Iter 1-5)
+- CRITICAL: Benchmark is non-deterministic on re-ingest. TEI CPU float32 embeddings differ between ingestion runs. Jaccard overlap drops from 0.85 (same ingest) to 0.33 (different ingest). Cross-ingest R@k comparisons are unreliable. (Iter 6)
+- Co-activation drift: 478/500 queries differ in top-5 after a single 500-query retrieve run. Sequential retrieve-only runs are confounded. (Iter 6)
+- MCP server maps all workspace_ids to `00000000-...0001`; benchmark workspace_id is cosmetic (Iter 6)
 
 ## What To Try Next
 
-Retrieval-time candidate generation changes are showing diminishing returns (3 reverts
-in a row). The remaining weak categories need encoding-time intervention:
+**BLOCKER: Fix benchmark methodology before further code changes.**
 
-1. **Multi-granularity encoding** (high impact, high effort): Extract per-turn or per-fact
+The benchmark is non-deterministic on re-ingest (Iter 6 discovery). Iters 2-5 compared
+against the same ingest and were valid. But any new full-pipeline run generates different
+embeddings, making R@k comparisons against the 29.2% baseline unreliable.
+
+### Fix benchmark first (priority 0)
+
+1. **Pin embeddings via database dump**: `pg_dump` the Iter 2/5 database (the one with
+   29.2% baseline) and import it for future runs. This eliminates re-ingest entirely.
+   Retrieve-only comparisons on the same data are valid.
+2. **Reset co-activation between runs**: Before each retrieve-only run, reset
+   `access_count = 1, last_access = created_at` on all mnemes and truncate
+   `co_activation_queue`. This eliminates rich-get-richer confound.
+3. **Multi-run averaging**: Run retrieve 3x and average R@k to smooth remaining noise.
+
+### Then continue with code changes
+
+1. **Additive fallback lexical pathway** (implementation ready, needs fair comparison):
+   Code was correct in Iter 6 (EXPLAIN verified). Re-test on pinned database.
+
+2. **Multi-granularity encoding** (high impact, high effort): Extract per-turn or per-fact
    sub-mnemes during gating. Helps single-session-user, multi-session, temporal simultaneously.
    Requires schema changes + embedding generation at gating time.
-
-2. **Additive fallback lexical pathway** (low effort, limited impact): New CTE with cleaned
-   query, fires only when strict lexical returns 0 results. Avoids displacing existing hits.
-   Estimated +1 temporal query per benchmark.
 
 3. **Temporal retrieval pathway** (moderate effort): Use content_dates column in a new CTE.
    Many temporal-reasoning queries include date cues not leveraged today.
 
 ## Roadmap
 
+- [ ] **FIX BENCHMARK: Pin embeddings via database dump** (blocks all further iterations)
+- [ ] **FIX BENCHMARK: Reset co-activation state between retrieve-only runs**
+- [ ] Additive fallback lexical pathway (code ready from Iter 6, needs fair comparison)
 - [ ] Multi-granularity encoding (per-turn sub-mnemes)
-- [ ] Additive fallback lexical pathway (cleaned query, fires on zero strict results)
 - [ ] Temporal retrieval pathway (content_dates CTE)
 - [ ] Session-context boosting (leverage session associations)
 - [ ] Fix recall function lifecycle (avoid manual CREATE FUNCTION per deploy)

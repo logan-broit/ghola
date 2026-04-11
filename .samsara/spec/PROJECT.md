@@ -77,6 +77,10 @@ These are the building blocks. Each improvement should map to one of these:
 - Modifying existing lexical pathway filter is UNSAFE: changes pool composition globally, marginal hits at rank 5 shift to rank 6 (Iter 5)
 - Safe approach: additive separate pathway (new CTE) rather than modifying existing pathway's filter (Iter 5)
 - Retrieval-time improvements are now 0/3 on net gains (Iters 3-5). Encoding-time changes likely needed for further progress.
+- BENCHMARK NON-DETERMINISM: TEI CPU float32 embeddings differ between ingestion runs (nomic-embed-text-v1.5 on CPU). Jaccard overlap of top-5 session sets: 0.85 same-ingest vs 0.33 cross-ingest. Cross-ingest R@k comparisons are unreliable. Must pin embeddings via database dump. (Iter 6)
+- Co-activation drift after a single 500-query retrieve run changes 478/500 top-5 results. Sequential retrieve-only runs are confounded. Must reset access_count between runs. (Iter 6)
+- MCP server maps all benchmark workspace_ids to default UUID `00000000-0000-0000-0000-000000000001`. Workspace isolation is cosmetic. (Iter 6)
+- Additive pathway (separate CTE with NOT EXISTS guard) is confirmed safe via EXPLAIN -- no regression mechanism when strict pathway has results. Implementation ready for re-test on pinned database. (Iter 6)
 
 ## Tech Stack
 

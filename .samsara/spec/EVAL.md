@@ -122,6 +122,38 @@ cd ~/longmemeval-ghola && .venv/bin/python run.py all --backend ghola_mcp --data
 
 Adds ~17 minutes but produces reliable comparisons. Skip at your own risk.
 
+**WARNING (Iter 6 finding):** Full pipeline re-ingestion is NON-DETERMINISTIC. TEI CPU
+float32 embeddings differ between ingestion runs. Jaccard overlap of top-5 session sets
+drops from 0.85 (same ingest, different code) to 0.33 (different ingest, same code).
+This means R@k comparisons across full pipeline runs are UNRELIABLE.
+
+## Recommended Benchmark Protocol (post-Iter 6)
+
+For reliable before/after comparison, use RETRIEVE-ONLY on a pinned database:
+
+```bash
+# 1. Reset co-activation state (but keep mnemes and embeddings intact)
+kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
+BEGIN;
+TRUNCATE ghola.co_activation_queue;
+UPDATE ghola.mnemes SET access_count = 1, last_access = created_at;
+COMMIT;"
+
+# 2. Deploy new code (build, transfer, restart, recreate functions)
+
+# 3. Run retrieve-only with the correct workspace ID
+cd ~/longmemeval-ghola && .venv/bin/python run.py retrieve \
+    --backend ghola_mcp --dataset s \
+    --workspace-id 00000000-0000-0000-0000-000000000001
+
+# 4. Evaluate
+.venv/bin/python run.py evaluate --run results/<latest>.jsonl
+```
+
+IMPORTANT: The MCP server maps all workspace IDs to `00000000-0000-0000-0000-000000000001`.
+When using `run.py retrieve` standalone, you MUST pass this workspace ID or the benchmark
+will generate a random UUID and query an empty workspace (returning 0% across the board).
+
 ## Recording Results
 
 After each benchmark run, update `.samsara/STATE.md`:
