@@ -127,15 +127,20 @@ float32 embeddings differ between ingestion runs. Jaccard overlap of top-5 sessi
 drops from 0.85 (same ingest, different code) to 0.33 (different ingest, same code).
 This means R@k comparisons across full pipeline runs are UNRELIABLE.
 
-## Recommended Benchmark Protocol (post-Iter 6)
+## Recommended Benchmark Protocol (post-Iter 7)
 
-For reliable before/after comparison, use RETRIEVE-ONLY on a pinned database:
+For reliable before/after comparison, use RETRIEVE-ONLY on the pinned database with
+FULL retrieval-time state reset. The reset must include hebbian associations, not just
+access_count -- without this, successive runs degrade (Iter 7 finding).
 
 ```bash
-# 1. Reset co-activation state (but keep mnemes and embeddings intact)
+# 1. Full retrieval-time state reset (REQUIRED before every benchmark)
+./analysis/benchmark_reset.sh
+# Or manually:
 kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
 BEGIN;
 TRUNCATE ghola.co_activation_queue;
+DELETE FROM ghola.associations WHERE association_type = 'hebbian';
 UPDATE ghola.mnemes SET access_count = 1, last_access = created_at;
 COMMIT;"
 
@@ -148,11 +153,30 @@ cd ~/longmemeval-ghola && .venv/bin/python run.py retrieve \
 
 # 4. Evaluate
 .venv/bin/python run.py evaluate --run results/<latest>.jsonl
+
+# 5. For variance measurement, repeat 3x and analyze:
+python3 ~/pg_ghola/analysis/variance_report.py results/run1.jsonl results/run2.jsonl results/run3.jsonl
 ```
 
+### Variance budget
+
+With full reset, 3-run variance is 2.2pp spread at R@5 (Iter 7 measurement).
+Code changes need >3pp R@5 improvement to be considered significant.
+
+### Restore from pinned database
+
+If the database is corrupted or needs to be rebuilt from scratch:
+```bash
+./analysis/benchmark_restore.sh
+```
+This restores from binary COPY dumps in `benchmark-data/`. Note: pg_dump CANNOT export
+extension-member tables (mnemes, associations). Use COPY binary format instead.
+
+### Workspace ID
+
 IMPORTANT: The MCP server maps all workspace IDs to `00000000-0000-0000-0000-000000000001`.
-When using `run.py retrieve` standalone, you MUST pass this workspace ID or the benchmark
-will generate a random UUID and query an empty workspace (returning 0% across the board).
+The bench tag `bench_00000000` (derived from this workspace ID) is the actual scoping mechanism.
+When using `run.py retrieve` standalone, you MUST pass `--workspace-id 00000000-0000-0000-0000-000000000001`.
 
 ## Recording Results
 

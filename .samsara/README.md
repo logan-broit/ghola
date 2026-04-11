@@ -19,6 +19,10 @@ Eval-driven development of neuroscience-grounded memory retrieval primitives.
 |--------|---------|
 | analysis/diagnose_category.py | Diagnose failures for a category -- prints compact summary |
 | analysis/compare_runs.py | Compare two benchmark runs -- shows per-category delta + gained/lost queries |
+| analysis/variance_report.py | Analyze variance across N benchmark runs -- Jaccard, stable core, per-category |
+| analysis/benchmark_reset.sh | Full retrieval-time state reset (access_count + associations + queue) |
+| analysis/benchmark_run.sh | Orchestrate N retrieve-only runs with reset between each |
+| analysis/benchmark_restore.sh | Restore pinned database from binary COPY dumps in benchmark-data/ |
 
 Write new scripts in `analysis/` for any investigation. Keep raw data out of context.
 

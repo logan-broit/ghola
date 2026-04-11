@@ -32,3 +32,6 @@ Thumbs.db
 
 # Plexus
 .plex/
+
+# Benchmark reference data (binary COPY dumps, ~155MB)
+benchmark-data/*.bin.gz
