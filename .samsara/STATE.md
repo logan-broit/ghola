@@ -33,7 +33,8 @@ temporal-reasoning      2.3%   18.0%   39.1%   0.103     133
 - [x] Clean benchmark protocol -- truncate + re-ingest before measuring (eliminates access_count drift)
 - [x] Encoding-time concept enrichment -- Iter 2: user-turn text prepended to concept for weight 'A' FTS boost
 - [x] Analyze single-session-user failures (1.4% R@5) -- Iter 2: same diluted-embedding problem, fixed by concept enrichment
-- [ ] Analyze multi-session failures (6.0% R@5) -- cross-session retrieval weakness
+- [x] Fix FTS saturation via ts_rank_cd -- Iter 3: cover density ranking breaks score ties in lexical pathway
+- [ ] Analyze multi-session failures (11.3% R@5) -- cross-session retrieval weakness
 - [ ] Temporal retrieval pathway -- use content_dates column in recall CTE
 - [ ] Session-context boosting -- leverage session associations for same-session queries
 
@@ -194,3 +195,54 @@ It does nothing for categories where the query is semantically distant from the 
 3. multi-session (11.3% R@5) -- cross-session retrieval weakness, possible session-context boosting
 The next iteration should analyze single-session-user failures deeper to understand why the
 20x FTS boost only produced a +2.9pp improvement.
+
+### Iteration 3 (2026-04-11, samsara)
+
+**What**: Switch all FTS ranking from `ts_rank` to `ts_rank_cd` (cover density ranking) in all
+four retrieval pathway CTEs. Addresses FTS score saturation discovered during deep analysis of
+single-session-user failures.
+
+**Hypothesis**: Concept enrichment (Iter 2) placed user-turn text at weight 'A', causing hundreds
+of sessions to tie at maximum `ts_rank` for common query terms. With pool_size=30, the answer
+session has only ~15% chance of entering the candidate pool from the lexical pathway. `ts_rank_cd`
+rewards term proximity (cover density) and should break these ties, favoring answer sessions where
+query terms appear in a contiguous phrase.
+
+**Neuroscience grounding**: Feature binding in episodic memory (Treisman, 1996). Co-occurring
+features encoded together form bound representations retrieved as a unit. `ts_rank_cd` rewards
+this binding -- sessions where query terms appear in close proximity (bound features) score higher
+than sessions where terms are scattered (unbound features).
+
+**Analysis findings (single-session-user, 4.3% R@5, 3/70)**:
+1. Three compounding problems: FTS saturation, embedding dilution, pool truncation
+2. "What book am I reading?" -> 556 FTS matches, 193 tied at max `ts_rank`. Pool of 30 = ~15% inclusion chance.
+3. "What degree did I graduate with?" -> 149 FTS matches, 10 tied at max `ts_rank`. Better but still lossy.
+4. 3 successful queries used rare/specific vocabulary (e.g., "spirituality" appears in 1 session)
+5. Answer sessions contain the fact as a passing mention in a conversation about something else
+6. Session-level embeddings are dominated by the overall topic, not the brief personal fact
+
+**Verification on real data**:
+- ts_rank: "What book am I reading?" -> 29 sessions above 0.90, 19 above 0.99 (massive tie)
+- ts_rank_cd: same query -> 0 sessions above 0.90 (ties completely eliminated)
+- ts_rank_cd also produces values >1.0 for best matches, so tanh() saturates similarly to ts_rank
+  for the top candidates -- no scoring regression expected for strong FTS matches
+
+**Implementation**: Replaced all 6 occurrences of `ts_rank(` with `ts_rank_cd(` in recall.rs:
+- 4x in fts_rank column computation (all CTEs: semantic, lexical, entity, cluster)
+- 1x in lexical CTE ORDER BY
+- 1x in lexical CTE ORDER BY (same line, the ORDER BY expression)
+The scoring formula (`content_match = w_semantic * cosine_sim + w_fts * tanh(fts_rank)`)
+is unchanged -- only the input FTS rank values change.
+
+**Result**: BENCHMARK IN PROGRESS -- clean ingest running (19,195 sessions via MCP API).
+Ingestion started 2026-04-11T09:17Z, expected completion ~2026-04-11T10:25Z.
+Results file will be in ~/longmemeval-ghola/results/ with timestamp ~20260411T10*.
+The next samsara iteration should check for this results file and record the outcome.
+
+**Next (for next iteration)**:
+1. Check benchmark results. If regression, revert ts_rank_cd and investigate why.
+2. If improvement, analyze which categories benefited most.
+3. If single-session-user is still low, the remaining problem is embedding dilution
+   (session-level embeddings don't represent specific facts). Next fix would be multi-scale
+   embedding or fact extraction at indexing time.
+4. If no change, the problem is deeper than candidate selection -- scoring is the bottleneck.

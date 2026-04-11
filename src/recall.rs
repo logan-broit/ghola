@@ -198,7 +198,7 @@ fn recall_inner(
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       ts_rank_cd(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
                 FROM ghola.mnemes \
                 WHERE workspace_id = '{ws}' \
@@ -235,7 +235,7 @@ fn recall_inner(
             SELECT m.id, m.concept, m.content, m.confidence::float8, m.access_count, \
                    GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                    (1.0 - (m.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                   ts_rank(m.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                   ts_rank_cd(m.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                    m.memory_type, m.session_id::text \
             FROM ghola.mnemes m \
             WHERE m.workspace_id = '{ws}' \
@@ -259,7 +259,7 @@ fn recall_inner(
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       ts_rank_cd(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
                 FROM ghola.mnemes \
                 WHERE workspace_id = '{ws}' \
@@ -273,7 +273,7 @@ fn recall_inner(
                 SELECT id, concept, content, confidence::float8, access_count, \
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       ts_rank_cd(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
                        memory_type, session_id::text \
                 FROM ghola.mnemes \
                 WHERE workspace_id = '{ws}' \
@@ -281,7 +281,7 @@ fn recall_inner(
                   AND confidence >= {min_conf} \
                   {filters} \
                   AND search_vector @@ plainto_tsquery('english', '{qt}') \
-                ORDER BY ts_rank(search_vector, plainto_tsquery('english', '{qt}')) DESC \
+                ORDER BY ts_rank_cd(search_vector, plainto_tsquery('english', '{qt}')) DESC \
                 LIMIT {pool} \
             ), \
             {entity_cte} \

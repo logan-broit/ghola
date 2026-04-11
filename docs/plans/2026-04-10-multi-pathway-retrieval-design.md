@@ -120,7 +120,7 @@ FUNCTION: recall_multi_pathway(workspace_id, query_text, query_embedding, limit_
     - find nearest cluster centroids to query_embedding (top 3, tunable) if cluster_centroids table is populated for this workspace
     - run four retrieval pathways in parallel, each returning up to pool_size candidates:
       - semantic: HNSW nearest neighbors across full workspace (no restrictions)
-      - lexical: FTS matches on search_vector, ranked by ts_rank
+      - lexical: FTS matches on search_vector, ranked by ts_rank_cd (cover density, Iter 3)
       - entity: GIN scan on entities column where query entity tokens overlap mneme entity tokens
       - cluster: HNSW nearest neighbors restricted to mnemes in the nearest clusters
     - union all pathway results, deduplicate by mneme id (keep highest cosine_sim on collision)

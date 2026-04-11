@@ -64,6 +64,9 @@ These are the building blocks. Each improvement should map to one of these:
 - MCP ingestion sets concept to metadata strings (timestamp_xxx_session_yyy), not semantic content (Iter 2)
 - Gating worker enriches concept with user-turn text for weight 'A' FTS boost (Iter 2)
 - Concept enrichment only applies to newly-gated mnemes; re-queue not supported (Iter 2)
+- ts_rank saturates when many sessions share common terms at weight A (Iter 3: switched to ts_rank_cd)
+- ts_rank_cd produces values >1.0 for best matches; tanh() saturates similarly to ts_rank for top candidates
+- ts_rank_cd produces smaller absolute values for weak matches, reducing FTS contribution via tanh()
 
 ## Tech Stack
 

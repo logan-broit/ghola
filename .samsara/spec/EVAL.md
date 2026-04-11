@@ -23,8 +23,10 @@ COMMIT;"
 cd ~/longmemeval-ghola && .venv/bin/python run.py all --backend ghola_mcp --dataset s
 ```
 
-The benchmark ingests ~19K mnemes across ~500 sessions, then runs 500 retrieval queries
-across 6 categories. Takes ~10-15 minutes total.
+The benchmark ingests ~19K sessions (~19K mnemes with session granularity) then runs 500
+retrieval queries across 6 categories. Ingestion takes ~65 minutes via MCP API (~4.8
+sessions/second with 50ms throttle). Gating takes ~7 minutes. Queries take ~5 minutes.
+Total: ~75-80 minutes.
 
 ### Wait for gating worker
 
