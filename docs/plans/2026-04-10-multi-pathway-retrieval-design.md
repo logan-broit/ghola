@@ -328,3 +328,16 @@ CONSTRAINT: intent_classification_accuracy (discovered 2026-04-11)
   'question' (32%) or 'plan' (9%). this is because long sessions contain many question marks
   and future-tense statements, which outnumber preference keywords. an intent-aware pathway
   that filters on intent='preference' would miss 41% of targets.
+
+CONSTRAINT: concept_field_wasted (discovered 2026-04-11)
+  the concept field from MCP ingestion contains only metadata strings like
+  `timestamp_20230520_sat_0221_session_shar` -- no semantic content. since concept gets
+  weight 'A' (1.0) in the tsvector vs content at weight 'B' (0.4), this wastes the
+  highest-weight search slot. gating worker now enriches concept with user-turn text
+  to provide ~20x FTS rank boost for user-stated facts. encoding specificity (Tulving, 1972).
+
+CONSTRAINT: concept_enrichment_is_encoding_time (discovered 2026-04-11)
+  concept enrichment happens during gating (encoding time), not during recall (retrieval time).
+  this means existing mnemes are NOT enriched until re-ingested. there is no mechanism to
+  re-queue existing mnemes for gating. benchmark runs must truncate + re-ingest to measure
+  the effect of concept enrichment.

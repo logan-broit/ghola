@@ -61,6 +61,9 @@ These are the building blocks. Each improvement should map to one of these:
 - Session-level embeddings for long sessions (18+ turns) produce diluted representations (Iter 1)
 - Benchmark requires truncate + re-ingest for fair comparison (access_count drift otherwise)
 - Intent classifier misses 41% of preference sessions due to competing question/plan keywords
+- MCP ingestion sets concept to metadata strings (timestamp_xxx_session_yyy), not semantic content (Iter 2)
+- Gating worker enriches concept with user-turn text for weight 'A' FTS boost (Iter 2)
+- Concept enrichment only applies to newly-gated mnemes; re-queue not supported (Iter 2)
 
 ## Tech Stack
 

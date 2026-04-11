@@ -340,6 +340,53 @@ pub fn extract_dates(text: &str) -> Vec<String> {
     dates
 }
 
+/// Extract user-turn text from conversation content for concept enrichment.
+///
+/// Parses the `[user]:` lines from the session format and returns them concatenated,
+/// truncated to `max_chars`. This provides encoding-time enrichment: when appended
+/// to the concept field (which gets weight 'A' in the tsvector), user-stated facts
+/// become high-weight search terms.
+///
+/// Neuroscience grounding: Encoding specificity (Tulving, 1972) -- retrieval succeeds
+/// when cues at retrieval match cues at encoding. By promoting user-stated content to
+/// weight 'A', we create cue-compatible encodings for personal-fact queries.
+pub fn extract_user_turn_text(content: &str, max_chars: usize) -> Option<String> {
+    let mut user_text = String::new();
+    let mut in_user_turn = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[user]:") {
+            if !user_text.is_empty() {
+                user_text.push(' ');
+            }
+            let text_part = trimmed.strip_prefix("[user]:").unwrap_or(trimmed).trim();
+            user_text.push_str(text_part);
+            in_user_turn = true;
+        } else if trimmed.starts_with("[assistant]:") || trimmed.starts_with("[system]:") || trimmed.starts_with("[timestamp:") {
+            in_user_turn = false;
+        } else if in_user_turn && !trimmed.is_empty() {
+            user_text.push(' ');
+            user_text.push_str(trimmed);
+        }
+    }
+
+    if user_text.is_empty() {
+        return None;
+    }
+
+    // Truncate at word boundary
+    if user_text.len() > max_chars {
+        if let Some(break_pos) = user_text[..max_chars].rfind(' ') {
+            user_text.truncate(break_pos);
+        } else {
+            user_text.truncate(max_chars);
+        }
+    }
+
+    Some(user_text)
+}
+
 /// Classify intent from text content.
 /// Returns "fact" as default when no stronger signal is found.
 pub fn classify_intent(text: &str) -> Option<String> {
@@ -389,6 +436,7 @@ fn process_one_gating_item() -> i64 {
                 let entities = extract_entities(&text);
                 let dates = extract_dates(&text);
                 let intent = classify_intent(&text);
+                let user_keywords = extract_user_turn_text(&text, 4000);
 
                 let mut sets = Vec::new();
                 if !entities.is_empty() {
@@ -396,6 +444,13 @@ fn process_one_gating_item() -> i64 {
                         .map(|e| format!("'{}'", e.replace('\'', "''")))
                         .collect::<Vec<_>>().join(",");
                     sets.push(format!("entities = ARRAY[{arr}]::text[]"));
+                }
+                // Concept enrichment: prepend user-turn text to concept for weight 'A' FTS boost
+                if let Some(ref utext) = user_keywords {
+                    let escaped = utext.replace('\'', "''");
+                    sets.push(format!(
+                        "concept = '{escaped}' || ' | ' || concept"
+                    ));
                 }
                 if !dates.is_empty() {
                     let arr = dates.iter()
@@ -770,6 +825,72 @@ mod tests {
         let sarah_count = entities.iter().filter(|e| e.contains("sarah")).count();
         assert_eq!(sarah_count, 1, "single-word entity should appear once, got: {:?}", entities);
     }
+
+    // ── User turn extraction tests ──
+
+    #[test]
+    fn test_extract_user_turn_text_basic() {
+        let content = "[timestamp: 2023/05/20] [session: abc123]\n\
+                        [user]: I graduated with a degree in Business Administration.\n\
+                        [assistant]: That's great! Business Administration is a versatile degree.";
+        let result = extract_user_turn_text(content, 4000);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("graduated"), "should contain 'graduated', got: {text}");
+        assert!(text.contains("Business Administration"), "should contain 'Business Administration', got: {text}");
+        assert!(!text.contains("[assistant]"), "should not contain assistant text");
+    }
+
+    #[test]
+    fn test_extract_user_turn_text_multiple_turns() {
+        let content = "[user]: I enjoy hiking on weekends.\n\
+                        [assistant]: Hiking is wonderful!\n\
+                        [user]: My favorite trail is near Lake Tahoe.";
+        let result = extract_user_turn_text(content, 4000);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("hiking"), "should contain 'hiking'");
+        assert!(text.contains("Lake Tahoe"), "should contain 'Lake Tahoe'");
+    }
+
+    #[test]
+    fn test_extract_user_turn_text_no_user_turns() {
+        let content = "[assistant]: Hello, how can I help you?\n\
+                        [system]: Connection established.";
+        let result = extract_user_turn_text(content, 4000);
+        assert!(result.is_none(), "should return None when no user turns");
+    }
+
+    #[test]
+    fn test_extract_user_turn_text_empty() {
+        let result = extract_user_turn_text("", 4000);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_user_turn_text_truncation() {
+        let content = "[user]: This is a very long sentence that should be truncated at a word boundary for concept enrichment.";
+        let result = extract_user_turn_text(content, 50);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.len() <= 50, "should be truncated to max_chars, got len={}", text.len());
+        assert!(!text.ends_with(' '), "should not end with space");
+    }
+
+    #[test]
+    fn test_extract_user_turn_text_multiline_user_turn() {
+        // User content that spans multiple lines (no role prefix on continuation)
+        let content = "[user]: I work at a tech company.\n\
+                        We build databases.\n\
+                        [assistant]: That sounds interesting.";
+        let result = extract_user_turn_text(content, 4000);
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("tech company"), "should contain 'tech company'");
+        assert!(text.contains("databases"), "should contain continuation 'databases'");
+    }
+
+    // ── Intent classification tests ──
 
     #[test]
     fn test_classify_intent_decision() {
