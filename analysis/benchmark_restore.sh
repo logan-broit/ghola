@@ -35,24 +35,33 @@ TRUNCATE ghola.mnemes CASCADE;
 COMMIT;"
 
 # Restore mnemes
+# Note: dumps have 77-byte kubectl stderr prefix ("Defaulted container...")
+# that must be stripped before PostgreSQL can parse the PGCOPY header.
 echo "Restoring mnemes (this takes a few minutes)..."
-gunzip -c "$DATA_DIR/ghola_mnemes_ref_20260412.bin.gz" | \
+gunzip -c "$DATA_DIR/ghola_mnemes_ref_20260412.bin.gz" | tail -c +78 | \
     kubectl exec -i -n ch-system memory-db-1 -- \
     psql -U postgres -d memories -c "COPY ghola.mnemes FROM STDIN WITH (FORMAT binary)"
 
 # Restore cluster_centroids
 echo "Restoring cluster_centroids..."
-gunzip -c "$DATA_DIR/ghola_clusters_ref_20260412.bin.gz" | \
+gunzip -c "$DATA_DIR/ghola_clusters_ref_20260412.bin.gz" | tail -c +78 | \
     kubectl exec -i -n ch-system memory-db-1 -- \
     psql -U postgres -d memories -c "COPY ghola.cluster_centroids FROM STDIN WITH (FORMAT binary)"
 
 # Restore associations (optional, only supersedes)
 if [ -f "$DATA_DIR/ghola_associations_ref_20260412.bin.gz" ]; then
     echo "Restoring associations..."
-    gunzip -c "$DATA_DIR/ghola_associations_ref_20260412.bin.gz" | \
+    gunzip -c "$DATA_DIR/ghola_associations_ref_20260412.bin.gz" | tail -c +78 | \
         kubectl exec -i -n ch-system memory-db-1 -- \
         psql -U postgres -d memories -c "COPY ghola.associations FROM STDIN WITH (FORMAT binary)"
 fi
+
+# Clear worker queues (COPY binary fires INSERT triggers, re-populating queues)
+echo "Clearing worker queues (triggered by COPY)..."
+kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
+TRUNCATE ghola.gating_queue;
+TRUNCATE ghola.contradiction_queue;
+TRUNCATE ghola.co_activation_queue;"
 
 # Verify
 echo "Verifying..."

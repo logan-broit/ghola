@@ -32,6 +32,7 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 7 | 10.1% | n/a | Fix benchmark: pin DB, full reset, 3-run variance (new baseline) | yes | [007.md](iterations/007.md) |
 | 8 | 24.1% | n/a | Relaxed lexical fallback + re-ingest (new embedding set, new baseline) | yes | [008.md](iterations/008.md) |
 | 9 | 27.5% | +3.4 | Ablation: relaxed lexical pathway harmful, removed (new baseline) | yes | [009.md](iterations/009.md) |
+| 10 | 19.2% | -0.3* | Temporal tokens in concept field dilute lexical pool (all cats regressed) | reverted | [010.md](iterations/010.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
@@ -62,18 +63,23 @@ Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter
 - Relaxed lexical pathway is harmful: dilutes candidate pool, injects variance (Iter 9)
 - Retrieval-time temporal stripping is wrong direction; fix encoding, not query (Iter 9)
 - Candidate pool purity matters: fewer high-quality > more low-quality candidates (Iter 9)
+- Temporal tokens in concept field dilute lexical pool: month/season names match thousands of mnemes (Iter 10)
+- Temporal context needs a DEDICATED retrieval pathway, not the general lexical search (Iter 10)
+- Binary COPY fires INSERT triggers; must TRUNCATE worker queues post-restore (Iter 10)
+- Corrupted COPY dumps: kubectl stderr mixes into stdout; fix with `tail -c +78` (Iter 10)
+- Embedding server config must stay consistent with stored embeddings (Iter 10)
 
 ## What To Try Next
 
-1. **Multi-granularity encoding** (high impact, high effort): Extract per-turn or per-fact
-   sub-mnemes during gating. Helps single-session-user, multi-session, temporal simultaneously.
-   Requires schema changes + embedding generation at gating time.
+1. **Temporal retrieval pathway** (moderate effort): Dedicated CTE matching queries against
+   content_dates. Keeps temporal matching separate from lexical pool (Iter 10 confirmed
+   mixing them is harmful). Helper functions already exist in gating_worker.rs.
 
-2. **Temporal retrieval pathway** (moderate effort): Use content_dates column in a new CTE.
-   Many temporal-reasoning queries include date cues not leveraged today.
+2. **Query decomposition** (ready, stashed): Decompose multi-event temporal queries into
+   per-event sub-queries. Code stashed as `iter-11-query-decomposition`. Additive pathway.
 
-3. **Encoding-time temporal enrichment**: Add temporal context (dates, relative time markers)
-   to the tsvector during gating. Correct application of encoding specificity.
+3. **Multi-granularity encoding** (high impact, high effort): Per-turn or per-fact
+   sub-mnemes during gating. Helps single-session-user, multi-session, temporal.
 
 ## Benchmark Protocol
 

@@ -303,33 +303,34 @@ fn split_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
-/// Extract ISO date patterns from text.
-/// Returns date strings (not parsed timestamps -- parsing happens at UPDATE time).
+/// Extract date patterns from text.
+/// Returns date strings in YYYY-MM-DD format (normalized from both YYYY-MM-DD and YYYY/MM/DD).
 pub fn extract_dates(text: &str) -> Vec<String> {
     let mut dates = Vec::new();
 
-    // ISO dates: YYYY-MM-DD
-    let mut i = 0;
     let bytes = text.as_bytes();
+    let mut i = 0;
     while i + 9 < bytes.len() {
-        // Look for pattern: 4 digits, dash, 2 digits, dash, 2 digits
-        if bytes[i].is_ascii_digit()
+        // Look for pattern: 4 digits, separator, 2 digits, separator, 2 digits
+        // Supports both '-' (ISO) and '/' (timestamp header) separators
+        let sep = bytes[i + 4];
+        if (sep == b'-' || sep == b'/')
+            && bytes[i].is_ascii_digit()
             && bytes[i + 1].is_ascii_digit()
             && bytes[i + 2].is_ascii_digit()
             && bytes[i + 3].is_ascii_digit()
-            && bytes[i + 4] == b'-'
             && bytes[i + 5].is_ascii_digit()
             && bytes[i + 6].is_ascii_digit()
-            && bytes[i + 7] == b'-'
+            && bytes[i + 7] == sep
             && bytes[i + 8].is_ascii_digit()
             && bytes[i + 9].is_ascii_digit()
         {
-            // Check word boundary (not preceded or followed by alphanumeric)
             let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
             let after_ok = i + 10 >= bytes.len() || !bytes[i + 10].is_ascii_alphanumeric();
             if before_ok && after_ok {
-                let date_str = &text[i..i + 10];
-                dates.push(date_str.to_string());
+                // Normalize to YYYY-MM-DD
+                let date_str = text[i..i + 10].replace('/', "-");
+                dates.push(date_str);
             }
             i += 10;
         } else {
@@ -337,7 +338,87 @@ pub fn extract_dates(text: &str) -> Vec<String> {
         }
     }
 
+    dates.sort();
+    dates.dedup();
     dates
+}
+
+/// Month names indexed by 1-based month number.
+const MONTH_NAMES: &[&str] = &[
+    "", "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+];
+
+/// Map month number (1-12) to meteorological season.
+fn season_from_month(month: u32) -> &'static str {
+    match month {
+        12 | 1 | 2 => "winter",
+        3 | 4 | 5 => "spring",
+        6 | 7 | 8 => "summer",
+        9 | 10 | 11 => "fall",
+        _ => "",
+    }
+}
+
+/// Compute day of week from year/month/day using Tomohiko Sakamoto's algorithm.
+/// Returns 0=Sunday, 1=Monday, ..., 6=Saturday.
+fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
+    const T: &[u32] = &[0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    (y + y / 4 - y / 100 + y / 400 + T[(month - 1) as usize] + day) % 7
+}
+
+const DAY_NAMES: &[&str] = &[
+    "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+];
+
+/// Generate temporal search tokens from a date string (YYYY-MM-DD format).
+///
+/// Returns tokens like "march 2023 spring wednesday" that can be appended
+/// to the concept field for weight-A tsvector matching.
+///
+/// Neuroscience grounding: Encoding specificity (Tulving, 1972) -- temporal
+/// context must be encoded at storage time so retrieval cues referencing
+/// month names, day names, or seasons can match via the lexical pathway.
+pub fn temporal_tokens_from_date(date_str: &str) -> Option<String> {
+    let parts: Vec<&str> = date_str.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: u32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+
+    if month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2100 {
+        return None;
+    }
+
+    let month_name = MONTH_NAMES[month as usize];
+    let dow = day_of_week(year, month, day);
+    let day_name = DAY_NAMES[dow as usize];
+    let season = season_from_month(month);
+
+    Some(format!("{month_name} {day_name} {season} {year}"))
+}
+
+/// Extract the first session timestamp from content and return temporal tokens.
+///
+/// Parses the `[timestamp: YYYY/MM/DD (Day) HH:MM]` header format used by
+/// the MCP ingestion pipeline. Returns temporal tokens for the session date.
+pub fn extract_temporal_tokens(text: &str) -> Option<String> {
+    // Find the first [timestamp: ...] header
+    let marker = "[timestamp: ";
+    let start = text.find(marker)?;
+    let date_start = start + marker.len();
+
+    // Extract the YYYY/MM/DD portion (10 chars)
+    if date_start + 10 > text.len() {
+        return None;
+    }
+    let raw_date = &text[date_start..date_start + 10];
+    let normalized = raw_date.replace('/', "-");
+
+    temporal_tokens_from_date(&normalized)
 }
 
 /// Extract user-turn text from conversation content for concept enrichment.
@@ -932,5 +1013,89 @@ mod tests {
     fn test_classify_intent_empty() {
         // Empty text should still return fact as default
         assert_eq!(classify_intent(""), Some("fact".to_string()));
+    }
+
+    // ── Date extraction: slash format ──
+
+    #[test]
+    fn test_extract_dates_slash_format() {
+        let dates = extract_dates("[timestamp: 2023/05/28 (Sun) 03:42]");
+        assert!(dates.contains(&"2023-05-28".to_string()),
+            "should extract YYYY/MM/DD and normalize to YYYY-MM-DD, got: {:?}", dates);
+    }
+
+    #[test]
+    fn test_extract_dates_mixed_formats() {
+        let dates = extract_dates("Created 2023/01/15 and updated 2023-03-20.");
+        assert_eq!(dates.len(), 2, "should extract both formats, got: {:?}", dates);
+        assert!(dates.contains(&"2023-01-15".to_string()));
+        assert!(dates.contains(&"2023-03-20".to_string()));
+    }
+
+    #[test]
+    fn test_extract_dates_deduplicates() {
+        let dates = extract_dates("Date: 2023-05-28 and again 2023/05/28.");
+        assert_eq!(dates.len(), 1, "should dedup identical dates, got: {:?}", dates);
+    }
+
+    // ── Temporal token generation ──
+
+    #[test]
+    fn test_temporal_tokens_from_date() {
+        // 2023-03-15 is a Wednesday
+        let tokens = temporal_tokens_from_date("2023-03-15").unwrap();
+        assert!(tokens.contains("march"), "should contain month name, got: {tokens}");
+        assert!(tokens.contains("wednesday"), "should contain day name, got: {tokens}");
+        assert!(tokens.contains("spring"), "should contain season, got: {tokens}");
+        assert!(tokens.contains("2023"), "should contain year, got: {tokens}");
+    }
+
+    #[test]
+    fn test_temporal_tokens_winter() {
+        let tokens = temporal_tokens_from_date("2023-01-05").unwrap();
+        assert!(tokens.contains("january"), "got: {tokens}");
+        assert!(tokens.contains("winter"), "January should be winter, got: {tokens}");
+    }
+
+    #[test]
+    fn test_temporal_tokens_summer() {
+        let tokens = temporal_tokens_from_date("2023-07-20").unwrap();
+        assert!(tokens.contains("july"), "got: {tokens}");
+        assert!(tokens.contains("summer"), "July should be summer, got: {tokens}");
+    }
+
+    #[test]
+    fn test_temporal_tokens_invalid_date() {
+        assert!(temporal_tokens_from_date("not-a-date").is_none());
+        assert!(temporal_tokens_from_date("2023-13-01").is_none());
+        assert!(temporal_tokens_from_date("2023-00-15").is_none());
+    }
+
+    #[test]
+    fn test_day_of_week_known_dates() {
+        // 2023-01-01 was a Sunday
+        assert_eq!(day_of_week(2023, 1, 1), 0);
+        // 2023-03-15 was a Wednesday
+        assert_eq!(day_of_week(2023, 3, 15), 3);
+        // 2024-02-29 was a Thursday (leap year)
+        assert_eq!(day_of_week(2024, 2, 29), 4);
+    }
+
+    // ── Session timestamp extraction ──
+
+    #[test]
+    fn test_extract_temporal_tokens_standard_format() {
+        let content = "[timestamp: 2023/05/28 (Sun) 03:42] [session: abc123]\n\
+                        [user]: I visited the museum today.";
+        let tokens = extract_temporal_tokens(content).unwrap();
+        assert!(tokens.contains("may"), "should contain month name, got: {tokens}");
+        assert!(tokens.contains("sunday"), "should contain day name, got: {tokens}");
+        assert!(tokens.contains("spring"), "May should be spring, got: {tokens}");
+    }
+
+    #[test]
+    fn test_extract_temporal_tokens_no_timestamp() {
+        let content = "[user]: Just a user message with no timestamp.";
+        assert!(extract_temporal_tokens(content).is_none());
     }
 }
