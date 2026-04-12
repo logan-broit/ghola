@@ -33,6 +33,7 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 8 | 24.1% | n/a | Relaxed lexical fallback + re-ingest (new embedding set, new baseline) | yes | [008.md](iterations/008.md) |
 | 9 | 27.5% | +3.4 | Ablation: relaxed lexical pathway harmful, removed (new baseline) | yes | [009.md](iterations/009.md) |
 | 10 | 19.2% | -0.3* | Temporal tokens in concept field dilute lexical pool (all cats regressed) | reverted | [010.md](iterations/010.md) |
+| 11 | 16.2%* | n/a | Query decomposition + temporal analysis; bimodal variance (6-17pp) makes comparison impossible | reverted | [011.md](iterations/011.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
@@ -68,18 +69,29 @@ Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter
 - Binary COPY fires INSERT triggers; must TRUNCATE worker queues post-restore (Iter 10)
 - Corrupted COPY dumps: kubectl stderr mixes into stdout; fix with `tail -c +78` (Iter 10)
 - Embedding server config must stay consistent with stored embeddings (Iter 10)
+- 0/133 temporal queries contain explicit dates; date-matching retrieval pathways have zero opportunity (Iter 11)
+- content_dates unpopulated (1/18917); extract_dates fix in code but pinned DB predates it (Iter 11)
+- Single sub-query decomposition = relaxed lexical = harmful; gate on 2+ sub-queries (Iter 11)
+- DISTINCT ON dedup is non-deterministic; add ORDER BY id, fts_rank DESC for correctness (Iter 11)
+- Bimodal benchmark variance: 1st run after pod restart LOW, 2nd HIGH (6-17pp). HNSW warmup. (Iter 11)
+- Sentence-transformers embedding server has higher variance (6-17pp) than TEI (2.2pp) (Iter 11)
 
 ## What To Try Next
 
-1. **Temporal retrieval pathway** (moderate effort): Dedicated CTE matching queries against
-   content_dates. Keeps temporal matching separate from lexical pool (Iter 10 confirmed
-   mixing them is harmful). Helper functions already exist in gating_worker.rs.
+1. **Fix benchmark variance** (critical, prerequisite): Bimodal 6-17pp variance makes code
+   changes unmeasurable. Must discard first run after pod restart (warmup) or pre-warm
+   HNSW index. Restoring TEI/vLLM embedding server would also reduce variance.
 
-2. **Query decomposition** (ready, stashed): Decompose multi-event temporal queries into
-   per-event sub-queries. Code stashed as `iter-11-query-decomposition`. Additive pathway.
+2. **Populate content_dates via migration** (moderate effort): SQL migration using fixed
+   `extract_dates()` to populate content_dates for all 18917 mnemes. Enables future
+   temporal pathways. extract_dates now handles YYYY/MM/DD format.
 
 3. **Multi-granularity encoding** (high impact, high effort): Per-turn or per-fact
    sub-mnemes during gating. Helps single-session-user, multi-session, temporal.
+
+Note: Temporal retrieval pathway (content_dates CTE) and query decomposition were both
+investigated in iter 11. Temporal pathway has 0 opportunity (no explicit dates in queries).
+Query decomposition was neutral within noise. Neither is recommended as a next step.
 
 ## Benchmark Protocol
 
