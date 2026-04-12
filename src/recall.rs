@@ -16,49 +16,6 @@ use crate::scoring::{actr_activation_inner, softplus_inner};
 const ONE_MINUTE_DAYS: f64 = 1.0 / 1440.0;
 
 // ---------------------------------------------------------------------------
-// Temporal stop word stripping (encoding specificity, Tulving 1972)
-//
-// Temporal framing words ("ago", "weeks", "recently") appear in queries but
-// not in encoded memory content. The AND conjunction in plainto_tsquery means
-// these words block the @@ filter entirely. Stripping them allows a relaxed
-// fallback pathway to match on the content-bearing terms.
-// ---------------------------------------------------------------------------
-
-const TEMPORAL_STOP_WORDS: &[&str] = &[
-    "ago", "recently", "lately", "before", "after", "during", "since",
-    "when", "last", "past", "previous", "earlier", "weeks", "months",
-    "days", "hours", "passed",
-];
-
-/// Strip temporal framing words from a query string.
-///
-/// Returns `Some(cleaned)` if at least one temporal word was removed AND
-/// at least 2 content words remain. Returns `None` otherwise (no temporal
-/// words found, or too few content words after stripping).
-pub fn strip_temporal_stop_words(query: &str) -> Option<String> {
-    let words: Vec<&str> = query.split_whitespace().collect();
-    let mut kept = Vec::new();
-    let mut stripped_count = 0;
-
-    for word in &words {
-        let lower = word.to_lowercase();
-        // Strip punctuation for comparison but keep original if not a stop word
-        let clean: String = lower.chars().filter(|c| c.is_alphanumeric()).collect();
-        if TEMPORAL_STOP_WORDS.contains(&clean.as_str()) {
-            stripped_count += 1;
-        } else {
-            kept.push(*word);
-        }
-    }
-
-    if stripped_count == 0 || kept.len() < 2 {
-        return None;
-    }
-
-    Some(kept.join(" "))
-}
-
-// ---------------------------------------------------------------------------
 // SQL wrapper: recall()
 //
 // Provides the public interface with vector and score_weights types.
@@ -265,41 +222,6 @@ fn recall_inner(
         ""
     };
 
-    // Build relaxed lexical fallback CTE (encoding specificity, Tulving 1972)
-    // Strips temporal framing words from query so the AND filter in plainto_tsquery
-    // can match content-bearing terms. Only fires when strict lexical returns nothing.
-    let cleaned_query = strip_temporal_stop_words(&escaped_text);
-    let (relaxed_lexical_cte, relaxed_lexical_union) = if let Some(ref cleaned) = cleaned_query {
-        let escaped_cleaned = cleaned.replace('\'', "''");
-        (
-            format!(
-                "relaxed_lexical AS ( \
-                    SELECT id, concept, content, confidence::float8, access_count, \
-                           GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
-                           (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                           ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
-                           memory_type, session_id::text \
-                    FROM ghola.mnemes \
-                    WHERE workspace_id = '{ws}' \
-                      AND state = 'active' \
-                      AND confidence >= {min_conf} \
-                      {filters} \
-                      AND search_vector @@ plainto_tsquery('english', '{cq}') \
-                      AND NOT EXISTS (SELECT 1 FROM lexical) \
-                    ORDER BY ts_rank(search_vector, plainto_tsquery('english', '{qt}')) DESC \
-                    LIMIT {pool} \
-                ), ",
-                min_age = ONE_MINUTE_DAYS, emb = query_embedding_text,
-                qt = escaped_text, cq = escaped_cleaned,
-                ws = workspace_id, min_conf = min_confidence, filters = extra_filters,
-                pool = pool_size,
-            ),
-            "UNION ALL SELECT * FROM relaxed_lexical ",
-        )
-    } else {
-        (String::new(), "")
-    };
-
     // Build cluster pathway CTE (graceful: returns empty when no centroids exist)
     let cluster_k = 3; // tunable: number of nearest clusters to search
     let cluster_cte = format!(
@@ -363,7 +285,6 @@ fn recall_inner(
                 LIMIT {pool} \
             ), \
             {entity_cte} \
-            {relaxed_lexical_cte} \
             {cluster_cte} \
             SELECT DISTINCT ON (id) id, concept, content, confidence, access_count, \
                    age_days, cosine_sim, fts_rank, memory_type, session_id \
@@ -371,7 +292,6 @@ fn recall_inner(
                 SELECT * FROM semantic \
                 UNION ALL \
                 SELECT * FROM lexical \
-                {relaxed_lexical_union} \
                 {entity_union} \
                 UNION ALL \
                 SELECT * FROM cluster_matches \
@@ -384,10 +304,8 @@ fn recall_inner(
             pool = pool_size,
             filters = extra_filters,
             entity_cte = entity_cte,
-            relaxed_lexical_cte = relaxed_lexical_cte,
             cluster_cte = cluster_cte,
             entity_union = entity_union,
-            relaxed_lexical_union = relaxed_lexical_union,
         );
 
         let rows = client
@@ -1044,103 +962,4 @@ mod tests {
 
     // ── recall does NOT update access_count or last_access directly ──
 
-    // ── Relaxed lexical fallback pathway ──
-
-    #[pg_test]
-    fn test_relaxed_lexical_fires_when_strict_blocks() {
-        // Scenario: query contains temporal framing words ("weeks", "ago") that
-        // aren't in the mneme content. The strict AND filter in plainto_tsquery
-        // blocks the lexical pathway. The relaxed pathway strips temporal words
-        // and matches on remaining content terms.
-        let (ws_id, _) = setup_recall_test_data();
-        let emb = make_query_embedding();
-
-        // Insert a mneme with content about "deployment pipeline" -- no temporal words.
-        // The generated search_vector will have these terms at weight B, concept at weight A.
-        let _m = insert_mneme_with_embedding(
-            &ws_id, "pipeline", "deployment pipeline automation and rollout",
-            &directional_embedding(0, 128),
-        );
-
-        // Query with temporal framing words that block the AND filter.
-        // plainto_tsquery('english', 'deployment pipeline weeks ago') requires
-        // ALL terms to match via AND. "weeks" and "ago" are not in the search_vector,
-        // so the strict lexical CTE returns 0 rows.
-        // The relaxed pathway strips "weeks" and "ago", leaving "deployment pipeline"
-        // which matches via plainto_tsquery AND filter.
-        let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM ghola.recall(\
-                '{ws_id}'::uuid, \
-                'deployment pipeline weeks ago', \
-                '{emb}'::vector, \
-                10, 0.0, NULL)"
-        ))
-        .expect("query failed")
-        .expect("null count");
-
-        // Should find mnemes via semantic pathway (always) + relaxed lexical adds coverage.
-        // The key test is that recall doesn't error -- the relaxed CTE is syntactically valid
-        // and the NOT EXISTS guard works correctly.
-        assert!(
-            count > 0,
-            "recall should return results even when strict lexical is blocked by temporal words"
-        );
-    }
-
-}
-
-// ---------------------------------------------------------------------------
-// Pure unit tests (no Postgres required)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod unit_tests {
-    use super::strip_temporal_stop_words;
-
-    #[test]
-    fn strips_temporal_words_from_query() {
-        let result = strip_temporal_stop_words("what did I discuss weeks ago about kubernetes");
-        assert_eq!(result, Some("what did I discuss about kubernetes".to_string()));
-    }
-
-    #[test]
-    fn returns_none_when_no_temporal_words() {
-        let result = strip_temporal_stop_words("kubernetes pod scheduling");
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn returns_none_when_too_few_content_words_remain() {
-        // "kubernetes" is the only content word after stripping "recently"
-        let result = strip_temporal_stop_words("recently kubernetes");
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn handles_multiple_temporal_words() {
-        let result = strip_temporal_stop_words("what happened during the past weeks with deployments");
-        assert_eq!(result, Some("what happened the with deployments".to_string()));
-    }
-
-    #[test]
-    fn case_insensitive_matching() {
-        let result = strip_temporal_stop_words("What did I discuss WEEKS AGO about kubernetes");
-        assert_eq!(result, Some("What did I discuss about kubernetes".to_string()));
-    }
-
-    #[test]
-    fn preserves_original_casing_of_kept_words() {
-        let result = strip_temporal_stop_words("Recently I asked about Kubernetes Deployment");
-        assert_eq!(result, Some("I asked about Kubernetes Deployment".to_string()));
-    }
-
-    #[test]
-    fn empty_string_returns_none() {
-        assert_eq!(strip_temporal_stop_words(""), None);
-    }
-
-    #[test]
-    fn all_temporal_words_returns_none() {
-        assert_eq!(strip_temporal_stop_words("ago recently weeks"), None);
-    }
 }
