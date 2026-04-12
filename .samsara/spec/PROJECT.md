@@ -81,6 +81,11 @@ These are the building blocks. Each improvement should map to one of these:
 - Co-activation drift after a single 500-query retrieve run changes 478/500 top-5 results. Sequential retrieve-only runs are confounded. Must reset access_count between runs. (Iter 6)
 - MCP server maps all benchmark workspace_ids to default UUID `00000000-0000-0000-0000-000000000001`. Workspace isolation is cosmetic. (Iter 6)
 - Additive pathway (separate CTE with NOT EXISTS guard) is confirmed safe via EXPLAIN -- no regression mechanism when strict pathway has results. Implementation ready for re-test on pinned database. (Iter 6)
+- Binary COPY dumps must be validated (check 0xffff trailer + row count). Iter 7 dump was silently truncated at row 19015/19181. (Iter 8)
+- Force-deleting pods during large COPY operations causes WAL corruption (pg_resetwal required). Use graceful shutdown or CNPG hibernation. (Iter 8)
+- Schema recreation (DROP SCHEMA + CREATE EXTENSION) invalidates ch-server DB connections. Must restart ch-server and re-GRANT permissions to memory_api role. (Iter 8)
+- TEI ingest quality varies dramatically: same code produces R@5 ~10% (Iter 7 ingest) vs ~24% (Iter 8 ingest). 2.4x difference from embedding non-determinism alone. (Iter 8)
+- run.py all generates random workspace UUID, creates mismatched bench tags. Must update tags post-ingest for retrieve-only compatibility. (Iter 8)
 
 ## Tech Stack
 

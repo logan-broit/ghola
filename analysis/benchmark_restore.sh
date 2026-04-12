@@ -12,7 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${1:-$SCRIPT_DIR/../benchmark-data}"
 
-for f in ghola_mnemes_ref_20260411.bin.gz ghola_clusters_ref_20260411.bin.gz; do
+for f in ghola_mnemes_ref_20260412.bin.gz ghola_clusters_ref_20260412.bin.gz; do
     if [ ! -f "$DATA_DIR/$f" ]; then
         echo "ERROR: Required file not found: $DATA_DIR/$f"
         exit 1
@@ -36,20 +36,20 @@ COMMIT;"
 
 # Restore mnemes
 echo "Restoring mnemes (this takes a few minutes)..."
-gunzip -c "$DATA_DIR/ghola_mnemes_ref_20260411.bin.gz" | \
+gunzip -c "$DATA_DIR/ghola_mnemes_ref_20260412.bin.gz" | \
     kubectl exec -i -n ch-system memory-db-1 -- \
     psql -U postgres -d memories -c "COPY ghola.mnemes FROM STDIN WITH (FORMAT binary)"
 
 # Restore cluster_centroids
 echo "Restoring cluster_centroids..."
-gunzip -c "$DATA_DIR/ghola_clusters_ref_20260411.bin.gz" | \
+gunzip -c "$DATA_DIR/ghola_clusters_ref_20260412.bin.gz" | \
     kubectl exec -i -n ch-system memory-db-1 -- \
     psql -U postgres -d memories -c "COPY ghola.cluster_centroids FROM STDIN WITH (FORMAT binary)"
 
 # Restore associations (optional, only supersedes)
-if [ -f "$DATA_DIR/ghola_associations_ref_20260411.bin.gz" ]; then
+if [ -f "$DATA_DIR/ghola_associations_ref_20260412.bin.gz" ]; then
     echo "Restoring associations..."
-    gunzip -c "$DATA_DIR/ghola_associations_ref_20260411.bin.gz" | \
+    gunzip -c "$DATA_DIR/ghola_associations_ref_20260412.bin.gz" | \
         kubectl exec -i -n ch-system memory-db-1 -- \
         psql -U postgres -d memories -c "COPY ghola.associations FROM STDIN WITH (FORMAT binary)"
 fi

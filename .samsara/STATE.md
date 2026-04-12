@@ -1,21 +1,22 @@
 # State
 
-## Current Baseline (v0.0.5, Iter 7 pinned database, 2026-04-11)
+## Current Baseline (v0.0.5+relaxed_lexical, Iter 8 re-ingest, 2026-04-12)
 
 Mean of 3 retrieve-only runs with full retrieval-time state reset.
-Variance: 2.2pp spread at R@5. Changes need >3pp improvement to be significant.
+Variance: 4.2pp spread at R@5. Changes need >5pp improvement to be significant.
+NOTE: Different embedding set than Iter 7. Not directly comparable.
 
 ```
                          R@1     R@5    R@10     MRR       N
 ------------------------------------------------------------
-Overall                 1.9%   10.1%   18.7%   0.055     500
+Overall                 7.5%   24.1%   36.7%   0.147     500
 ------------------------------------------------------------
-knowledge-update        1.3%   10.7%   23.9%   0.058      78
-multi-session           2.0%   14.5%   18.8%   0.066     133
-single-session-asst     4.2%    7.7%   29.2%   0.083      56
-single-session-pref     0.0%    3.3%    6.7%   0.014      30
-single-session-user     2.9%    8.1%   11.4%   0.047      70
-temporal-reasoning      1.0%    8.8%   17.5%   0.045     133
+knowledge-update       13.3%   41.5%   64.9%   0.262      78
+multi-session           3.0%   12.3%   25.1%   0.076     133
+single-session-asst    33.3%   72.6%   83.9%   0.489      56
+single-session-pref     0.0%    3.3%    7.8%   0.019      30
+single-session-user     1.4%    5.7%   11.4%   0.031      70
+temporal-reasoning      2.8%   19.5%   31.8%   0.096     133
 ```
 
 ## Iteration History
@@ -30,10 +31,11 @@ temporal-reasoning      1.0%    8.8%   17.5%   0.045     133
 | 5 | 28.4% | -0.8 | Temporal stop word stripping -- displaced marginal hits | reverted | [005.md](iterations/005.md) |
 | 6 | 16.6%* | n/a | Additive relaxed lexical fallback -- *benchmark non-deterministic on re-ingest | reverted | [006.md](iterations/006.md) |
 | 7 | 10.1% | n/a | Fix benchmark: pin DB, full reset, 3-run variance (new baseline) | yes | [007.md](iterations/007.md) |
+| 8 | 24.1% | n/a | Relaxed lexical fallback + re-ingest (new embedding set, new baseline) | yes | [008.md](iterations/008.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
-Iter 7 established a new baseline on the Iter 6 ingest with proper methodology.
-Iters 0-5 R@5 values are NOT comparable to Iter 7+ (different embedding set).
+Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
+Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter 8+.
 
 ## Key Constraints Discovered
 
@@ -52,14 +54,16 @@ Iters 0-5 R@5 values are NOT comparable to Iter 7+ (different embedding set).
 - Hebbian associations cause degrading trend across successive runs; must be cleared (Iter 7)
 - Full retrieval-time state reset (access_count + associations + queue) stabilizes variance to 2.2pp (Iter 7)
 - pg_dump cannot export extension-member tables; use COPY binary format instead (Iter 7)
+- Binary COPY dumps must be validated: check 0xffff trailer and row count (Iter 8)
+- Force-deleting pods during COPY causes WAL corruption; use graceful shutdown (Iter 8)
+- Schema recreation (DROP+CREATE EXTENSION) requires ch-server restart + re-GRANT (Iter 8)
+- TEI ingest quality varies 2.4x between runs: same code, R@5 10% vs 24% (Iter 7 vs 8)
+- run.py all does not accept --workspace-id; must update bench tags post-ingest (Iter 8)
 
 ## What To Try Next
 
-### Code changes (can now proceed with clean benchmark protocol)
-
-1. **Additive fallback lexical pathway** (code ready from Iter 6, needs fair comparison):
-   Re-test on the pinned database with the new 3-run variance protocol.
-   Needs >3pp R@5 improvement to be significant.
+1. **Isolate relaxed lexical effect**: Run 3x on Iter 8 pinned DB WITHOUT relaxed lexical
+   (revert code, deploy, benchmark). If delta <5pp, the pathway doesn't help on this ingest.
 
 2. **Multi-granularity encoding** (high impact, high effort): Extract per-turn or per-fact
    sub-mnemes during gating. Helps single-session-user, multi-session, temporal simultaneously.
@@ -94,7 +98,7 @@ To restore from pinned database: `./analysis/benchmark_restore.sh`
 
 - [x] FIX BENCHMARK: Pin embeddings via database dump (Iter 7)
 - [x] FIX BENCHMARK: Reset co-activation state between retrieve-only runs (Iter 7)
-- [ ] Additive fallback lexical pathway (code ready from Iter 6, needs fair comparison)
+- [x] Additive fallback lexical pathway (deployed Iter 8, effect not yet isolated)
 - [ ] Multi-granularity encoding (per-turn sub-mnemes)
 - [ ] Temporal retrieval pathway (content_dates CTE)
 - [ ] Session-context boosting (leverage session associations)
