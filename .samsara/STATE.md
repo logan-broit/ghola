@@ -37,11 +37,13 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 12 | 11.4%* | -16.1 | Re-embed with sentence-transformers HARMFUL (-16pp), reverted. Tooling kept. | reverted | [012.md](iterations/012.md) |
 | 13 | 22.5%* | n/a | ts_rank_cd provides real FTS differentiation but amplifies embedding mismatch 34x (27pp variance). Reverted. Analysis scripts kept. | reverted | [013.md](iterations/013.md) |
 | 14 | 9.7% | -8.1* | Cluster pathway floods pool with false positives, FTS saturation can't differentiate. Ablation: 17.8% without clusters. | reverted | [014.md](iterations/014.md) |
+| 15 | 14.9% | -3.0* | vLLM 0.19.1 Docker embedding server: cross-version mismatch WORSE than sentence-transformers (-3pp). Reverted. | reverted | [015.md](iterations/015.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
 Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter 8+.
 Iter 12 re-embedded with sentence-transformers (11.4% R@5, HARMFUL), reverted to vLLM embeddings.
+Iter 15 vLLM 0.19.1 tested against stored vLLM embeddings: 14.9% R@5 (worse than ST 17.8%).
 
 ## Key Constraints Discovered
 
@@ -96,21 +98,26 @@ Iter 12 re-embedded with sentence-transformers (11.4% R@5, HARMFUL), reverted to
 - Pool expansion is universally harmful when FTS is saturated: any new pathway needs non-cosine differentiator (Iter 14)
 - K-means in dev profile takes 19 min for 19K vectors; needs release profile or external service (Iter 14)
 - Baseline drift: current pod measures 17.8% R@5 vs historical 27.5%; embedding mismatch worsening (Iter 14)
+- Different vLLM versions produce incompatible embeddings: 0.19.1.dev6 is 3pp WORSE than sentence-transformers (Iter 15)
+- Original vLLM embedding engine is irrecoverable: no replacement can reproduce the original embeddings (Iter 15)
+- Re-ingest is the ONLY path to stable matched embeddings; neither ST (17.8%) nor vLLM 0.19.1 (14.9%) can approach matched baseline (27.5%) (Iter 15)
 
 ## What To Try Next
 
-1. **Fix FTS saturation** (HIGHEST PRIORITY): FTS adds constant 0.305 to all candidates,
-   making scoring 95% cosine-based. Any pool expansion is harmful until FTS provides
-   real differentiation. Approaches: reduce concept field weight, use phraseto_tsquery,
-   weight FTS by field.
+1. **Re-ingest with sentence-transformers** (HIGHEST PRIORITY): The original vLLM embeddings
+   are irrecoverable (Iter 15 confirmed). Re-ingest all sessions using sentence-transformers
+   to create matched stored+query embeddings. This is the ONLY path to eliminating the
+   embedding mismatch that blocks all retrieval-time improvements.
+   NOTE: Iter 12 measured ST-embedded at 11.4% R@5, but that was ST-stored + ST-queried
+   DURING the mismatch era. A clean re-ingest + new pinned DB dump is needed.
 
-2. **Fix embedding server mismatch** (CRITICAL): 10pp baseline drift from cross-engine
-   mismatch. Either restore vLLM or re-embed with sentence-transformers.
-   NOTE: If no vLLM, use sentence-transformers via embed_server.py instead:
-   `cd ~/longmemeval-ghola && .venv/bin/python ~/pg_ghola/analysis/embed_server.py`
+2. **Multi-granularity encoding** (high impact, combine with re-ingest): Per-turn or
+   per-fact sub-mnemes during gating. Can be implemented simultaneously with re-ingest
+   to compound improvements. Addresses the root cause of session-level dilution.
 
-3. **Multi-granularity encoding** (high impact, variance-resistant): Per-turn or per-fact
-   sub-mnemes during gating. Helps single-session-user, multi-session, temporal.
+3. **Fix FTS saturation** (after re-ingest): FTS adds constant 0.305 to all candidates.
+   Only addressable AFTER embedding mismatch is resolved (Iter 13 showed FTS changes
+   amplify mismatch). Approaches: reduce concept field weight, phraseto_tsquery, field weighting.
 
 ## Benchmark Protocol
 
