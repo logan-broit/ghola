@@ -17,10 +17,16 @@
 set -euo pipefail
 
 echo "Resetting retrieval-time state..."
+# Save supersedes associations (gating-time, must preserve), TRUNCATE all (fast),
+# re-insert supersedes. TRUNCATE is O(1) vs DELETE O(n) for 20K+ hebbian associations.
 kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
 BEGIN;
 TRUNCATE ghola.co_activation_queue;
-DELETE FROM ghola.associations WHERE association_type = 'hebbian';
+CREATE TEMP TABLE _supersedes_backup AS
+    SELECT * FROM ghola.associations WHERE association_type = 'supersedes';
+TRUNCATE ghola.associations;
+INSERT INTO ghola.associations SELECT * FROM _supersedes_backup;
+DROP TABLE _supersedes_backup;
 UPDATE ghola.mnemes SET access_count = 1, last_access = created_at;
 COMMIT;"
 

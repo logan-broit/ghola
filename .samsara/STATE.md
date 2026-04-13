@@ -34,10 +34,12 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 9 | 27.5% | +3.4 | Ablation: relaxed lexical pathway harmful, removed (new baseline) | yes | [009.md](iterations/009.md) |
 | 10 | 19.2% | -0.3* | Temporal tokens in concept field dilute lexical pool (all cats regressed) | reverted | [010.md](iterations/010.md) |
 | 11 | 16.2%* | n/a | Query decomposition + temporal analysis; bimodal variance (6-17pp) makes comparison impossible | reverted | [011.md](iterations/011.md) |
+| 12 | TBD | n/a | Fix embedding mismatch: re-embed with sentence-transformers, optimize reset | in progress | [012.md](iterations/012.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
 Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter 8+.
+Iter 12 re-embedded all mnemes with sentence-transformers. New baseline NOT comparable to Iter 9.
 
 ## Key Constraints Discovered
 
@@ -75,12 +77,27 @@ Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter
 - DISTINCT ON dedup is non-deterministic; add ORDER BY id, fts_rank DESC for correctness (Iter 11)
 - Bimodal benchmark variance: 1st run after pod restart LOW, 2nd HIGH (6-17pp). HNSW warmup. (Iter 11)
 - Sentence-transformers embedding server has higher variance (6-17pp) than TEI (2.2pp) (Iter 11)
+- vLLM vs sentence-transformers embedding mismatch causes 7.4pp variance; same model, different engines = different embeddings (Iter 12)
+- HNSW cold-start is NOT a significant variance source; no bimodal pattern in 4-run test (Iter 12)
+- Embedding server at 192.168.2.6:8082 is ephemeral; use analysis/embed_server.py to start (Iter 12)
+- DELETE of 20K+ associations is slow; use TRUNCATE + re-insert supersedes pattern (Iter 12)
+- Re-embed with consistent engine eliminates cross-engine mismatch (Iter 12, validation pending)
 
 ## What To Try Next
 
-1. **Fix benchmark variance** (critical, prerequisite): Bimodal 6-17pp variance makes code
-   changes unmeasurable. Must discard first run after pod restart (warmup) or pre-warm
-   HNSW index. Restoring TEI/vLLM embedding server would also reduce variance.
+1. **VALIDATE ITER 12 re-embed** (critical, immediate): Re-embed of all 18917 mnemes
+   with sentence-transformers is IN PROGRESS or RECENTLY COMPLETED. Must:
+   a. Verify re-embed completed: check `/tmp/reembed.log` or count updated mnemes
+   b. Truncate worker queues (precaution after 18K UPDATEs)
+   c. Run 3 benchmark runs with `./analysis/benchmark_run.sh 3` (includes warmup)
+   d. Analyze variance with `variance_report.py`
+   e. If variance <3pp, establish as new baseline
+   f. Update iter 012.md with post-reembed results
+   g. Update blog dashboard with new baseline data
+   h. Create new pinned DB dump (old dump has vLLM embeddings, now incompatible)
+   i. Commit with final results
+   NOTE: Embedding server must be running at 192.168.2.6:8082. Start with:
+   `cd ~/longmemeval-ghola && .venv/bin/python ~/pg_ghola/analysis/embed_server.py`
 
 2. **Populate content_dates via migration** (moderate effort): SQL migration using fixed
    `extract_dates()` to populate content_dates for all 18917 mnemes. Enables future
@@ -88,10 +105,6 @@ Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter
 
 3. **Multi-granularity encoding** (high impact, high effort): Per-turn or per-fact
    sub-mnemes during gating. Helps single-session-user, multi-session, temporal.
-
-Note: Temporal retrieval pathway (content_dates CTE) and query decomposition were both
-investigated in iter 11. Temporal pathway has 0 opportunity (no explicit dates in queries).
-Query decomposition was neutral within noise. Neither is recommended as a next step.
 
 ## Benchmark Protocol
 
@@ -120,6 +133,10 @@ To restore from pinned database: `./analysis/benchmark_restore.sh`
 - [x] FIX BENCHMARK: Pin embeddings via database dump (Iter 7)
 - [x] FIX BENCHMARK: Reset co-activation state between retrieve-only runs (Iter 7)
 - [x] Ablation: relaxed lexical pathway harmful, permanently removed (Iter 9)
+- [x] FIX BENCHMARK: Re-embed with sentence-transformers for consistency (Iter 12, validation pending)
+- [x] Optimize benchmark reset (TRUNCATE + re-insert supersedes) (Iter 12)
+- [x] Add warmup run to benchmark protocol (Iter 12)
+- [ ] Create new pinned DB dump with sentence-transformers embeddings
 - [ ] Multi-granularity encoding (per-turn sub-mnemes)
 - [ ] Temporal retrieval pathway (content_dates CTE)
 - [ ] Session-context boosting (leverage session associations)

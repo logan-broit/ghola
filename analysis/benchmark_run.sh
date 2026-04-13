@@ -16,6 +16,31 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== Benchmark: $NUM_RUNS run(s), retrieve-only, workspace=$WORKSPACE ==="
 
+# --- Warmup run: load HNSW index pages into shared_buffers ---
+# After pod restart, HNSW index pages are not in shared_buffers.
+# This warmup run ensures measurement runs have consistent cache state.
+# Also pre-warms the embedding server's inference path.
+echo ""
+echo "--- Warmup run (results discarded) ---"
+echo "Resetting retrieval-time state..."
+kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -q -c "
+BEGIN;
+TRUNCATE ghola.co_activation_queue;
+CREATE TEMP TABLE _supersedes_backup AS
+        SELECT * FROM ghola.associations WHERE association_type = 'supersedes';
+    TRUNCATE ghola.associations;
+    INSERT INTO ghola.associations SELECT * FROM _supersedes_backup;
+    DROP TABLE _supersedes_backup;
+UPDATE ghola.mnemes SET access_count = 1, last_access = created_at;
+COMMIT;" 2>/dev/null
+
+echo "Running warmup retrieve..."
+cd "$HOME/longmemeval-ghola"
+WARMUP_FILE=$(.venv/bin/python run.py retrieve \
+    --backend ghola_mcp --dataset s \
+    --workspace-id "$WORKSPACE" 2>&1 | grep -oP 'results/\S+\.jsonl')
+echo "Warmup complete (discarding $WARMUP_FILE)."
+
 for i in $(seq 1 "$NUM_RUNS"); do
     echo ""
     echo "--- Run $i/$NUM_RUNS ---"
@@ -25,7 +50,11 @@ for i in $(seq 1 "$NUM_RUNS"); do
     kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -q -c "
     BEGIN;
     TRUNCATE ghola.co_activation_queue;
-    DELETE FROM ghola.associations WHERE association_type = 'hebbian';
+    CREATE TEMP TABLE _supersedes_backup AS
+        SELECT * FROM ghola.associations WHERE association_type = 'supersedes';
+    TRUNCATE ghola.associations;
+    INSERT INTO ghola.associations SELECT * FROM _supersedes_backup;
+    DROP TABLE _supersedes_backup;
     UPDATE ghola.mnemes SET access_count = 1, last_access = created_at;
     COMMIT;" 2>/dev/null
 
