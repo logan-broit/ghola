@@ -83,6 +83,14 @@ If not, write one, commit it, and future iterations reuse it.
 - **Big bets are allowed.** If analysis clearly points to an encoding-time or schema change,
   do it. Don't keep trying small retrieval-time tweaks to avoid the bigger work.
 
+## DATA SAFETY (non-negotiable)
+
+**NEVER use TRUNCATE on ghola.mnemes, ghola.associations, or ghola.cluster_centroids.**
+The database contains real user memories alongside benchmark data. Benchmark data is
+tagged with `bench_00000000`. Always use `DELETE ... WHERE tags @> ARRAY['bench_00000000']`
+to clean benchmark data. Use `./analysis/benchmark_reset.sh` and
+`./analysis/benchmark_restore.sh` which are already scoped to bench-tagged data.
+
 ## Rules
 
 - If the benchmark regresses, revert and document why in your iteration file.

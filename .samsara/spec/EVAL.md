@@ -7,16 +7,16 @@ The benchmark uses LongMemEval with the Chapterhouse MCP backend.
 ### Full run (ingest + query)
 
 ```bash
-# 1. Clean the database
+# 1. Clean BENCHMARK data only (preserves real user memories)
 kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
 BEGIN;
 TRUNCATE ghola.co_activation_queue;
-TRUNCATE ghola.contradiction_queue;
+DELETE FROM ghola.associations WHERE src_id IN (SELECT id FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[]);
+DELETE FROM ghola.contradiction_candidates WHERE mneme_a IN (SELECT id FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[]);
+DELETE FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[];
+DELETE FROM ghola.cluster_centroids WHERE workspace_id = '00000000-0000-0000-0000-000000000001';
 TRUNCATE ghola.gating_queue;
-TRUNCATE ghola.contradiction_candidates;
-TRUNCATE ghola.cluster_centroids;
-TRUNCATE ghola.associations CASCADE;
-TRUNCATE ghola.mnemes CASCADE;
+TRUNCATE ghola.contradiction_queue;
 COMMIT;"
 
 # 2. Run ingest + query
@@ -101,16 +101,17 @@ Observed 11.6pp R@5 swing between consecutive runs with NO code change (Iter 1).
 For fair before/after comparison, ALWAYS start from a clean state:
 
 ```bash
-# 1. Clean the database (REQUIRED before every benchmark)
+# 1. Clean BENCHMARK data only (REQUIRED before every benchmark)
+# NEVER use TRUNCATE on ghola.mnemes -- it destroys real user memories!
 kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
 BEGIN;
 TRUNCATE ghola.co_activation_queue;
-TRUNCATE ghola.contradiction_queue;
+DELETE FROM ghola.associations WHERE src_id IN (SELECT id FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[]);
+DELETE FROM ghola.contradiction_candidates WHERE mneme_a IN (SELECT id FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[]);
+DELETE FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[];
+DELETE FROM ghola.cluster_centroids WHERE workspace_id = '00000000-0000-0000-0000-000000000001';
 TRUNCATE ghola.gating_queue;
-TRUNCATE ghola.contradiction_candidates;
-TRUNCATE ghola.cluster_centroids;
-TRUNCATE ghola.associations CASCADE;
-TRUNCATE ghola.mnemes CASCADE;
+TRUNCATE ghola.contradiction_queue;
 COMMIT;"
 
 # 2. Run full pipeline (ingest + gating + query)
@@ -136,12 +137,14 @@ access_count -- without this, successive runs degrade (Iter 7 finding).
 ```bash
 # 1. Full retrieval-time state reset (REQUIRED before every benchmark)
 ./analysis/benchmark_reset.sh
-# Or manually:
+# Or manually (benchmark data only):
 kubectl exec -n ch-system memory-db-1 -- psql -U postgres -d memories -c "
 BEGIN;
 TRUNCATE ghola.co_activation_queue;
-DELETE FROM ghola.associations WHERE association_type = 'hebbian';
-UPDATE ghola.mnemes SET access_count = 1, last_access = created_at;
+DELETE FROM ghola.associations WHERE association_type = 'hebbian'
+  AND src_id IN (SELECT id FROM ghola.mnemes WHERE tags @> ARRAY['bench_00000000']::text[]);
+UPDATE ghola.mnemes SET access_count = 1, last_access = created_at
+  WHERE tags @> ARRAY['bench_00000000']::text[];
 COMMIT;"
 
 # 2. Deploy new code (build, transfer, restart, recreate functions)
