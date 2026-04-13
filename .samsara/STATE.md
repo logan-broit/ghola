@@ -34,12 +34,12 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 9 | 27.5% | +3.4 | Ablation: relaxed lexical pathway harmful, removed (new baseline) | yes | [009.md](iterations/009.md) |
 | 10 | 19.2% | -0.3* | Temporal tokens in concept field dilute lexical pool (all cats regressed) | reverted | [010.md](iterations/010.md) |
 | 11 | 16.2%* | n/a | Query decomposition + temporal analysis; bimodal variance (6-17pp) makes comparison impossible | reverted | [011.md](iterations/011.md) |
-| 12 | TBD | n/a | Fix embedding mismatch: re-embed with sentence-transformers, optimize reset | in progress | [012.md](iterations/012.md) |
+| 12 | 11.4%* | -16.1 | Re-embed with sentence-transformers HARMFUL (-16pp), reverted. Tooling kept. | reverted | [012.md](iterations/012.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
 Iter 8 re-ingested (new embeddings, 24.1%). Iters 0-7 R@5 NOT comparable to Iter 8+.
-Iter 12 re-embedded all mnemes with sentence-transformers. New baseline NOT comparable to Iter 9.
+Iter 12 re-embedded with sentence-transformers (11.4% R@5, HARMFUL), reverted to vLLM embeddings.
 
 ## Key Constraints Discovered
 
@@ -81,22 +81,16 @@ Iter 12 re-embedded all mnemes with sentence-transformers. New baseline NOT comp
 - HNSW cold-start is NOT a significant variance source; no bimodal pattern in 4-run test (Iter 12)
 - Embedding server at 192.168.2.6:8082 is ephemeral; use analysis/embed_server.py to start (Iter 12)
 - DELETE of 20K+ associations is slow; use TRUNCATE + re-insert supersedes pattern (Iter 12)
-- Re-embed with consistent engine eliminates cross-engine mismatch (Iter 12, validation pending)
+- Re-embed with sentence-transformers is HARMFUL: 16pp worse than vLLM for same model. Reverted. (Iter 12)
+- vLLM produces 2.5x better embeddings than sentence-transformers for Qwen3-Embedding-0.6B (Iter 12)
 
 ## What To Try Next
 
-1. **VALIDATE ITER 12 re-embed** (critical, immediate): Re-embed of all 18917 mnemes
-   with sentence-transformers is IN PROGRESS or RECENTLY COMPLETED. Must:
-   a. Verify re-embed completed: check `/tmp/reembed.log` or count updated mnemes
-   b. Truncate worker queues (precaution after 18K UPDATEs)
-   c. Run 3 benchmark runs with `./analysis/benchmark_run.sh 3` (includes warmup)
-   d. Analyze variance with `variance_report.py`
-   e. If variance <3pp, establish as new baseline
-   f. Update iter 012.md with post-reembed results
-   g. Update blog dashboard with new baseline data
-   h. Create new pinned DB dump (old dump has vLLM embeddings, now incompatible)
-   i. Commit with final results
-   NOTE: Embedding server must be running at 192.168.2.6:8082. Start with:
+1. **Restore vLLM embedding server** (critical for variance): The cross-engine mismatch
+   (vLLM stored + sentence-transformers query) causes 4-7pp variance. Either:
+   a. Start a vLLM server with Qwen3-Embedding-0.6B at 192.168.2.6:8082 (eliminates mismatch)
+   b. Accept the ~5pp variance and require >8pp improvement for significance
+   NOTE: If no vLLM, use sentence-transformers via embed_server.py instead:
    `cd ~/longmemeval-ghola && .venv/bin/python ~/pg_ghola/analysis/embed_server.py`
 
 2. **Populate content_dates via migration** (moderate effort): SQL migration using fixed
@@ -133,7 +127,7 @@ To restore from pinned database: `./analysis/benchmark_restore.sh`
 - [x] FIX BENCHMARK: Pin embeddings via database dump (Iter 7)
 - [x] FIX BENCHMARK: Reset co-activation state between retrieve-only runs (Iter 7)
 - [x] Ablation: relaxed lexical pathway harmful, permanently removed (Iter 9)
-- [x] FIX BENCHMARK: Re-embed with sentence-transformers for consistency (Iter 12, validation pending)
+- [x] FIX BENCHMARK: Re-embed with sentence-transformers HARMFUL, reverted (Iter 12)
 - [x] Optimize benchmark reset (TRUNCATE + re-insert supersedes) (Iter 12)
 - [x] Add warmup run to benchmark protocol (Iter 12)
 - [ ] Create new pinned DB dump with sentence-transformers embeddings
