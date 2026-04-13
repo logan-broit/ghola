@@ -23,6 +23,8 @@ Eval-driven development of neuroscience-grounded memory retrieval primitives.
 | analysis/benchmark_reset.sh | Full retrieval-time state reset (access_count + associations + queue) |
 | analysis/benchmark_run.sh | Orchestrate N retrieve-only runs with reset between each |
 | analysis/benchmark_restore.sh | Restore pinned database from binary COPY dumps in benchmark-data/ |
+| analysis/gold_rank_analysis.py | Where do gold mnemes rank in semantic pathway? Pool vs scoring bottleneck |
+| analysis/fts_diagnostic.py | FTS match patterns for failing queries -- gold vs competitor FTS rates |
 
 Write new scripts in `analysis/` for any investigation. Keep raw data out of context.
 

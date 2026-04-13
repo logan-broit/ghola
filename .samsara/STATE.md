@@ -35,6 +35,7 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 10 | 19.2% | -0.3* | Temporal tokens in concept field dilute lexical pool (all cats regressed) | reverted | [010.md](iterations/010.md) |
 | 11 | 16.2%* | n/a | Query decomposition + temporal analysis; bimodal variance (6-17pp) makes comparison impossible | reverted | [011.md](iterations/011.md) |
 | 12 | 11.4%* | -16.1 | Re-embed with sentence-transformers HARMFUL (-16pp), reverted. Tooling kept. | reverted | [012.md](iterations/012.md) |
+| 13 | 22.5%* | n/a | ts_rank_cd provides real FTS differentiation but amplifies embedding mismatch 34x (27pp variance). Reverted. Analysis scripts kept. | reverted | [013.md](iterations/013.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
@@ -83,21 +84,23 @@ Iter 12 re-embedded with sentence-transformers (11.4% R@5, HARMFUL), reverted to
 - DELETE of 20K+ associations is slow; use TRUNCATE + re-insert supersedes pattern (Iter 12)
 - Re-embed with sentence-transformers is HARMFUL: 16pp worse than vLLM for same model. Reverted. (Iter 12)
 - vLLM produces 2.5x better embeddings than sentence-transformers for Qwen3-Embedding-0.6B (Iter 12)
+- ts_rank saturated at 1.0 after concept enrichment; FTS adds constant 0.305 to all candidates (Iter 13)
+- ts_rank_cd provides real differentiation (0-0.46 range) but amplifies embedding mismatch 34x (Iter 13)
+- Fixing embedding server is PREREQUISITE for FTS improvements; saturation acts as variance damper (Iter 13)
+- 40% of failing gold mnemes are in semantic top-30; scoring issue, not pool size issue (Iter 13)
+- 70% of failing gold mnemes lack FTS match; plainto_tsquery AND too strict for paraphrased content (Iter 13)
+- cluster_id is 0/18917; cluster pathway is completely dead (no centroids exist) (Iter 13)
 
 ## What To Try Next
 
-1. **Restore vLLM embedding server** (critical for variance): The cross-engine mismatch
-   (vLLM stored + sentence-transformers query) causes 4-7pp variance. Either:
-   a. Start a vLLM server with Qwen3-Embedding-0.6B at 192.168.2.6:8082 (eliminates mismatch)
-   b. Accept the ~5pp variance and require >8pp improvement for significance
+1. **Restore vLLM embedding server** (CRITICAL blocker): The cross-engine mismatch prevents
+   ANY FTS improvement from being measurable. ts_rank_cd showed +10pp potential on favorable
+   runs but 27pp variance makes it unusable. With matched embeddings, variance drops to ~2pp.
+   Either start vLLM or accept mismatch and focus on encoding-time changes only.
    NOTE: If no vLLM, use sentence-transformers via embed_server.py instead:
    `cd ~/longmemeval-ghola && .venv/bin/python ~/pg_ghola/analysis/embed_server.py`
 
-2. **Populate content_dates via migration** (moderate effort): SQL migration using fixed
-   `extract_dates()` to populate content_dates for all 18917 mnemes. Enables future
-   temporal pathways. extract_dates now handles YYYY/MM/DD format.
-
-3. **Multi-granularity encoding** (high impact, high effort): Per-turn or per-fact
+2. **Multi-granularity encoding** (high impact, variance-resistant): Per-turn or per-fact
    sub-mnemes during gating. Helps single-session-user, multi-session, temporal.
 
 ## Benchmark Protocol
