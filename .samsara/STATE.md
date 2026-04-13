@@ -36,6 +36,7 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 11 | 16.2%* | n/a | Query decomposition + temporal analysis; bimodal variance (6-17pp) makes comparison impossible | reverted | [011.md](iterations/011.md) |
 | 12 | 11.4%* | -16.1 | Re-embed with sentence-transformers HARMFUL (-16pp), reverted. Tooling kept. | reverted | [012.md](iterations/012.md) |
 | 13 | 22.5%* | n/a | ts_rank_cd provides real FTS differentiation but amplifies embedding mismatch 34x (27pp variance). Reverted. Analysis scripts kept. | reverted | [013.md](iterations/013.md) |
+| 14 | 9.7% | -8.1* | Cluster pathway floods pool with false positives, FTS saturation can't differentiate. Ablation: 17.8% without clusters. | reverted | [014.md](iterations/014.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
@@ -91,16 +92,24 @@ Iter 12 re-embedded with sentence-transformers (11.4% R@5, HARMFUL), reverted to
 - 70% of failing gold mnemes lack FTS match; plainto_tsquery AND too strict for paraphrased content (Iter 13)
 - cluster_id is 0/18917; cluster pathway is completely dead (no centroids exist) (Iter 13)
 
+- Cluster pathway floods pool with false positives: nearby-cluster candidates have competitive cosine but aren't gold (Iter 14)
+- Pool expansion is universally harmful when FTS is saturated: any new pathway needs non-cosine differentiator (Iter 14)
+- K-means in dev profile takes 19 min for 19K vectors; needs release profile or external service (Iter 14)
+- Baseline drift: current pod measures 17.8% R@5 vs historical 27.5%; embedding mismatch worsening (Iter 14)
+
 ## What To Try Next
 
-1. **Restore vLLM embedding server** (CRITICAL blocker): The cross-engine mismatch prevents
-   ANY FTS improvement from being measurable. ts_rank_cd showed +10pp potential on favorable
-   runs but 27pp variance makes it unusable. With matched embeddings, variance drops to ~2pp.
-   Either start vLLM or accept mismatch and focus on encoding-time changes only.
+1. **Fix FTS saturation** (HIGHEST PRIORITY): FTS adds constant 0.305 to all candidates,
+   making scoring 95% cosine-based. Any pool expansion is harmful until FTS provides
+   real differentiation. Approaches: reduce concept field weight, use phraseto_tsquery,
+   weight FTS by field.
+
+2. **Fix embedding server mismatch** (CRITICAL): 10pp baseline drift from cross-engine
+   mismatch. Either restore vLLM or re-embed with sentence-transformers.
    NOTE: If no vLLM, use sentence-transformers via embed_server.py instead:
    `cd ~/longmemeval-ghola && .venv/bin/python ~/pg_ghola/analysis/embed_server.py`
 
-2. **Multi-granularity encoding** (high impact, variance-resistant): Per-turn or per-fact
+3. **Multi-granularity encoding** (high impact, variance-resistant): Per-turn or per-fact
    sub-mnemes during gating. Helps single-session-user, multi-session, temporal.
 
 ## Benchmark Protocol
