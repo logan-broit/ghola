@@ -9,32 +9,44 @@ No conversation history. State persists only in files on disk.
    current baselines, what was tried (one line per iteration), what to try next.
    For deep context on a past iteration, read `.samsara/iterations/NNN.md`.
 
-2. **Analyze (Think in Code)**: Do NOT read raw benchmark data or SQL output into context.
+2. **Decide scope**: Before diving in, decide what KIND of iteration this is:
+   - **Analysis-only**: No code change. Investigate a failure mode, write diagnostic
+     scripts, update docs with findings. Skip benchmark. (~15 min)
+   - **Cheap experiment**: Small SQL/Rust change testable with retrieve-only benchmark.
+     Can bundle 2-3 related micro-hypotheses if they're independent. (~30 min)
+   - **Encoding-time change**: Modifies gating worker, schema, or data pipeline.
+     Requires re-ingest. One hypothesis only. (~90 min)
+   Choose the smallest scope that makes progress. Don't run a 90-minute benchmark
+   to test something you could validate with a SQL query on 5 examples.
+
+3. **Analyze (Think in Code)**: Do NOT read raw benchmark data or SQL output into context.
    Write a script in `analysis/` that computes what you need and prints only the summary.
    Run the script, read the output. One script replaces ten tool calls and saves 100x context.
    Reuse existing scripts in `analysis/` when possible.
 
-3. **Implement**: Write a targeted fix. Follow TDD -- write a failing test first, then
-   implement. Keep changes small and focused. One hypothesis per iteration.
+4. **Implement**: Write the fix. Follow TDD where practical -- write a failing test first,
+   then implement. For cheap experiments, you can test multiple related changes and revert
+   individually.
 
-4. **Evaluate**: Run the benchmark (see `.samsara/spec/EVAL.md`). Use the clean benchmark
-   protocol (truncate + re-ingest). Record the results table in your iteration file.
+5. **Evaluate**: Match evaluation to scope:
+   - Analysis-only: no benchmark needed
+   - Cheap experiment: retrieve-only (5 min) is sufficient
+   - Encoding-time change: full clean protocol per spec/EVAL.md
 
-5. **Deploy**: Build, transfer, and deploy (see `.samsara/spec/DEPLOY.md`).
-   Recreate recall functions. Verify workers are running.
+6. **Deploy** (if code changed): Build, transfer, deploy per `.samsara/spec/DEPLOY.md`.
 
-6. **Document**: Write `.samsara/iterations/NNN.md` with full analysis, hypothesis, results,
+7. **Document**: Write `.samsara/iterations/NNN.md` with analysis, hypothesis, results,
    and learnings. Update `.samsara/STATE.md` with ONE LINE in the iteration table and update
    "what to try next". Update the design doc with any new CONSTRAINT entries.
 
-7. **Update blog**: Update the MemoryEval dashboard component at
+8. **Update blog**: Update the MemoryEval dashboard component at
    `~/.openclaw/workspace/projects/blog/preview/src/MemoryEval.tsx`
    with the latest benchmark results, iteration summary, and any new insights.
    This is the public-facing record of the project's evolution.
 
-8. **Commit**: Commit all changes (code + docs + blog) with a descriptive message.
+9. **Commit**: Commit all changes (code + docs + blog) with a descriptive message.
 
-9. **Stop**: Exit cleanly. The loop will restart you with fresh context.
+10. **Stop**: Exit cleanly. The loop will restart you with fresh context.
 
 ## Think in Code (mandatory)
 
@@ -56,9 +68,23 @@ python3 analysis/diagnose_category.py --category single-session-user
 Reusable scripts go in `analysis/`. If a script exists for your task, use it.
 If not, write one, commit it, and future iterations reuse it.
 
+## Momentum rules
+
+- **Don't spin wheels.** If the same class of change has failed 2+ times in the iteration
+  history, escalate to a different approach. Read the Key Constraints in STATE.md --
+  they exist to prevent repeating known dead ends.
+- **Prefer building over tuning.** Building new capabilities (new pathway, schema change,
+  encoding pipeline) compounds. Tuning existing parameters has diminishing returns.
+- **Skip the benchmark when analysis is the goal.** If you're investigating WHY something
+  fails, write a diagnostic script and study the output. Don't burn 90 minutes on a
+  full re-ingest just to confirm what a SQL query on 5 examples would tell you.
+- **Methodology work has a budget.** If the last 2+ iterations were benchmark infra fixes,
+  the next iteration MUST be a product change. Ship something.
+- **Big bets are allowed.** If analysis clearly points to an encoding-time or schema change,
+  do it. Don't keep trying small retrieval-time tweaks to avoid the bigger work.
+
 ## Rules
 
-- One hypothesis per iteration. Do not try multiple things at once.
 - If the benchmark regresses, revert and document why in your iteration file.
 - Ground every change in neuroscience. Reference the analog in spec/PROJECT.md.
 - The scoring formula is intentionally frozen. Change candidate generation, not scoring.
