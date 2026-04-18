@@ -26,9 +26,13 @@ from sentence_transformers import SentenceTransformer
 
 Turn = Dict[str, Any]  # {role, content, char_start, char_end}
 
-# A strategy function receives (session_text, turns, model) and returns
-# a tensor of shape (n_turns, dim) with each row L2-normalized.
-EncodeFn = Callable[[str, List[Turn], SentenceTransformer], torch.Tensor]
+# A strategy function receives (session_text, turns, model, context) and
+# returns a tensor of shape (n_turns, dim) with each row L2-normalized.
+# `context` is an optional dict carrying metadata from the eval case (e.g.
+# {"category": ..., "case_id": ...}). Most strategies ignore it; the oracle
+# strategy uses it to cheat with ground-truth labels for an upper-bound
+# measurement.
+EncodeFn = Callable[..., torch.Tensor]
 
 
 @dataclass
@@ -141,6 +145,7 @@ def encode_isolated(
     session_text: str,
     turns: List[Turn],
     model: SentenceTransformer,
+    context: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Encode each turn's content alone via the model's native sentence
     encoding. No session context. This is the baseline to beat."""
@@ -161,6 +166,7 @@ def encode_late_chunk_last_token(
     session_text: str,
     turns: List[Turn],
     model: SentenceTransformer,
+    context: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Full-session forward pass. For each turn, extract the hidden state at
     the LAST real token whose char-offset overlaps the turn's span, then
@@ -205,6 +211,7 @@ def encode_late_chunk_mean_pool(
     session_text: str,
     turns: List[Turn],
     model: SentenceTransformer,
+    context: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Same single-pass encoding as late-chunk-last-token, but mean-pool the
     turn's tokens instead of taking the last one. This is the WRONG pooling
@@ -250,6 +257,7 @@ def encode_sliding_window_last_token(
     turns: List[Turn],
     model: SentenceTransformer,
     stride_frac: float = 0.5,
+    context: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Sliding window variant for sessions exceeding model.max_seq_length.
     Windows of model.max_seq_length tokens with stride_frac overlap. For
@@ -382,6 +390,53 @@ def encode_sliding_window_last_token(
     return torch.stack(vecs)
 
 
+# --- Strategy: oracle-by-category (upper bound, cheats with label) -------
+
+# Categories where late-chunking hurts (context is noise on self-contained
+# turns). All other categories empirically win with late-chunk-mean-pool on
+# the 151-case eval (commit a39fac5).
+ISOLATED_WINS_CATEGORIES = frozenset({"self-contained"})
+
+
+def encode_oracle_by_category(
+    session_text: str,
+    turns: List[Turn],
+    model: SentenceTransformer,
+    context: Optional[Dict[str, Any]] = None,
+) -> torch.Tensor:
+    """Oracle: picks isolated for self-contained cases, late-chunk-mean-pool
+    for everything else, based on the ground-truth category label.
+
+    This is CHEATING -- production systems don't have the category at ingest.
+    The point is to measure the upper bound of selective encoding gains. If
+    the oracle beats pure mean-pool by a meaningful margin, selective encoding
+    is worth building (next step: adaptive-by-self-cosine which classifies
+    without the label). If the oracle ties with mean-pool, selective encoding
+    isn't worth the complexity and we ship pure mean-pool.
+
+    Caveats:
+      - Assumes the context dict contains 'category'; raises if missing
+      - Long-session handling delegates to mean-pool, which currently raises
+        NotImplementedError on sliding window. Falls back to isolated in that
+        case so oracle runs don't fail on outlier cases.
+    """
+    cat = (context or {}).get("category")
+    if cat is None:
+        raise ValueError(
+            "oracle-by-category requires context['category']; ensure eval.py "
+            "passes case metadata to strategy.encode_fn"
+        )
+
+    if cat in ISOLATED_WINS_CATEGORIES:
+        return encode_isolated(session_text, turns, model, context)
+
+    try:
+        return encode_late_chunk_mean_pool(session_text, turns, model, context)
+    except NotImplementedError:
+        # Very long session that can't be mean-pooled; fall back gracefully.
+        return encode_isolated(session_text, turns, model, context)
+
+
 # --- Register defaults ---------------------------------------------------
 
 register_strategy(
@@ -429,5 +484,16 @@ register_strategy(
         "window_mode": "sliding",
         "stride_frac": 0.5,
         "purpose": "long-session variant (auto-dispatched by late-chunk-last-token)",
+    },
+)
+
+register_strategy(
+    name="oracle-by-category",
+    encode_fn=encode_oracle_by_category,
+    model_factory=_default_model_factory,
+    metadata={
+        "purpose": "upper bound on selective encoding (cheats with ground-truth label)",
+        "rule": "isolated for self-contained, late-chunk-mean-pool otherwise",
+        "requires_context": True,
     },
 )

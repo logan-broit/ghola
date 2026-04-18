@@ -177,8 +177,13 @@ def run_encoding_eval(
 
     results: List[EvalResult] = []
     for case in cases:
-        # Encode turns via the strategy
-        turn_embs = strategy.encode_fn(case.session_text, case.turns, model)
+        # Encode turns via the strategy. Pass case metadata in `context` so
+        # strategies that want it (e.g. oracle-by-category) can use it;
+        # strategies that don't need it just ignore the kwarg.
+        context = {"category": case.category, "case_id": case.id}
+        turn_embs = strategy.encode_fn(
+            case.session_text, case.turns, model, context=context
+        )
         if turn_embs.shape[0] != len(case.turns):
             raise RuntimeError(
                 f"strategy '{strategy.name}' returned {turn_embs.shape[0]} "
