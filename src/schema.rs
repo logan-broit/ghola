@@ -51,6 +51,46 @@ CREATE TABLE mnemes (
     name = "create_mnemes_table",
 );
 
+// ---------------------------------------------------------------------------
+// sub_mnemes: per-turn sub-records for multi-granularity encoding
+//
+// Each sub_mneme represents one turn in the parent mneme's session.
+// Sub_mnemes own content matching (embedding + FTS on raw turn text);
+// parent mnemes own cognitive state (confidence, ACT-R, Hebbian, etc.).
+//
+// Per design doc 2026-04-16-multi-granularity-encoding-design.md:
+//   - embedding is late-chunked (encoded in full-session context via
+//     last-token pooling for decoder-style models like Qwen3-Embedding)
+//   - search_vector is generated from raw turn content only (NO concept
+//     enrichment) so ts_rank does not saturate across candidates
+//   - ON DELETE CASCADE: dropping a parent mneme removes its sub_mnemes
+//   - unique (mneme_id, position) prevents duplicate turn indices
+// ---------------------------------------------------------------------------
+extension_sql!(
+    r#"
+CREATE TABLE sub_mnemes (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    mneme_id        uuid NOT NULL REFERENCES mnemes(id) ON DELETE CASCADE,
+    position        smallint NOT NULL,
+    role            text NOT NULL
+        CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+    content         text NOT NULL,
+    embedding       vector(1024) NOT NULL,
+    search_vector   tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', content)
+    ) STORED,
+    token_start     integer NOT NULL,
+    token_end       integer NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (mneme_id, position),
+    CHECK (token_end >= token_start),
+    CHECK (position >= 0)
+);
+"#,
+    name = "create_sub_mnemes_table",
+    requires = ["create_mnemes_table"],
+);
+
 extension_sql!(
     r#"
 -- associations: typed links between mnemes
@@ -304,9 +344,23 @@ CREATE INDEX mnemes_cluster_id_idx
 
 CREATE INDEX mnemes_intent_idx
     ON mnemes (intent) WHERE intent IS NOT NULL;
+
+-- sub_mneme indexes: HNSW is the new hot path for semantic retrieval,
+-- GIN is the new hot path for lexical retrieval (on raw turn text, not
+-- enriched concept, so ts_rank does not saturate across candidates).
+-- btree on (mneme_id, position) supports ordered turn retrieval and
+-- fast grouping of sub_mneme hits by parent.
+CREATE INDEX sub_mnemes_embedding_hnsw_idx
+    ON sub_mnemes USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX sub_mnemes_search_vector_gin_idx
+    ON sub_mnemes USING gin (search_vector);
+
+CREATE INDEX sub_mnemes_mneme_id_position_idx
+    ON sub_mnemes (mneme_id, position);
 "#,
     name = "create_indexes",
-    requires = ["create_mnemes_table", "create_associations_table", "create_contradiction_candidates_table"],
+    requires = ["create_mnemes_table", "create_sub_mnemes_table", "create_associations_table", "create_contradiction_candidates_table"],
 );
 
 // ---------------------------------------------------------------------------
@@ -315,8 +369,8 @@ CREATE INDEX mnemes_intent_idx
 
 /// Reconfigure the embedding dimension for this pg_ghola installation.
 ///
-/// Must be called on an empty mnemes table (errors if rows exist).
-/// Drops and recreates the HNSW index with the new dimension.
+/// Must be called on empty mnemes and sub_mnemes tables (errors if rows exist).
+/// Drops and recreates the HNSW indexes on both tables with the new dimension.
 ///
 /// Example: `SELECT ghola.configure_dimensions(3072)` for OpenAI text-embedding-3-large
 #[pg_extern]
@@ -327,7 +381,7 @@ fn configure_dimensions(dims: i32) -> &'static str {
 
     Spi::connect_mut(|client| {
         // Verify mnemes table is empty
-        let count = client
+        let mneme_count = client
             .select(
                 "SELECT count(*) FROM ghola.mnemes",
                 None,
@@ -339,23 +393,52 @@ fn configure_dimensions(dims: i32) -> &'static str {
             .and_then(|r| r.get::<i64>(1).ok().flatten())
             .unwrap_or(0);
 
-        if count > 0 {
+        if mneme_count > 0 {
             pgrx::error!(
-                "cannot reconfigure dimensions: mnemes table has {count} rows. \
+                "cannot reconfigure dimensions: mnemes table has {mneme_count} rows. \
                  Drop all data first or recreate the extension."
             );
         }
 
-        // Drop the HNSW index
+        // Verify sub_mnemes table is empty (should be implied by FK cascade, but
+        // check defensively in case of orphaned state)
+        let sub_mneme_count = client
+            .select(
+                "SELECT count(*) FROM ghola.sub_mnemes",
+                None,
+                &[],
+            )
+            .expect("failed to count sub_mnemes")
+            .into_iter()
+            .next()
+            .and_then(|r| r.get::<i64>(1).ok().flatten())
+            .unwrap_or(0);
+
+        if sub_mneme_count > 0 {
+            pgrx::error!(
+                "cannot reconfigure dimensions: sub_mnemes table has {sub_mneme_count} rows. \
+                 Drop all data first or recreate the extension."
+            );
+        }
+
+        // Drop the HNSW indexes on both tables
         client
             .update(
                 "DROP INDEX IF EXISTS ghola.mnemes_embedding_hnsw_idx",
                 None,
                 &[],
             )
-            .expect("failed to drop HNSW index");
+            .expect("failed to drop mnemes HNSW index");
 
-        // Alter the column type
+        client
+            .update(
+                "DROP INDEX IF EXISTS ghola.sub_mnemes_embedding_hnsw_idx",
+                None,
+                &[],
+            )
+            .expect("failed to drop sub_mnemes HNSW index");
+
+        // Alter the embedding column types on both tables
         client
             .update(
                 &format!(
@@ -365,9 +448,20 @@ fn configure_dimensions(dims: i32) -> &'static str {
                 None,
                 &[],
             )
-            .expect("failed to alter embedding column type");
+            .expect("failed to alter mnemes embedding column type");
 
-        // Recreate the HNSW index
+        client
+            .update(
+                &format!(
+                    "ALTER TABLE ghola.sub_mnemes \
+                     ALTER COLUMN embedding TYPE vector({dims})"
+                ),
+                None,
+                &[],
+            )
+            .expect("failed to alter sub_mnemes embedding column type");
+
+        // Recreate the HNSW indexes on both tables
         client
             .update(
                 "CREATE INDEX mnemes_embedding_hnsw_idx \
@@ -375,7 +469,16 @@ fn configure_dimensions(dims: i32) -> &'static str {
                 None,
                 &[],
             )
-            .expect("failed to recreate HNSW index");
+            .expect("failed to recreate mnemes HNSW index");
+
+        client
+            .update(
+                "CREATE INDEX sub_mnemes_embedding_hnsw_idx \
+                 ON ghola.sub_mnemes USING hnsw (embedding vector_cosine_ops)",
+                None,
+                &[],
+            )
+            .expect("failed to recreate sub_mnemes HNSW index");
 
         // Update config
         client

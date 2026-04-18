@@ -43,7 +43,7 @@ LANGUAGE SQL
 STABLE
 AS $$
     SELECT (mneme_id, score, content_match, activation, hebbian_boost,
-            confidence, concept, content)::ghola.recall_result
+            confidence, concept, content, matched_position)::ghola.recall_result
     FROM ghola.recall_inner(
         workspace_id, query_text, query_embedding::text, limit_n, min_confidence,
         COALESCE((weights).semantic, 0.6),
@@ -71,6 +71,12 @@ $$;
 // ---------------------------------------------------------------------------
 
 /// Internal candidate data fetched from the database.
+///
+/// `content` is the best-matching sub_mneme's content when sub_mnemes exist
+/// for this parent; otherwise it is the parent mneme's content (legacy
+/// fallback). `matched_position` is the sub_mneme position that produced the
+/// best match, or None for legacy fallback / non-content-match pathways
+/// (entity, cluster).
 struct Candidate {
     id: pgrx::Uuid,
     concept: String,
@@ -82,6 +88,7 @@ struct Candidate {
     fts_rank: f64,
     memory_type: String,
     candidate_session_id: Option<String>,
+    matched_position: Option<i16>,
 }
 
 /// Scored candidate ready for output.
@@ -94,6 +101,7 @@ struct ScoredCandidate {
     confidence: f64,
     concept: String,
     content: String,
+    matched_position: Option<i16>,
 }
 
 /// Internal implementation of the recall function.
@@ -128,6 +136,7 @@ fn recall_inner(
         name!(confidence, f64),
         name!(concept, String),
         name!(content, String),
+        name!(matched_position, Option<i16>),
     ),
 > {
     let pool_size = 3 * limit_n;
@@ -187,7 +196,10 @@ fn recall_inner(
     // Extract entity tokens from query for entity pathway
     let query_entities = crate::gating_worker::extract_entities(&escaped_text);
 
-    // Build entity pathway CTE (only if query has entities)
+    // Build entity pathway CTE (only if query has entities).
+    // Entity pathway operates on parent mnemes directly; matched_position is
+    // NULL because the match is at the parent level (entity filter), not a
+    // specific turn.
     let entity_cte = if !query_entities.is_empty() {
         let ent_literals: Vec<String> = query_entities
             .iter()
@@ -199,7 +211,8 @@ fn recall_inner(
                        GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                        (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
                        ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
-                       memory_type, session_id::text \
+                       memory_type, session_id::text, \
+                       NULL::smallint AS matched_position \
                 FROM ghola.mnemes \
                 WHERE workspace_id = '{ws}' \
                   AND state = 'active' \
@@ -222,7 +235,8 @@ fn recall_inner(
         ""
     };
 
-    // Build cluster pathway CTE (graceful: returns empty when no centroids exist)
+    // Build cluster pathway CTE (graceful: returns empty when no centroids exist).
+    // Cluster pathway operates on parent mnemes; matched_position is NULL.
     let cluster_k = 3; // tunable: number of nearest clusters to search
     let cluster_cte = format!(
         "nearest_clusters AS ( \
@@ -236,7 +250,8 @@ fn recall_inner(
                    GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
                    (1.0 - (m.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
                    ts_rank(m.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
-                   m.memory_type, m.session_id::text \
+                   m.memory_type, m.session_id::text, \
+                   NULL::smallint AS matched_position \
             FROM ghola.mnemes m \
             WHERE m.workspace_id = '{ws}' \
               AND m.state = 'active' \
@@ -252,56 +267,119 @@ fn recall_inner(
         k = cluster_k, pool = pool_size,
     );
 
+    // pool_3x: over-fetch from sub_mnemes so DISTINCT ON has choices per parent.
+    // At ~10 sub_mnemes per parent, we expect significant dedup; 3x buffer.
+    let pool_3x = pool_size * 3;
+
     let candidates: Vec<Candidate> = Spi::connect(|client| {
         let query = format!(
             "WITH \
-            semantic AS ( \
-                SELECT id, concept, content, confidence::float8, access_count, \
-                       GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
-                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
-                       memory_type, session_id::text \
-                FROM ghola.mnemes \
-                WHERE workspace_id = '{ws}' \
-                  AND state = 'active' \
-                  AND confidence >= {min_conf} \
+            semantic_sub AS ( \
+                SELECT DISTINCT ON (sh.mneme_id) \
+                       sh.mneme_id AS id, sh.concept, sh.content, sh.confidence, \
+                       sh.access_count, sh.age_days, sh.cosine_sim, sh.fts_rank, \
+                       sh.memory_type, sh.session_id, sh.matched_position \
+                FROM ( \
+                    SELECT s.mneme_id, m.concept, s.content, m.confidence::float8, \
+                           m.access_count, \
+                           GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                           (1.0 - (s.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                           ts_rank(s.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                           m.memory_type, m.session_id::text AS session_id, \
+                           s.position::smallint AS matched_position \
+                    FROM ghola.sub_mnemes s \
+                    JOIN ghola.mnemes m ON m.id = s.mneme_id \
+                    WHERE m.workspace_id = '{ws}' \
+                      AND m.state = 'active' \
+                      AND m.confidence >= {min_conf} \
+                      {filters} \
+                    ORDER BY s.embedding <=> '{emb}'::vector \
+                    LIMIT {pool_3x} \
+                ) sh \
+                ORDER BY sh.mneme_id, sh.cosine_sim DESC \
+            ), \
+            semantic_legacy AS ( \
+                SELECT m.id, m.concept, m.content, m.confidence::float8, m.access_count, \
+                       GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                       (1.0 - (m.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                       ts_rank(m.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       m.memory_type, m.session_id::text, \
+                       NULL::smallint AS matched_position \
+                FROM ghola.mnemes m \
+                WHERE m.workspace_id = '{ws}' \
+                  AND m.state = 'active' \
+                  AND m.confidence >= {min_conf} \
                   {filters} \
-                ORDER BY embedding <=> '{emb}'::vector \
+                  AND NOT EXISTS (SELECT 1 FROM ghola.sub_mnemes s WHERE s.mneme_id = m.id) \
+                ORDER BY m.embedding <=> '{emb}'::vector \
                 LIMIT {pool} \
             ), \
-            lexical AS ( \
-                SELECT id, concept, content, confidence::float8, access_count, \
-                       GREATEST(EXTRACT(EPOCH FROM (now() - last_access)) / 86400.0, {min_age})::float8 AS age_days, \
-                       (1.0 - (embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
-                       ts_rank(search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
-                       memory_type, session_id::text \
-                FROM ghola.mnemes \
-                WHERE workspace_id = '{ws}' \
-                  AND state = 'active' \
-                  AND confidence >= {min_conf} \
+            lexical_sub AS ( \
+                SELECT DISTINCT ON (lh.mneme_id) \
+                       lh.mneme_id AS id, lh.concept, lh.content, lh.confidence, \
+                       lh.access_count, lh.age_days, lh.cosine_sim, lh.fts_rank, \
+                       lh.memory_type, lh.session_id, lh.matched_position \
+                FROM ( \
+                    SELECT s.mneme_id, m.concept, s.content, m.confidence::float8, \
+                           m.access_count, \
+                           GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                           (1.0 - (s.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                           ts_rank(s.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                           m.memory_type, m.session_id::text AS session_id, \
+                           s.position::smallint AS matched_position \
+                    FROM ghola.sub_mnemes s \
+                    JOIN ghola.mnemes m ON m.id = s.mneme_id \
+                    WHERE m.workspace_id = '{ws}' \
+                      AND m.state = 'active' \
+                      AND m.confidence >= {min_conf} \
+                      {filters} \
+                      AND s.search_vector @@ plainto_tsquery('english', '{qt}') \
+                    ORDER BY ts_rank(s.search_vector, plainto_tsquery('english', '{qt}')) DESC \
+                    LIMIT {pool_3x} \
+                ) lh \
+                ORDER BY lh.mneme_id, lh.fts_rank DESC \
+            ), \
+            lexical_legacy AS ( \
+                SELECT m.id, m.concept, m.content, m.confidence::float8, m.access_count, \
+                       GREATEST(EXTRACT(EPOCH FROM (now() - m.last_access)) / 86400.0, {min_age})::float8 AS age_days, \
+                       (1.0 - (m.embedding <=> '{emb}'::vector))::float8 AS cosine_sim, \
+                       ts_rank(m.search_vector, plainto_tsquery('english', '{qt}'))::float8 AS fts_rank, \
+                       m.memory_type, m.session_id::text, \
+                       NULL::smallint AS matched_position \
+                FROM ghola.mnemes m \
+                WHERE m.workspace_id = '{ws}' \
+                  AND m.state = 'active' \
+                  AND m.confidence >= {min_conf} \
                   {filters} \
-                  AND search_vector @@ plainto_tsquery('english', '{qt}') \
-                ORDER BY ts_rank(search_vector, plainto_tsquery('english', '{qt}')) DESC \
+                  AND m.search_vector @@ plainto_tsquery('english', '{qt}') \
+                  AND NOT EXISTS (SELECT 1 FROM ghola.sub_mnemes s WHERE s.mneme_id = m.id) \
+                ORDER BY ts_rank(m.search_vector, plainto_tsquery('english', '{qt}')) DESC \
                 LIMIT {pool} \
             ), \
             {entity_cte} \
             {cluster_cte} \
             SELECT DISTINCT ON (id) id, concept, content, confidence, access_count, \
-                   age_days, cosine_sim, fts_rank, memory_type, session_id \
+                   age_days, cosine_sim, fts_rank, memory_type, session_id, matched_position \
             FROM ( \
-                SELECT * FROM semantic \
+                SELECT * FROM semantic_sub \
                 UNION ALL \
-                SELECT * FROM lexical \
+                SELECT * FROM semantic_legacy \
+                UNION ALL \
+                SELECT * FROM lexical_sub \
+                UNION ALL \
+                SELECT * FROM lexical_legacy \
                 {entity_union} \
                 UNION ALL \
                 SELECT * FROM cluster_matches \
-            ) combined",
+            ) combined \
+            ORDER BY id, cosine_sim DESC",
             ws = workspace_id,
             qt = escaped_text,
             emb = query_embedding_text,
             min_conf = min_confidence,
             min_age = ONE_MINUTE_DAYS,
             pool = pool_size,
+            pool_3x = pool_3x,
             filters = extra_filters,
             entity_cte = entity_cte,
             cluster_cte = cluster_cte,
@@ -328,6 +406,7 @@ fn recall_inner(
                 fts_rank: row.get::<f64>(8).expect("err").unwrap_or(0.0),
                 memory_type: row.get::<String>(9).expect("err").unwrap_or("factual".to_string()),
                 candidate_session_id: row.get::<String>(10).expect("err"),
+                matched_position: row.get::<i16>(11).expect("err"),
             });
         }
         result
@@ -429,6 +508,7 @@ fn recall_inner(
                 confidence: c.confidence,
                 concept: c.concept,
                 content: c.content,
+                matched_position: c.matched_position,
             }
         })
         .collect();
@@ -457,6 +537,7 @@ fn recall_inner(
                 s.confidence,
                 s.concept,
                 s.content,
+                s.matched_position,
             )
         })
         .collect();

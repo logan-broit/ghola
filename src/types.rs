@@ -21,14 +21,15 @@ use pgrx::prelude::*;
 pgrx::extension_sql!(
     r#"
 CREATE TYPE recall_result AS (
-    mneme_id      uuid,
-    score         float8,
-    content_match float8,
-    activation    float8,
-    hebbian_boost float8,
-    confidence    float8,
-    concept       text,
-    content       text
+    mneme_id         uuid,
+    score            float8,
+    content_match    float8,
+    activation       float8,
+    hebbian_boost    float8,
+    confidence       float8,
+    concept          text,
+    content          text,
+    matched_position smallint
 );
 "#,
     name = "create_type_recall_result",
@@ -65,6 +66,10 @@ CREATE TYPE score_weights AS (
 
 /// Rust representation of the recall_result composite type.
 /// Used by downstream modules (e.g., recall) to construct result rows.
+///
+/// `matched_position` is the 0-indexed sub_mneme position that produced the
+/// best content match. `None` indicates a legacy mneme without sub_mnemes
+/// (content_match derived from parent embedding/search_vector).
 #[derive(Debug, Clone)]
 pub struct RecallResult {
     pub mneme_id: pgrx::Uuid,
@@ -75,6 +80,7 @@ pub struct RecallResult {
     pub confidence: f64,
     pub concept: String,
     pub content: String,
+    pub matched_position: Option<i16>,
 }
 
 /// Rust representation of the score_weights composite type.
@@ -134,8 +140,8 @@ mod tests {
                 .select(
                     "SELECT (r).mneme_id, (r).score, (r).content_match, \
                             (r).activation, (r).hebbian_boost, (r).confidence, \
-                            (r).concept, (r).content \
-                     FROM (SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::ghola.recall_result AS r) sub",
+                            (r).concept, (r).content, (r).matched_position \
+                     FROM (SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling', 2::smallint)::ghola.recall_result AS r) sub",
                     None,
                     &[],
                 )
@@ -150,7 +156,8 @@ mod tests {
             let conf: f64 = row.get::<f64>(6).expect("err").expect("null confidence");
             let concept: String = row.get::<String>(7).expect("err").expect("null concept");
             let content: String = row.get::<String>(8).expect("err").expect("null content");
-            (score, cm, act, heb, conf, concept, content)
+            let pos: i16 = row.get::<i16>(9).expect("err").expect("null matched_position");
+            (score, cm, act, heb, conf, concept, content, pos)
         });
 
         assert!((row.0 - 0.9).abs() < 1e-9, "score field");
@@ -160,6 +167,7 @@ mod tests {
         assert!((row.4 - 0.7).abs() < 1e-9, "confidence field");
         assert_eq!(row.5, "k8s", "concept field");
         assert_eq!(row.6, "pod scheduling", "content field");
+        assert_eq!(row.7, 2i16, "matched_position field");
     }
 
     #[pg_test]
