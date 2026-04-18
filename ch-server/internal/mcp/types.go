@@ -64,7 +64,9 @@ type Property struct {
 }
 
 type Items struct {
-	Type string `json:"type"`
+	Type       string              `json:"type"`
+	Properties map[string]Property `json:"properties,omitempty"`
+	Required   []string            `json:"required,omitempty"`
 }
 
 type ToolsListResult struct {

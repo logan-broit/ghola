@@ -139,6 +139,130 @@ func (s *Server) handleRemember(authCtx *auth.Context, args map[string]any) Call
 	return toolResult(fmt.Sprintf("Remembered (id=%s): %s%s", m.ID, fact, nearDuplicateNotice))
 }
 
+// parseTurnsArg pulls the turns array out of MCP args and validates each
+// element shape. It does NOT check reconstruction against session_text --
+// that's mneme.validateTurnReconstruction's job, called by RememberWithTurns.
+// This step just normalizes the incoming JSON into typed TurnInput values
+// and assigns char offsets based on cumulative content length.
+func parseTurnsArg(raw any) ([]mneme.TurnInput, error) {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("turns must be an array")
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("turns must have at least one entry")
+	}
+	result := make([]mneme.TurnInput, 0, len(list))
+	cursor := 0
+	for i, item := range list {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("turn %d is not an object", i)
+		}
+		role, _ := obj["role"].(string)
+		if role == "" {
+			return nil, fmt.Errorf("turn %d missing role", i)
+		}
+		content, contentOK := obj["content"].(string)
+		if !contentOK {
+			return nil, fmt.Errorf("turn %d missing content", i)
+		}
+		if content == "" {
+			return nil, fmt.Errorf("turn %d content is empty", i)
+		}
+		start := cursor
+		end := cursor + len(content)
+		result = append(result, mneme.TurnInput{
+			Role:      role,
+			Content:   content,
+			CharStart: start,
+			CharEnd:   end,
+		})
+		cursor = end
+	}
+	return result, nil
+}
+
+func (s *Server) handleRememberSession(authCtx *auth.Context, args map[string]any) CallToolResult {
+	sessionText, _ := args["session_text"].(string)
+	if sessionText == "" {
+		return toolError("session_text is required")
+	}
+
+	turnsRaw, hasTurns := args["turns"]
+	if !hasTurns {
+		return toolError("turns is required")
+	}
+	turns, err := parseTurnsArg(turnsRaw)
+	if err != nil {
+		return toolError(err.Error())
+	}
+
+	// Run secret scan on full session_text before storing. If we find
+	// anything, refuse the whole call -- don't store a partial session.
+	if findings := s.scanner.Scan(sessionText); len(findings) > 0 {
+		s.logger.Warn("secret detected in session payload",
+			"user", authCtx.UserID.String(),
+			"findings_count", len(findings),
+		)
+		return toolError(secrets.FormatError(findings))
+	}
+
+	memoryType, _ := args["memory_type"].(string)
+	if memoryType == "" {
+		memoryType = "factual"
+	}
+	if !validMemoryTypes[memoryType] {
+		return toolError("memory_type must be 'factual', 'experiential', or 'working'")
+	}
+
+	scope, _ := args["scope"].(string)
+	if scope == "" {
+		scope = "personal"
+	}
+	if !validScopes[scope] {
+		return toolError("scope must be 'personal' or 'org'")
+	}
+
+	var tagStrs []string
+	if tags, ok := args["tags"].([]any); ok && len(tags) > 0 {
+		for _, t := range tags {
+			if ts, ok := t.(string); ok {
+				tagStrs = append(tagStrs, strings.ToLower(strings.TrimSpace(ts)))
+			}
+		}
+	}
+
+	sessionID, err := resolveSessionID(authCtx, args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+
+	ctx := auth.WithContext(context.Background(), authCtx)
+	m, dup, err := s.store.RememberWithTurns(
+		ctx, authCtx.UserID, authCtx.OrgID,
+		sessionText, turns,
+		memoryType, scope, "index", tagStrs, sessionID,
+	)
+	if err != nil {
+		return toolError(fmt.Sprintf("Error: %v", err))
+	}
+
+	var nearDuplicateNotice string
+	if dup != nil {
+		nearDuplicateNotice = fmt.Sprintf(
+			"\n\nNote: Similar session exists (id=%s, similarity=%.0f%%): %s",
+			dup.ID, dup.Similarity*100, truncateText(dup.Content, 120),
+		)
+	}
+
+	preview := truncateText(sessionText, 120)
+	return toolResult(fmt.Sprintf(
+		"Remembered session (id=%s, turns=%d): %s%s",
+		m.ID, len(turns), preview, nearDuplicateNotice,
+	))
+}
+
 func (s *Server) handleRecall(authCtx *auth.Context, args map[string]any) CallToolResult {
 	query, _ := args["query"].(string)
 	if query == "" {

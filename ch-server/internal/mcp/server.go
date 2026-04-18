@@ -21,6 +21,9 @@ import (
 //go:embed descriptions/remember.txt
 var rememberDescription string
 
+//go:embed descriptions/remember_session.txt
+var rememberSessionDescription string
+
 //go:embed descriptions/recall.txt
 var recallDescription string
 
@@ -103,6 +106,58 @@ func (s *Server) Tools() []Tool {
 					},
 				},
 				Required: []string{"fact"},
+			},
+		},
+		{
+			Name:        "remember_session",
+			Description: rememberSessionDescription,
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"session_text": {
+						Type:        "string",
+						Description: "The full session text. Concatenating the turn contents in order MUST equal this string byte-for-byte.",
+					},
+					"turns": {
+						Type:        "array",
+						Description: "The session's turns in order. Each turn is {role, content}. Concatenating content in order equals session_text.",
+						Items: &Items{
+							Type: "object",
+							Properties: map[string]Property{
+								"role": {
+									Type:        "string",
+									Description: "Turn role.",
+									Enum:        []string{"user", "assistant", "system", "tool"},
+								},
+								"content": {
+									Type:        "string",
+									Description: "Exact text of this turn. Include any role markers or separators the caller wants preserved.",
+								},
+							},
+							Required: []string{"role", "content"},
+						},
+					},
+					"tags": {
+						Type:        "array",
+						Description: "Optional tags for categorization (e.g., 'kubernetes', 'debugging-session').",
+						Items:       &Items{Type: "string"},
+					},
+					"memory_type": {
+						Type:        "string",
+						Description: "Memory classification: 'factual' (default), 'experiential' (debugging insights, lessons learned), or 'working' (expires in 7 days).",
+						Enum:        []string{"factual", "experiential", "working"},
+					},
+					"scope": {
+						Type:        "string",
+						Description: "Memory visibility scope: 'personal' (default) or 'org'.",
+						Enum:        []string{"personal", "org"},
+					},
+					"session_id": {
+						Type:        "string",
+						Description: "Optional session UUID to group this memory with others.",
+					},
+				},
+				Required: []string{"session_text", "turns"},
 			},
 		},
 		{
@@ -370,6 +425,8 @@ func (s *Server) callTool(authCtx *auth.Context, params CallToolParams) CallTool
 	switch params.Name {
 	case "remember":
 		result = s.handleRemember(authCtx, params.Arguments)
+	case "remember_session":
+		result = s.handleRememberSession(authCtx, params.Arguments)
 	case "recall":
 		result = s.handleRecall(authCtx, params.Arguments)
 	case "forget":
@@ -424,6 +481,24 @@ func (s *Server) createAuditLog(authCtx *auth.Context, params CallToolParams, re
 				fact = fact[:100] + "..."
 			}
 			details["fact_preview"] = fact
+		}
+		if tags, ok := params.Arguments["tags"].([]any); ok {
+			details["tags_count"] = len(tags)
+		}
+		if memType, ok := params.Arguments["memory_type"].(string); ok {
+			details["memory_type"] = memType
+		}
+	case "remember_session":
+		if st, ok := params.Arguments["session_text"].(string); ok {
+			details["session_text_len"] = len(st)
+			preview := st
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			details["session_text_preview"] = preview
+		}
+		if turns, ok := params.Arguments["turns"].([]any); ok {
+			details["turn_count"] = len(turns)
 		}
 		if tags, ok := params.Arguments["tags"].([]any); ok {
 			details["tags_count"] = len(tags)
