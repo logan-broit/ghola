@@ -111,3 +111,15 @@ FROM ghola.mnemes
 WHERE workspace_id = ANY($1) AND session_id = $2 AND state = 'active'
 ORDER BY created_at ASC
 `
+
+// insertSubMneme writes one per-turn sub-record linked to a parent mneme.
+// The search_vector column is GENERATED ALWAYS from content so we do not
+// insert it. token_start / token_end hold CHARACTER offsets into the
+// parent session_text (not token offsets -- the column names are preserved
+// from Phase 1 schema to avoid a migration; see
+// docs/plans/2026-04-16-multi-granularity-encoding-implementation.md).
+const insertSubMneme = `
+INSERT INTO ghola.sub_mnemes (
+    mneme_id, position, role, content, embedding, token_start, token_end
+) VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+`
