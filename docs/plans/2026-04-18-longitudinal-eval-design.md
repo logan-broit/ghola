@@ -47,8 +47,11 @@ time; we measure whether that work translates to better agent behavior.
 
 ## Core Question
 
-Does an agent equipped with pg_ghola at "week N" (where "week" is a
-compressed measure of prior interaction volume) outperform:
+Does an agent equipped with pg_ghola at "week N" (where "week N" means
+BOTH N * volume_per_week interactions have been absorbed AND those
+interactions are temporally spread across N simulated weeks in the
+database via backdated timestamps, so the temporal primitives can
+actually fire) outperform:
 
 1. The same agent with no memory (context window only)
 2. The same agent with a static CLAUDE.md-style memory file
@@ -142,15 +145,71 @@ DATA: LongitudinalRun
 
 ---
 
-CONSTRAINT: interaction_volume_defines_time
-  Real-world weeks are too slow for iteration. We define "week N" as
-  N * interaction_volume_per_week interactions having occurred. The
-  consolidation worker runs on wall-clock, so in practice the simulator
-  either (a) injects synthetic timestamps into the mnemes.last_access
-  columns to simulate elapsed time, or (b) runs long enough real-time
-  for the consolidation jobs to fire naturally. (a) is faster for
-  iteration; (b) is more faithful. Default: (a) with periodic (b)
-  validation runs.
+CONSTRAINT: simulated_time_is_two_dimensional
+  "Week N" is a pair: interaction VOLUME (N * volume_per_week events
+  have occurred) AND wall-clock SPREAD (those events are temporally
+  distributed across N simulated weeks in the database). Interaction
+  volume alone is insufficient: if 500 interactions happen in a real
+  30-second Python loop, every mneme has last_access within that
+  30-second window, the Ebbinghaus decay returns ~1.0 for everything,
+  and the consolidation worker thinks the entire workspace is "fresh."
+  The temporal primitives are invisible unless the timestamps on the
+  mnemes actually span the weeks we claim they span.
+
+CONSTRAINT: simulated_time_via_backdated_timestamps
+  The simulator maintains a `sim_now` clock (datetime). It advances
+  per-interaction by a configured delta (default: volume_per_week
+  interactions cover 7 real days, so delta = 7*24*60/volume_per_week
+  minutes). Every mneme insertion uses `sim_now` as `created_at` and
+  `last_access`, not `now()`. This produces the temporal spread the
+  primitives expect.
+
+  Implementation mechanism (simplest viable):
+    - After Chapterhouse inserts a mneme at sim_now, the simulator
+      issues `UPDATE mnemes SET created_at = $sim_now, last_access =
+      $sim_now WHERE id = $parent_id` and the matching UPDATE on any
+      sub_mnemes. (Chapterhouse itself does not need to know about
+      simulated time; the override is purely simulator-side.)
+    - For recall: the simulator can either (a) set `sim_now` by
+      updating the clock dependency everything sees, or (b) just let
+      recall use real `now()` since backdated last_access values
+      produce correct `now() - last_access` deltas. (b) is simpler
+      and sufficient; adopt it unless we find a reason to override
+      recall's clock.
+
+CONSTRAINT: consolidation_fires_synchronously_at_checkpoints
+  The consolidation worker runs on wall-clock intervals (hourly decay,
+  6-hourly archival, daily rebalance) in production. During eval runs
+  it is PAUSED (worker_stats.state = 'paused') to prevent interference
+  with the simulator's clock. At each checkpoint boundary (week 0 -> 1,
+  1 -> 2, etc.), the simulator explicitly fires the consolidation
+  routines in order, against backdated data, so their outputs
+  (pruned associations, archived dormants, expired working mnemes,
+  rebalanced clusters) reflect the simulated-time state.
+
+  Required (or to-be-verified) SQL surface area:
+    - `ghola.decay_associations(as_of timestamptz)` -- apply hourly
+      decay as if `as_of` were the current time
+    - `ghola.prune_weak_associations(threshold float8)` -- already
+      time-independent
+    - `ghola.archive_dormant(as_of timestamptz, max_age_days int,
+      confidence_ceiling float8)` -- archive mnemes whose last_access
+      is older than `as_of - max_age_days` with low confidence
+    - `ghola.expire_working(as_of timestamptz)` -- clear working
+      mnemes past their expires_at relative to `as_of`
+
+  If these routines do not currently accept an `as_of` override, adding
+  one is a precondition for the longitudinal eval. Background-worker
+  callsites continue to pass `now()` by default, preserving production
+  behavior.
+
+CONSTRAINT: contradiction_worker_also_paused
+  The contradiction worker's async behavior (polling the
+  contradiction_queue) is similarly paused during eval. Contradiction
+  detection is invoked synchronously when the simulator inserts a
+  contradicting mneme (either by firing the contradiction-check
+  routine directly, or by draining the queue in a controlled loop).
+  This keeps contradiction signals deterministic across runs.
 
 CONSTRAINT: probe_set_is_held_out
   The probe set is constructed in advance, pinned with an id, and NEVER
@@ -482,10 +541,24 @@ For each (backend, week) cell, compute:
    grader (possibly LLM-judge) for multi-hop-synthesis and pattern-
    abstraction; boolean flag for contradiction-detect / staleness-detect.
 
-5. **Simulated time injection** -- a utility that forward-dates
-   mnemes.last_access and triggers the consolidation worker as if N
-   days had passed. Required for fast iteration; without it, each
-   "week" costs a real week.
+5. **Simulated time controller (TimeSimulator)** -- the central
+   mechanism that gives the primitives room to fire. It owns a
+   `sim_now` datetime, advances it per-interaction by a configured
+   delta, and provides three services to the simulator:
+     (a) `insert_at(mneme_id, sim_now)` -- UPDATE mnemes (and any
+         sub_mnemes) to set created_at / last_access to sim_now after
+         Chapterhouse's normal insert path has run. This is the
+         backdating mechanism.
+     (b) `advance_to(target_sim_now)` -- move the clock forward,
+         triggering checkpoint-boundary events.
+     (c) `fire_consolidation(as_of, kinds=[decay, prune, archive,
+         expire])` -- synchronously invoke the consolidation routines
+         with as_of = sim_now, in place of the paused background
+         worker.
+   Also pauses/resumes the consolidation, contradiction, and gating
+   workers around eval runs (set worker_stats.state = 'paused').
+   Without this utility the temporal primitives are effectively
+   unmeasurable, regardless of how many interactions we run.
 
 6. **Primitive signal instrumentation** -- add observability for:
    - contradiction_flag in recall results
@@ -516,42 +589,57 @@ For each (backend, week) cell, compute:
 
 ## Execution plan (ordered by dependency)
 
-1. **Instrument primitives for observability**. Without this, we can't
-   measure which primitive is doing what. Touches gating_worker.rs,
-   consolidation_worker.rs, contradiction.rs, recall.rs.
+1. **Expose consolidation routines with as_of override**. Currently
+   consolidation runs from the background worker against `now()`.
+   Add SQL-callable versions of decay_associations, archive_dormant,
+   expire_working that accept an optional `as_of timestamptz`. Add
+   worker pause/resume via worker_stats.state. Same for the
+   contradiction worker's check routine. This is the precondition for
+   the TimeSimulator; without it we can't simulate time faithfully.
 
-2. **Build the agent simulator skeleton**. Backend-agnostic; passes
-   a canned Interaction sequence through and records metrics. Start
-   with the `none` backend to exercise the loop end-to-end.
+2. **Instrument primitives for observability**. Emit per-recall and
+   per-consolidation events capturing contradiction flags, tier
+   changes, prune counts, gating filter effectiveness. Touches
+   gating_worker.rs, consolidation_worker.rs, contradiction.rs,
+   recall.rs.
 
-3. **Implement the 4 backend adapters**. `claude-md` is trivial,
+3. **Build the TimeSimulator utility**. Python, sits alongside the
+   agent simulator. Owns sim_now, backdates inserts, fires
+   consolidation synchronously, pauses/resumes workers. Unit-testable
+   against a scratch workspace before any agent is wired in.
+
+4. **Build the agent simulator skeleton**. Backend-agnostic; passes
+   a canned Interaction sequence through and records metrics. Uses
+   TimeSimulator for any time-dependent operations. Start with the
+   `none` backend to exercise the loop end-to-end.
+
+5. **Implement the 4 backend adapters**. `claude-md` is trivial,
    `pgvector` is almost trivial (single SQL), `pg-ghola` wraps the
    existing recall, `none` is a stub.
 
-4. **Construct the seed task suite**. Small (maybe 30 probes across
+6. **Construct the seed task suite**. Small (maybe 30 probes across
    5 categories) for the first iteration. Grow as failures surface.
 
-5. **Write the simulated-time-injection utility**. Postgres function
-   that forward-dates last_access on selected mnemes; triggers the
-   consolidation worker.
-
-6. **First longitudinal run**. pg_ghola vs pgvector vs none, at weeks
+7. **First longitudinal run**. pg_ghola vs pgvector vs none, at weeks
    0 and 4. Small probe set. Checks: does the machinery work? does
    pg_ghola show ANY divergence from baselines over simulated time?
+   Verify: with properly backdated timestamps, ACT-R activation and
+   Ebbinghaus retention values actually span the expected range
+   (not all ~1.0).
 
-7. **Analyze, iterate**. If pg_ghola doesn't diverge by week 4 on any
+8. **Analyze, iterate**. If pg_ghola doesn't diverge by week 4 on any
    primitive-tied category, that's the signal that the primitives
    aren't doing the work they're supposed to. Investigation follows.
 
-8. **Grow the probe set**. Add multi-hop-synthesis, pattern-abstraction,
+9. **Grow the probe set**. Add multi-hop-synthesis, pattern-abstraction,
    association-recall. Add denial probes. Add staleness-detect.
 
-9. **Add claude-md backend**. Gives us a third baseline point.
+10. **Add claude-md backend**. Gives us a third baseline point.
 
-10. **Full longitudinal runs at weeks 0, 1, 2, 4, 8**. Publishable
+11. **Full longitudinal runs at weeks 0, 1, 2, 4, 8**. Publishable
     curves.
 
-11. **Wire results into the blog's EvalPage**. The "Measuring Memory"
+12. **Wire results into the blog's EvalPage**. The "Measuring Memory"
     page reframes around the longitudinal curves; cold R@5 becomes a
     floor check, not the headline.
 
