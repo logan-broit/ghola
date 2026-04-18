@@ -3,10 +3,37 @@
 Simplex v0.5 specification for the code changes that implement the
 [multi-granularity encoding design](./2026-04-16-multi-granularity-encoding-design.md).
 
-Three touchpoints:
-1. **pg_ghola extension (Rust)** -- sub_mnemes table, recall changes
-2. **Chapterhouse MCP (Python)** -- late-chunking encoder, remember_with_turns
-3. **Benchmark harness (Python)** -- TRUNCATE+re-ingest via the new path
+REVISED 2026-04-17 for the Go Chapterhouse reality. The earlier version of
+this document assumed a Python Chapterhouse service; the actual repository
+(`/home/loganb/chapterhouse/ch-server/`) is Go and calls an external
+OpenAI-compatible embedding HTTP service for all vector generation.
+
+## Architecture decision
+
+**Option 1: Extend the embedding server.** The late-chunking logic lives in
+Python inside the existing `embed_server.py` (currently at
+`/home/loganb/pg_ghola/analysis/embed_server.py`, running on :8082), exposed
+as a new HTTP endpoint. Chapterhouse (Go) gets a new Provider method that
+calls the new endpoint during `remember`. The existing OpenAI-compatible
+endpoint continues to serve query embeddings unchanged.
+
+Why Option 1: late chunking needs token-level access to a sentence-transformers
+model -- native in Python, hostile in Go. The embedding server already owns
+the model, pinning, and dtype. Extending it avoids a new service to deploy
+and keeps the Go side's changes minimal (one new Provider method).
+
+## Four touchpoints (updated)
+
+1. **pg_ghola extension (Rust)** -- sub_mnemes table, recall changes.
+   **DONE as of commit 80e120f**.
+2. **Embedding server (Python)** -- new `/v1/embeddings/late-chunk` endpoint
+   implementing late chunking with last-token pooling. Single-pass for
+   sessions <= 32K tokens, sliding window for longer.
+3. **Chapterhouse (Go)** -- new Provider method `EmbedLateChunk(session, turns)`
+   that calls the new endpoint. `remember_with_turns` uses it during ingest
+   and writes sub_mnemes via pgx. Existing `Embed(text)` path remains for
+   query-side embeddings.
+4. **Benchmark harness (Python)** -- TRUNCATE+re-ingest via the new path.
 
 ## Preconditions
 
@@ -156,11 +183,13 @@ Three touchpoints:
 
 ---
 
-## Phase 2: Chapterhouse late-chunking encoder (Python)
+## Phase 2: Embedding server late-chunking endpoint (Python)
 
 ### FUNCTION: late_chunk_encode(session_text, turns, model) -> list of (embedding, token_start, token_end)
 
-  FILE: chapterhouse/encoding/late_chunk.py (new)
+  FILE: pg_ghola/analysis/embed_server.py (EXTEND; currently 94 lines)
+        OR refactor into pg_ghola/analysis/late_chunk.py imported by
+        embed_server.py. Implementation detail; keep the server file small.
 
   RULES:
     - inputs:
@@ -219,7 +248,7 @@ Three touchpoints:
 
 ### FUNCTION: sliding_window_encode(session_text, turns, model, stride=0.5) -> list of (embedding, token_start, token_end)
 
-  FILE: chapterhouse/encoding/late_chunk.py
+  FILE: pg_ghola/analysis/embed_server.py (same file as late_chunk_encode)
 
   RULES:
     - window_size = model.max_seq_length (32,768 for Qwen3)
@@ -261,36 +290,134 @@ Three touchpoints:
     - pick windows where the turn touches the edge (a turn needs context
       on both sides or it degrades to isolated encoding)
 
-### FUNCTION: remember_with_turns(workspace_id, session_text, turns, metadata) -> parent_mneme_id
+### ENDPOINT: POST /v1/embeddings/late-chunk -> late-chunked turn embeddings
 
-  FILE: chapterhouse/remember.py (modified from existing remember)
+  FILE: pg_ghola/analysis/embed_server.py
+
+  REQUEST:
+    {
+      "session_text": string,
+      "turns": [
+        { "role": "user"|"assistant"|"system"|"tool",
+          "content": string,
+          "char_start": integer,
+          "char_end": integer }
+      ],
+      "sliding_window": boolean (optional, default false; force window path)
+    }
+
+  RESPONSE:
+    {
+      "object": "list",
+      "data": [
+        { "object": "embedding", "index": 0, "embedding": [float, ...],
+          "token_start": int, "token_end": int, "position": 0, "role": "user" },
+        ...
+      ],
+      "model": "Qwen/Qwen3-Embedding-0.6B",
+      "encoding_mode": "single-pass" | "sliding-window"
+    }
 
   RULES:
-    - inputs:
-        workspace_id: uuid
-        session_text: string (the full session)
-        turns: list of {role, content, start, end} or MCP-structured turns
-        metadata: dict (tags, session_id, memory_type, scope, expires_at, etc.)
-    - BEGIN transaction
-    - compute parent-level embedding:
-        either model.encode(session_text, normalize=True) [native last-token
-        pooling gives a summary vector] OR pool sub_mneme embeddings
-        (design choice: go with native encoding of full session for simplicity,
-        note that parent embedding is mostly for cognitive operations not
-        retrieval)
-    - compute parent concept: existing behavior (intent-aware enrichment
-      by gating worker later; Chapterhouse writes a baseline)
+    - validate request body shape; fail with 400 on malformed input
+    - reconstruct: concatenating turn content in order must match session_text
+      (whitespace-exact). fail 400 with "turn reconstruction mismatch" if not.
+    - call late_chunk_encode or sliding_window_encode based on session length
+      and the optional sliding_window flag
+    - normalize_embeddings=True; embeddings returned as float lists
+    - embedding dimension matches the model's dimension (1024 for Qwen3)
+    - preserve turn order in response (response.data[i] corresponds to
+      request.turns[i])
+
+  DONE_WHEN:
+    - endpoint accepts valid requests and returns one embedding per turn
+    - malformed requests return 4xx with helpful messages
+    - encoding_mode accurately reflects which path was used
+
+  EXAMPLES:
+    -- happy path
+    POST /v1/embeddings/late-chunk
+    { "session_text": "USER: hi\nASSISTANT: hello",
+      "turns": [
+        {"role":"user","content":"USER: hi","char_start":0,"char_end":8},
+        {"role":"assistant","content":"ASSISTANT: hello","char_start":9,"char_end":25}
+      ] }
+    -> 200 { "data": [{"index":0, "embedding": [...], ...},
+                      {"index":1, "embedding": [...], ...}],
+             "encoding_mode": "single-pass" }
+
+  ERRORS:
+    - missing fields -> 400 "missing field: {name}"
+    - turn reconstruction mismatch -> 400 with offending position
+    - n_tokens > model.max_seq_length and sliding_window=false -> 400
+      "session exceeds max context; set sliding_window=true"
+    - model raises -> 500 with error message
+
+  NOT_ALLOWED:
+    - implement late chunking on the Chapterhouse side
+    - mean-pool turn tokens (Qwen3-Embedding uses last-token pooling)
+    - expose raw token embeddings on this endpoint (that's a different
+      question; this endpoint returns pooled turn embeddings)
+
+### FUNCTION: ch-server EmbedLateChunk provider method (Go)
+
+  FILE: chapterhouse/ch-server/internal/embedding/openai.go (EXTEND)
+        OR new file chapterhouse/ch-server/internal/embedding/latechunk.go
+
+  RULES:
+    - add method to the embedding.Provider interface:
+        EmbedLateChunk(ctx, session_text, turns) -> [][]float32, error
+    - implement on OpenAIProvider: POST to {URL}/v1/embeddings/late-chunk
+      with the request body described in the endpoint spec
+    - return embeddings aligned with turns (index 0 in response == turns[0])
+    - use same HTTP client, timeout, retry, and auth as Embed
+    - do NOT wrap in batching; the call is session-scoped already
+    - preserve existing Embed method (query-side) unchanged
+
+  DONE_WHEN:
+    - interface method exists and is implemented
+    - unit tests against a local embed_server.py pass
+    - existing Embed callers continue to compile and behave unchanged
+
+  EXAMPLES:
+    embs, err := provider.EmbedLateChunk(ctx, sessionText, turns)
+    -- len(embs) == len(turns); each emb has provider.Dimensions() floats
+
+  ERRORS:
+    - HTTP 4xx from server -> return error with server's message
+    - HTTP 5xx / connection failure -> error wrapped with context
+    - len(response) != len(turns) -> error "server returned N embeddings
+      for M turns" (should not happen; the endpoint guarantees alignment)
+
+  NOT_ALLOWED:
+    - compute embeddings locally in Go
+    - use a different HTTP endpoint than /v1/embeddings/late-chunk for this
+      method
+    - cache late-chunked embeddings (each session is unique by construction)
+
+### FUNCTION: remember_with_turns (Go) -> parent mneme id
+
+  FILE: chapterhouse/ch-server/internal/mneme/store.go (extend existing
+        remember path or add RememberWithTurns method alongside it)
+
+  RULES:
+    - inputs match the existing Chapterhouse remember path plus structured
+      turn boundaries from the MCP request payload
+    - BEGIN pgx transaction
+    - call provider.Embed(session_text) for the parent-level vector (native
+      last-token pooling, used for cognitive operations, not primary retrieval)
+    - call provider.EmbedLateChunk(session_text, turns) for per-turn vectors
+      (single HTTP round-trip to the embedding server)
     - INSERT parent mneme (mnemes table) with parent concept, parent content
       (= session_text), parent embedding, metadata columns
-    - call late_chunk_encode(session_text, turn_spans, model)
-    - INSERT one sub_mneme row per returned (embedding, token_start, token_end):
+    - INSERT one sub_mneme row per returned embedding:
         mneme_id = parent mneme id
         position = turn index
         role = turn.role
         content = session_text[turn.char_start : turn.char_end]
-        embedding = the late-chunked vector
-        token_start, token_end from encoder
-    - COMMIT transaction
+        embedding = the late-chunked vector from EmbedLateChunk
+        token_start, token_end = response fields from the server
+    - COMMIT transaction (atomic: parent + all sub_mnemes land together)
     - enqueue parent for gating worker and contradiction worker
       (existing behavior)
     - return parent mneme id
