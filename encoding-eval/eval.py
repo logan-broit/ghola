@@ -35,6 +35,7 @@ VALID_CATEGORIES = {
     "short-session",
     "multi-topic",
     "identity-baseline",
+    "longmemeval",
 }
 
 
@@ -334,9 +335,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.strip().split("\n")[0])
     p.add_argument(
         "--cases",
-        type=Path,
-        default=Path(__file__).parent / "eval_cases.jsonl",
-        help="path to JSONL cases file",
+        type=str,
+        default=None,
+        help=(
+            "comma-separated list of JSONL case paths. "
+            "default: eval_cases.jsonl + eval_cases_longmemeval.jsonl (if present) "
+            "alongside this script."
+        ),
     )
     p.add_argument(
         "--strategy",
@@ -360,8 +365,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = p.parse_args(argv)
 
+    # Resolve case paths. If --cases is not given, load the hand-curated
+    # eval_cases.jsonl plus the longmemeval sample file (if it exists).
+    here = Path(__file__).parent
+    if args.cases is None:
+        candidates = [here / "eval_cases.jsonl", here / "eval_cases_longmemeval.jsonl"]
+        case_paths = [p for p in candidates if p.exists()]
+        if not case_paths:
+            print(
+                f"error: no case files found; expected {candidates[0]} "
+                f"and optionally {candidates[1]}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        case_paths = [Path(x.strip()) for x in args.cases.split(",") if x.strip()]
+
     try:
-        cases = load_cases(args.cases)
+        cases: List[EvalCase] = []
+        seen_ids: set[str] = set()
+        for cp in case_paths:
+            for c in load_cases(cp):
+                if c.id in seen_ids:
+                    print(
+                        f"error: duplicate case id '{c.id}' across files",
+                        file=sys.stderr,
+                    )
+                    return 1
+                seen_ids.add(c.id)
+                cases.append(c)
     except (FileNotFoundError, ValueError) as e:
         print(f"error loading cases: {e}", file=sys.stderr)
         return 1

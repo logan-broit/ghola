@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .venv/
+
+# Track the curated and imported eval cases even though root .gitignore excludes *.jsonl
+!eval_cases.jsonl
+!eval_cases_longmemeval.jsonl
