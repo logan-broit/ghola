@@ -3,45 +3,69 @@
 Simplex v0.5 specification for the code changes that implement the
 [multi-granularity encoding design](./2026-04-16-multi-granularity-encoding-design.md).
 
-REVISED 2026-04-17 for the Go Chapterhouse reality. The earlier version of
-this document assumed a Python Chapterhouse service; the actual repository
-(`/home/loganb/chapterhouse/ch-server/`) is Go and calls an external
-OpenAI-compatible embedding HTTP service for all vector generation.
+REVISED 2026-04-17 for the Go Chapterhouse reality.
+
+REVISED 2026-04-18 to drop late chunking in favor of isolated per-turn
+encoding, after Tier 1 samsara evidence (commits a39fac5, cbf71eb, 4d74450
+in chapterhouse) showed:
+  - The "correct" last-token late chunking (matching Qwen3's native pooling)
+    LOSES to isolated encoding by -2.0pp top-1 overall.
+  - The best ensemble variants (mean-pool late chunking) win +9.9pp on a
+    conversational-memory biased eval set, but lose -20pp on self-contained
+    turns (factual content) and are fragile to workload shifts.
+  - The oracle ceiling for any ingest-time encoding selection is +11.3pp
+    over isolated, across a 60pp+ total gap to state-of-the-art systems.
+  - Store-both-max / store-both-mean lose to pure mean-pool due to
+    aggregation dynamics (inflated non-target scores, diluted contextual
+    discrimination).
+
+Net: encoding complexity is not the lever that meaningfully closes the
+competitive gap. pg_ghola's differentiation is the cognitive primitives
+(Hebbian, contradiction detection, consolidation, temporal decay,
+confidence evolution, gating, multi-pathway consensus), none of which
+are exercised on cold benchmarks. This iteration of Phase 2 commits to
+the simplest encoding that works on ALL workloads, so engineering
+bandwidth can move to the primitives where the differentiation lives.
 
 ## Architecture decision
 
-**Option 1: Extend the embedding server.** The late-chunking logic lives in
-Python inside the existing `embed_server.py` (currently at
-`/home/loganb/pg_ghola/analysis/embed_server.py`, running on :8082), exposed
-as a new HTTP endpoint. Chapterhouse (Go) gets a new Provider method that
-calls the new endpoint during `remember`. The existing OpenAI-compatible
-endpoint continues to serve query embeddings unchanged.
+**Isolated per-turn encoding via the existing endpoint.** Chapterhouse
+sends each turn's text to the existing `/v1/embeddings` endpoint on
+`embed_server.py` (which already handles batched input: give it a list
+of strings, get back a list of embeddings). No new endpoint required.
+No late chunking. No sliding window. No new pooling logic.
 
-Why Option 1: late chunking needs token-level access to a sentence-transformers
-model -- native in Python, hostile in Go. The embedding server already owns
-the model, pinning, and dtype. Extending it avoids a new service to deploy
-and keeps the Go side's changes minimal (one new Provider method).
+Why this change from the earlier late-chunking plan:
+  - Simpler: zero changes to the embedding server. No new code path to
+    maintain or debug.
+  - Works on all workloads: conversational AND factual. No regression
+    on self-contained turns.
+  - Faster to ship: Chapterhouse Go changes are minimal.
+  - The encoding still matches Phase 1's schema (1024d vectors per
+    sub_mneme) without any reinterpretation.
+  - Leaves the door open for encoding upgrades later (the sub_mneme
+    schema is agnostic to HOW embeddings are produced).
 
-## Four touchpoints (updated)
+## Three touchpoints (simplified from four)
 
 1. **pg_ghola extension (Rust)** -- sub_mnemes table, recall changes.
    **DONE as of commit 80e120f**.
-2. **Embedding server (Python)** -- new `/v1/embeddings/late-chunk` endpoint
-   implementing late chunking with last-token pooling. Single-pass for
-   sessions <= 32K tokens, sliding window for longer.
-3. **Chapterhouse (Go)** -- new Provider method `EmbedLateChunk(session, turns)`
-   that calls the new endpoint. `remember_with_turns` uses it during ingest
-   and writes sub_mnemes via pgx. Existing `Embed(text)` path remains for
-   query-side embeddings.
+2. **Embedding server (Python)** -- **NO CHANGES**. The existing
+   `/v1/embeddings` endpoint already accepts batched input and returns
+   normalized embeddings. Chapterhouse sends it a list of turn texts.
+3. **Chapterhouse (Go)** -- `RememberWithTurns` method that calls
+   `provider.Embed(turns_as_string_list)` once per ingest, writes the
+   parent mneme plus N sub_mnemes atomically via pgx.
 4. **Benchmark harness (Python)** -- TRUNCATE+re-ingest via the new path.
 
 ## Preconditions
 
-- Design doc constraints are load-bearing and referenced throughout.
-- Qwen3-Embedding-0.6B verified (2026-04-16): last-token pooling,
-  max_seq_length 32,768, output_value="token_embeddings" works.
-- sentence-transformers >= 5.4.0 pinned in Chapterhouse.
 - pg_ghola schema migrations are additive (no existing data destroyed).
+- The existing embedding server on port :8082 runs Qwen3-Embedding-0.6B
+  via sentence-transformers 5.4.0 with normalize_embeddings=True.
+- The existing OpenAI-compatible endpoint handles both single-string
+  and list-of-strings input (verified in
+  pg_ghola/analysis/embed_server.py).
 
 ---
 
@@ -183,295 +207,152 @@ and keeps the Go side's changes minimal (one new Provider method).
 
 ---
 
-## Phase 2: Embedding server late-chunking endpoint (Python)
+## Phase 2: Chapterhouse RememberWithTurns (Go)
 
-### FUNCTION: late_chunk_encode(session_text, turns, model) -> list of (embedding, token_start, token_end)
+No embedding server changes. The existing `/v1/embeddings` endpoint on
+`pg_ghola/analysis/embed_server.py` already accepts `{"input": [str, ...]}`
+and returns one embedding per input string, L2-normalized. That's the
+primitive we need.
 
-  FILE: pg_ghola/analysis/embed_server.py (EXTEND; currently 94 lines)
-        OR refactor into pg_ghola/analysis/late_chunk.py imported by
-        embed_server.py. Implementation detail; keep the server file small.
+### FUNCTION: Embed (existing Provider method, used for batched turn encoding)
 
-  RULES:
-    - inputs:
-        session_text: string (the full concatenated session)
-        turns: list of (char_start, char_end, role) tuples
-        model: SentenceTransformer instance (pinned: Qwen3-Embedding-0.6B)
-    - tokenize session_text with model.tokenizer(return_offsets_mapping=True,
-      truncation=False, add_special_tokens=True)
-    - if n_tokens <= model.max_seq_length:
-        forward pass: model.encode(session_text,
-                                   output_value="token_embeddings",
-                                   convert_to_tensor=True)
-        for each turn (cs, ce, role):
-            find last token index i such that:
-                attention_mask[i] == 1 AND
-                offsets[i] != (0,0) AND  # not a special token
-                offsets[i][0] < ce AND offsets[i][1] > cs  # overlaps turn span
-            embedding = token_embeddings[i] / L2_norm(token_embeddings[i])
-            yield (embedding, offsets[i_first_in_span][0], offsets[i][1])
-    - if n_tokens > model.max_seq_length:
-        invoke sliding_window_encode(...) (see below)
-    - return embeddings in order matching the turns list
+  FILE: chapterhouse/ch-server/internal/embedding/openai.go (NO CHANGES)
 
-  DONE_WHEN:
-    - len(output) == len(turns)
-    - every embedding is L2-normalized to 1.0 (tolerance 1e-4)
-    - isolation test: encoding ["Single turn."] via late_chunk produces
-      a vector whose cosine with model.encode("Single turn.",
-      normalize_embeddings=True) is > 0.995 (not exactly 1.0 because
-      session vs. single-turn framing can differ slightly)
-    - context test: a turn's late-chunked embedding differs from the
-      same turn's isolated embedding (cosine < 0.95 for turns with
-      prior context in the session)
-
-  EXAMPLES:
-    -- short session, single forward pass
-    session = "USER: ... ASSISTANT: ... USER: ..."
-    turns = [(0, 30, 'user'), (31, 90, 'assistant'), (91, 130, 'user')]
-    late_chunk_encode(session, turns, model) -> 3 (embedding, ts, te) tuples
-
-    -- long session triggers sliding window
-    session = (60K tokens of conversation)
-    -> sliding_window_encode() is dispatched internally
-
-  ERRORS:
-    - turns list empty -> raise ValueError("no turns provided")
-    - turn span produces no matching tokens -> raise ValueError with
-      context (turn index, char span, token count)
-    - model does not expose token_embeddings -> raise RuntimeError
-      (should not happen with Qwen3-Embedding-0.6B but check in init)
+  Confirm the current OpenAIProvider.Embed signature accepts a list of
+  strings and returns `[][]float32` aligned with the input order. If the
+  current signature is single-string (`Embed(ctx, text) ([]float32, ...)`),
+  add a sibling `EmbedBatch(ctx, texts) ([][]float32, ...)`. Either
+  way, per-turn encoding uses batched input so each `remember_with_turns`
+  call makes at most TWO HTTP round-trips: one for the session-level
+  parent embedding, one for the batch of turn embeddings.
 
   NOT_ALLOWED:
-    - encode any turn in isolation as the "embedding" (defeats the purpose)
-    - mean-pool the token embeddings (wrong for last-token-pooling models)
-    - use a non-pinned model version
+    - make N separate HTTP calls (one per turn); inefficient and creates
+      variable latency per ingest
+    - implement embedding locally in Go
 
-### FUNCTION: sliding_window_encode(session_text, turns, model, stride=0.5) -> list of (embedding, token_start, token_end)
-
-  FILE: pg_ghola/analysis/embed_server.py (same file as late_chunk_encode)
-
-  RULES:
-    - window_size = model.max_seq_length (32,768 for Qwen3)
-    - stride_tokens = int(window_size * stride)  # 50% = 16,384
-    - tokenize full session once to get offsets and total n_tokens
-    - construct windows: for i in range(0, n_tokens, stride_tokens):
-        window = tokens[i : i + window_size]
-        decode window back to text (via offsets) for model.encode()
-        forward pass, store token embeddings by absolute token index
-    - for each turn:
-        find candidate windows that fully contain the turn's token range
-        pick the window where the turn is most centrally positioned:
-            score = min(turn_start - window_start, window_end - turn_end)
-            (maximizes symmetric context around the turn)
-        extract last-token embedding from that window's output
-    - return embeddings aligned with turn order
-
-  DONE_WHEN:
-    - sessions up to 3 * window_size encode correctly
-    - every turn's embedding comes from a window that fully contains it
-    - in the overlap region, the preferred window is the more-centered one
-    - unit test: force a 50K-token synthetic session, verify correctness
-
-  EXAMPLES:
-    -- 50K-token session, 200 turns, window=32K, stride=16K
-    -> windows: [0:32K], [16K:48K], [32K:50K]
-    -> turn at token 10K -> window 0 (most centered: min(10K, 22K) = 10K)
-    -> turn at token 25K -> window 1 (most centered: min(9K, 23K) = 9K, vs window 0: min(25K, 7K) = 7K)
-    -> turn at token 45K -> window 2
-
-  ERRORS:
-    - session has zero tokens -> raise ValueError
-    - no window fully contains a turn (turn > window_size) -> raise
-      ValueError with turn index and its length (pathological case;
-      a single turn longer than 32K tokens is unexpected)
-
-  NOT_ALLOWED:
-    - run windows without overlap (stride >= 1.0)
-    - pick windows where the turn touches the edge (a turn needs context
-      on both sides or it degrades to isolated encoding)
-
-### ENDPOINT: POST /v1/embeddings/late-chunk -> late-chunked turn embeddings
-
-  FILE: pg_ghola/analysis/embed_server.py
-
-  REQUEST:
-    {
-      "session_text": string,
-      "turns": [
-        { "role": "user"|"assistant"|"system"|"tool",
-          "content": string,
-          "char_start": integer,
-          "char_end": integer }
-      ],
-      "sliding_window": boolean (optional, default false; force window path)
-    }
-
-  RESPONSE:
-    {
-      "object": "list",
-      "data": [
-        { "object": "embedding", "index": 0, "embedding": [float, ...],
-          "token_start": int, "token_end": int, "position": 0, "role": "user" },
-        ...
-      ],
-      "model": "Qwen/Qwen3-Embedding-0.6B",
-      "encoding_mode": "single-pass" | "sliding-window"
-    }
-
-  RULES:
-    - validate request body shape; fail with 400 on malformed input
-    - reconstruct: concatenating turn content in order must match session_text
-      (whitespace-exact). fail 400 with "turn reconstruction mismatch" if not.
-    - call late_chunk_encode or sliding_window_encode based on session length
-      and the optional sliding_window flag
-    - normalize_embeddings=True; embeddings returned as float lists
-    - embedding dimension matches the model's dimension (1024 for Qwen3)
-    - preserve turn order in response (response.data[i] corresponds to
-      request.turns[i])
-
-  DONE_WHEN:
-    - endpoint accepts valid requests and returns one embedding per turn
-    - malformed requests return 4xx with helpful messages
-    - encoding_mode accurately reflects which path was used
-
-  EXAMPLES:
-    -- happy path
-    POST /v1/embeddings/late-chunk
-    { "session_text": "USER: hi\nASSISTANT: hello",
-      "turns": [
-        {"role":"user","content":"USER: hi","char_start":0,"char_end":8},
-        {"role":"assistant","content":"ASSISTANT: hello","char_start":9,"char_end":25}
-      ] }
-    -> 200 { "data": [{"index":0, "embedding": [...], ...},
-                      {"index":1, "embedding": [...], ...}],
-             "encoding_mode": "single-pass" }
-
-  ERRORS:
-    - missing fields -> 400 "missing field: {name}"
-    - turn reconstruction mismatch -> 400 with offending position
-    - n_tokens > model.max_seq_length and sliding_window=false -> 400
-      "session exceeds max context; set sliding_window=true"
-    - model raises -> 500 with error message
-
-  NOT_ALLOWED:
-    - implement late chunking on the Chapterhouse side
-    - mean-pool turn tokens (Qwen3-Embedding uses last-token pooling)
-    - expose raw token embeddings on this endpoint (that's a different
-      question; this endpoint returns pooled turn embeddings)
-
-### FUNCTION: ch-server EmbedLateChunk provider method (Go)
-
-  FILE: chapterhouse/ch-server/internal/embedding/openai.go (EXTEND)
-        OR new file chapterhouse/ch-server/internal/embedding/latechunk.go
-
-  RULES:
-    - add method to the embedding.Provider interface:
-        EmbedLateChunk(ctx, session_text, turns) -> [][]float32, error
-    - implement on OpenAIProvider: POST to {URL}/v1/embeddings/late-chunk
-      with the request body described in the endpoint spec
-    - return embeddings aligned with turns (index 0 in response == turns[0])
-    - use same HTTP client, timeout, retry, and auth as Embed
-    - do NOT wrap in batching; the call is session-scoped already
-    - preserve existing Embed method (query-side) unchanged
-
-  DONE_WHEN:
-    - interface method exists and is implemented
-    - unit tests against a local embed_server.py pass
-    - existing Embed callers continue to compile and behave unchanged
-
-  EXAMPLES:
-    embs, err := provider.EmbedLateChunk(ctx, sessionText, turns)
-    -- len(embs) == len(turns); each emb has provider.Dimensions() floats
-
-  ERRORS:
-    - HTTP 4xx from server -> return error with server's message
-    - HTTP 5xx / connection failure -> error wrapped with context
-    - len(response) != len(turns) -> error "server returned N embeddings
-      for M turns" (should not happen; the endpoint guarantees alignment)
-
-  NOT_ALLOWED:
-    - compute embeddings locally in Go
-    - use a different HTTP endpoint than /v1/embeddings/late-chunk for this
-      method
-    - cache late-chunked embeddings (each session is unique by construction)
-
-### FUNCTION: remember_with_turns (Go) -> parent mneme id
+### FUNCTION: RememberWithTurns (Go) -> parent mneme id
 
   FILE: chapterhouse/ch-server/internal/mneme/store.go (extend existing
         remember path or add RememberWithTurns method alongside it)
 
   RULES:
     - inputs match the existing Chapterhouse remember path plus structured
-      turn boundaries from the MCP request payload
+      turn boundaries from the MCP request payload. Each turn carries
+      {role, content, char_start, char_end}; concatenating contents in
+      order must reconstruct session_text.
+    - Validate turn reconstruction: concatenation of turn.content values
+      equals session_text. On mismatch, fail before any DB writes.
     - BEGIN pgx transaction
-    - call provider.Embed(session_text) for the parent-level vector (native
-      last-token pooling, used for cognitive operations, not primary retrieval)
-    - call provider.EmbedLateChunk(session_text, turns) for per-turn vectors
-      (single HTTP round-trip to the embedding server)
-    - INSERT parent mneme (mnemes table) with parent concept, parent content
-      (= session_text), parent embedding, metadata columns
-    - INSERT one sub_mneme row per returned embedding:
+    - Build the parent content and concept using existing Chapterhouse
+      logic (concept derivation, metadata). session_text becomes the
+      parent's `content` column.
+    - Call provider.Embed(session_text) for the parent embedding.
+    - Call provider.Embed([turn0.content, turn1.content, ...]) ONCE for
+      all turn embeddings in one HTTP round-trip. Each turn is encoded
+      in isolation (no cross-turn attention); the endpoint does batched
+      native sentence-level encoding.
+    - INSERT parent mneme (mnemes table) with concept, content,
+      embedding, metadata, session_id, tags, etc.
+    - INSERT one sub_mneme row per turn:
         mneme_id = parent mneme id
-        position = turn index
+        position = turn index (0-indexed)
         role = turn.role
-        content = session_text[turn.char_start : turn.char_end]
-        embedding = the late-chunked vector from EmbedLateChunk
-        token_start, token_end = response fields from the server
+        content = turn.content (exact original text)
+        embedding = the isolated per-turn vector
+        token_start = turn.char_start
+        token_end = turn.char_end
+      NOTE: token_start/token_end in the sub_mneme schema hold CHARACTER
+      offsets, not token offsets. The column names are preserved from the
+      Phase 1 schema to avoid another migration; the semantics are
+      "character span into parent session_text". Document this in the
+      Chapterhouse code comments.
     - COMMIT transaction (atomic: parent + all sub_mnemes land together)
-    - enqueue parent for gating worker and contradiction worker
+    - Enqueue parent mneme for gating worker and contradiction worker
       (existing behavior)
-    - return parent mneme id
+    - Return parent mneme id
 
   DONE_WHEN:
-    - parent mneme and all sub_mnemes exist after commit
+    - Parent mneme and all sub_mnemes exist after commit
     - count(sub_mnemes WHERE mneme_id = parent) == len(turns)
-    - parent content == session_text (exact)
-    - sub_mneme contents reconstruct the session (with role markers) without
-      loss
-    - parent enqueued in gating_queue and contradiction_queue
-    - atomic: if any sub_mneme insert fails, the parent insert rolls back
+    - Parent content == session_text (exact)
+    - For each sub_mneme i: session_text[s.token_start:s.token_end] == s.content
+    - Parent enqueued in gating_queue and contradiction_queue
+    - Atomic: if any sub_mneme insert fails, the parent insert rolls back
+    - Ingest latency: within 2x of the existing single-mneme remember path
+      (two HTTP calls instead of one; ingest is a write-path operation so
+      this latency is acceptable)
 
   EXAMPLES:
-    -- happy path
-    remember_with_turns(ws, "8-turn K8s debugging session", turns=[...])
+    -- happy path: 8-turn K8s debugging session
+    RememberWithTurns(ctx, ws, sessionText, turns[:8], metadata)
       -> returns parent uuid; sub_mnemes count == 8
+      -- two HTTP calls to embed_server (1 parent + 1 batch of 8 turns)
 
     -- single-turn session
-    remember_with_turns(ws, "short fact", turns=[one_turn])
+    RememberWithTurns(ctx, ws, "short fact", turns[:1], metadata)
       -> returns parent uuid; sub_mnemes count == 1
 
+    -- long session (>32K tokens in parent)
+    -- The parent embedding call truncates at Qwen3-Embedding's 32K max_seq_length.
+    -- Individual turns are typically much shorter and encode without truncation.
+    -- The parent embedding becoming truncated is acceptable because the parent
+    -- embedding is for cognitive operations, not primary retrieval; sub_mnemes
+    -- carry the retrievable content.
+
     -- transaction rollback
-    -- simulated failure mid-insert
-    remember_with_turns(ws, "session", turns=[bad])
-      -> BEGIN rolled back; neither parent nor sub_mnemes exist
+    -- simulated DB failure mid-insert
+    RememberWithTurns(ctx, ws, sessionText, turns, metadata) -> error
+      -- BEGIN rolled back; neither parent nor sub_mnemes exist
 
   ERRORS:
-    - turns list empty -> ValueError("session must have >= 1 turn")
-    - turn char spans don't cover session_text fully (gaps or overlaps) ->
-      ValueError with the gap/overlap location
+    - turns list empty -> return error "session must have >= 1 turn"
+    - turn reconstruction mismatch (concat of turn.content != session_text)
+      -> return error with the position where divergence starts
+    - embedding server returns non-1024d vectors -> return error
+    - len(turn embeddings) != len(turns) -> return error (server bug)
     - embedding dim != configured pg_ghola dim -> Postgres error surfaced
-    - DB transaction failure -> rollback, re-raise
+    - DB transaction failure -> rollback, return wrapped error
 
   NOT_ALLOWED:
     - insert sub_mnemes without a parent mneme
-    - insert sub_mnemes encoded independently of session context
+    - make one HTTP call per turn (use batched Embed)
+    - compute embeddings locally in Go
     - leave partial state (parent without sub_mnemes) on error
 
 ### CONSTRAINT: chapterhouse_model_pinning
-  Chapterhouse config fixes:
-    MODEL_NAME="Qwen/Qwen3-Embedding-0.6B"
-    SENTENCE_TRANSFORMERS_VERSION=">=5.4.0,<6.0"
-    TORCH_DTYPE="bfloat16"  # default for Qwen3-Embedding
-    DEVICE="cuda"           # documented; CPU works but is slow
-  These values MUST match what the benchmark harness uses at query time.
-  Cross-engine mismatch (iters 12, 15) produces 4-16pp variance.
+  The embedding server must run Qwen3-Embedding-0.6B via sentence-transformers
+  5.4.0 or later, with normalize_embeddings=True. These values pin the
+  embedding engine for BOTH ingest-time turn encoding AND query-time
+  embedding. Cross-engine mismatch (iters 12, 15 in the samsara history)
+  produces 4-16pp R@5 variance and invalidates all downstream measurements.
 
 ### CONSTRAINT: mcp_turn_structure_preserved
-  The Chapterhouse MCP remember endpoint currently accepts either raw session
-  text or structured turn lists. remember_with_turns REQUIRES structured turns.
-  Callers providing raw text must be updated to pass MCP turn messages or
-  a Chapterhouse-side splitter runs (NOT a text heuristic -- use the actual
-  message boundaries from the MCP protocol).
+  RememberWithTurns REQUIRES structured turn boundaries from the MCP
+  request payload. Do NOT split session text with regex or whitespace
+  heuristics (brittle, locale-dependent, incorrect for multi-line turns).
+  Callers that submit raw session text without turn structure fall back
+  to the existing Remember path (one mneme, no sub_mnemes), which still
+  works correctly via the recall_legacy fallback pathways in pg_ghola.
+
+### CONSTRAINT: isolated_encoding_only
+  Turn embeddings are produced by encoding each turn's content IN
+  ISOLATION via the existing sentence-level endpoint. No late chunking.
+  No cross-turn attention. No session-context awareness. This decision
+  was made on 2026-04-18 after Tier 1 samsara evidence showed no
+  aggregation strategy over isolated+contextual embeddings beats pure
+  mean-pool late chunking, and no fixed encoding strategy captures more
+  than ~11pp of the ~60pp gap to state-of-the-art retrieval systems.
+
+  Revising this decision requires:
+    - Evidence from Tier 1 samsara (encoding-eval harness) showing a
+      candidate strategy beats isolated by >5pp top-1 across the full
+      151-case set AND on a factual-heavy expansion of that set;
+    - A Tier 2 measurement on a LongMemEval subset showing the candidate
+      translates from in-memory cosine ranking to database-roundtrip
+      R@5 without regression;
+    - Explicit documentation updating THIS constraint with the new
+      strategy's trade-offs.
 
 ---
 
@@ -521,37 +402,56 @@ and keeps the Go side's changes minimal (one new Provider method).
     - mean of 3 runs per iteration
     - record per-category breakdown
     - compare to iter 9 baseline (27.5% R@5 overall)
-    - hypothesis: multi-granularity encoding with late chunking achieves
-      >40% R@5 (conservative). Variance budget: >2pp R@5 improvement required.
+    - hypothesis: per-turn granularity (isolated encoding, not session-level)
+      achieves >35% R@5. The gain comes from fine-grained content matching,
+      not from contextual encoding cleverness. Variance budget: >2pp R@5
+      improvement required to be considered significant.
 
   DONE_WHEN:
     - 3 benchmark runs complete with full state reset between each
-    - results written to results/iter16_late_chunking.json
+    - results written to results/iter16_per_turn_encoding.json
     - cross-run variance reported alongside mean
 
   EXAMPLES:
     python run_benchmark.py --iter 16 --runs 3
     -> stdout reports per-run R@5, final mean, variance
-    -> hypothesis tested: multi-granularity improves R@5 by >2pp
+    -> hypothesis tested: per-turn isolated encoding improves R@5 by >2pp
 
   ERRORS:
     - variance > 5pp -> flag for investigation (should be <2pp with pinned DB)
     - R@5 regression vs iter 9 -> flag for investigation, do NOT auto-revert;
-      multi-granularity is a major architectural change, not a tuning knob
+      per-turn granularity is a major architectural change, not a tuning knob
 
 ---
 
 ## Out of Scope (explicitly deferred)
 
+- **Late chunking** and all variants (last-token, mean-pool, sliding window).
+  Tier 1 samsara evidence on 151 cases showed late chunking's best variant
+  wins +9.9pp on conversational-biased data but loses -20pp on self-contained
+  content. Net improvement is capped below the ~11pp oracle ceiling, which
+  is a small fraction of the 60pp gap to state-of-the-art retrieval. The
+  complexity is not justified. Captured in encoding-eval/ repo for future
+  reference.
+- **Store-both architectures**. Tier 1 showed simple MAX and MEAN aggregations
+  over isolated+contextual embeddings LOSE to pure mean-pool. Query-time
+  routing could close the gap but adds classifier complexity below the
+  variance budget.
+- **Adaptive encoding with self-cosine classifier**. Deferred pending
+  evidence that the oracle ceiling is worth chasing on real workloads.
 - Consolidation-as-abstraction-change (re-embed aged mnemes at coarser
-  granularity; represent episodic -> semantic shift)
-- Stella v5 1.5B model upgrade
-- Turn-level Hebbian associations
-- Turn-level cognitive scoring (confidence, ACT-R on sub_mnemes)
-- ColBERT-style late interaction at query time
-- Per-turn concept enrichment
-- Adaptive chunking (attention-pattern-driven chunk boundaries at encoding
-  time; current design uses MCP-provided turn boundaries)
+  granularity; represent episodic -> semantic shift). Still in the roadmap
+  but Phase 3+.
+- Stella v5 1.5B model upgrade. Available on HuggingFace (verified
+  2026-04-14); deferred pending evidence that model quality is a bottleneck
+  after primitives work has been exercised on longitudinal data.
+- Turn-level Hebbian associations and turn-level cognitive scoring. Keep
+  cognitive state on parent mnemes; sub_mnemes are retrieval primitives.
+- ColBERT-style late interaction at query time. Out of scope for the
+  current Postgres + pgvector stack.
+- Per-turn concept enrichment. The iter 13 FTS saturation finding shows
+  the enrichment should stay at the parent level; raw turn content goes
+  into sub_mneme search_vector.
 
 ## Test Matrix
 
@@ -562,11 +462,11 @@ and keeps the Go side's changes minimal (one new Provider method).
 | recall legacy fallback | Rust | mnemes without sub_mnemes still return results |
 | recall turn-specific match | Rust | matched_position is set correctly |
 | recall workspace isolation | Rust | sub_mneme searches scope to workspace |
-| late_chunk_encode short session | Python | single forward pass path |
-| late_chunk_encode long session | Python | sliding window path |
-| late_chunk_encode idempotency | Python | same input -> same output (deterministic) |
-| remember_with_turns atomicity | Python | transaction rollback on mid-insert failure |
-| remember_with_turns count | Python | sub_mnemes count matches turns count |
+| turn batch embedding | Go | Embed([text, text, ...]) returns N 1024d vectors in order |
+| turn reconstruction check | Go | concat of turn contents equals session_text before any DB write |
+| RememberWithTurns atomicity | Go | transaction rollback on mid-insert failure |
+| RememberWithTurns count | Go | sub_mnemes count matches turns count |
+| ingest latency | Go | within 2x of existing single-mneme remember path |
 | cross-engine consistency | Benchmark | query-time model matches ingest-time model |
 | variance budget | Benchmark | <2pp across 3 runs on pinned DB |
 | hypothesis | Benchmark | R@5 improves >2pp vs iter 9 (27.5%) |

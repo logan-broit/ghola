@@ -1,6 +1,26 @@
 # Multi-Granularity Encoding Design
 
-Simplex v0.5 specification for per-turn encoding with late chunking in pg_ghola.
+Simplex v0.5 specification for per-turn encoding in pg_ghola.
+
+---
+
+**STATUS: Late-chunking direction superseded 2026-04-18. The implementation
+ships isolated per-turn encoding (not late chunking) based on Tier 1
+samsara evidence. This design document preserves the research history --
+why we investigated late chunking, what the encoding probe found, and
+what the Tier 1 harness measured. For the current implementation plan,
+see [multi-granularity-encoding-implementation.md](./2026-04-16-multi-granularity-encoding-implementation.md).**
+
+**Sections below describing late chunking, last-token pooling, and sliding
+windows describe an approach that was evaluated and rejected. The
+sub_mnemes SCHEMA in this document is still correct and matches what Phase
+1 shipped (commit 80e120f). The ENCODING sections are historical.**
+
+**Decision evidence:** encoding-eval commits in the chapterhouse repo:
+`a39fac5`, `cbf71eb`, `4d74450`, `e8c3d80` (spec for the harness that
+produced the evidence).
+
+---
 
 ## Context
 
