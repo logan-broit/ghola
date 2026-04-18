@@ -497,3 +497,92 @@ register_strategy(
         "requires_context": True,
     },
 )
+
+
+# --- Strategy: store-both-max (production-viable selective encoding) ------
+
+def encode_store_both_max(
+    session_text: str,
+    turns: List[Turn],
+    model: SentenceTransformer,
+    context: Optional[Dict[str, Any]] = None,
+) -> torch.Tensor:
+    """Compute BOTH isolated and late-chunk-mean-pool per turn, return a
+    3D tensor of shape (n_turns, 2, dim). The harness takes
+    max(cos(query, iso), cos(query, ctx)) per turn, simulating a production
+    deployment that stores two embeddings per sub_mneme and queries both
+    HNSW indexes at recall time.
+
+    Unlike the oracle, this requires no label: the query itself picks the
+    better representation implicitly via cosine. Self-contained turns
+    benefit from the isolated side; context-dependent turns from the
+    contextual side; the same turn can surface through either side
+    depending on what the query asks.
+
+    Upper bound of this strategy can EXCEED the label-oracle because
+    selection is per (turn, query) pair rather than per turn.
+    """
+    iso = encode_isolated(session_text, turns, model, context)
+    try:
+        ctx = encode_late_chunk_mean_pool(session_text, turns, model, context)
+    except NotImplementedError:
+        # Long session the mean-pool variant can't handle; degrade to two
+        # copies of isolated so the harness still produces a result. This
+        # mirrors a hypothetical production fallback.
+        ctx = iso.clone()
+    # Stack along a new dim: (n_turns, 2, dim)
+    return torch.stack([iso, ctx], dim=1)
+
+
+register_strategy(
+    name="store-both-max",
+    encode_fn=encode_store_both_max,
+    model_factory=_default_model_factory,
+    metadata={
+        "purpose": "production-viable selective encoding: two embeddings per turn, max cosine at query",
+        "output_shape": "(n_turns, 2, dim)",
+        "representations": ["isolated", "late-chunk-mean-pool"],
+        "aggregation": "max",
+    },
+)
+
+
+def encode_store_both_mean(
+    session_text: str,
+    turns: List[Turn],
+    model: SentenceTransformer,
+    context: Optional[Dict[str, Any]] = None,
+) -> torch.Tensor:
+    """Same two representations as store-both-max, but the harness averages
+    the two similarities per turn instead of taking max. Less aggressive
+    aggregation: a turn scores high only if BOTH representations think it's
+    relevant. Preserves contextual discrimination better than max.
+
+    Implemented via a rank-3 tensor containing the two representations
+    averaged before the harness computes cosines. For correctness at the
+    cosine level, we return a 2D tensor where each row is the L2-normalized
+    average of the two per-turn vectors; harness computes one cosine per row,
+    which equals 0.5 * (cos(q, iso) + cos(q, ctx)) up to the L2-norm rescale.
+    This is close enough for a sanity-check comparison and lets us reuse
+    the ndim==2 harness path.
+    """
+    iso = encode_isolated(session_text, turns, model, context)
+    try:
+        ctx = encode_late_chunk_mean_pool(session_text, turns, model, context)
+    except NotImplementedError:
+        ctx = iso.clone()
+    avg = iso + ctx
+    # Per-row L2 normalize so downstream dot-product = cosine
+    norms = torch.linalg.norm(avg, dim=1, keepdim=True).clamp(min=1e-12)
+    return avg / norms
+
+
+register_strategy(
+    name="store-both-mean",
+    encode_fn=encode_store_both_mean,
+    model_factory=_default_model_factory,
+    metadata={
+        "purpose": "ensemble of isolated + contextual via L2-normalized sum",
+        "aggregation": "mean",
+    },
+)

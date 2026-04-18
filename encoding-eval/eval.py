@@ -207,8 +207,20 @@ def run_encoding_eval(
         if q.device != turn_embs.device:
             q = q.to(turn_embs.device)
 
-        # Cosine per turn
-        cosines = (turn_embs @ q).tolist()
+        # Cosine per turn. Handle multi-representation strategies:
+        #  ndim == 2 -> shape (n_turns, dim)            : standard
+        #  ndim == 3 -> shape (n_turns, n_reps, dim)    : store-both-style,
+        #                                                 take max over reps
+        if turn_embs.ndim == 2:
+            cosines = (turn_embs @ q).tolist()
+        elif turn_embs.ndim == 3:
+            per_rep = turn_embs @ q  # (n_turns, n_reps)
+            cosines = per_rep.max(dim=1).values.tolist()
+        else:
+            raise RuntimeError(
+                f"strategy '{strategy.name}' returned tensor with ndim="
+                f"{turn_embs.ndim} (expected 2 or 3) on case '{case.id}'"
+            )
         ranked = sorted(
             range(len(case.turns)),
             key=lambda i: cosines[i],
