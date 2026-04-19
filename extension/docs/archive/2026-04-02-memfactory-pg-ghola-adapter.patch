@@ -1,0 +1,259 @@
+commit 437243ba9d2a62040bd7f440d80f0d0df6e5b13e
+Author: Logan Broit <logan.broit@gmail.com>
+Date:   Thu Apr 2 16:51:41 2026 -0700
+
+    feat: pg_ghola storage adapter for MemFactory
+    
+    Replaces Milvus + Neo4j with pg_ghola (PostgreSQL + pgvector).
+    Uses Chapterhouse MCP API for cognitive recall with ACT-R,
+    Hebbian, Bayesian, and Ebbinghaus scoring.
+    Supports mock mode for RL training.
+
+diff --git a/memfactory/stores/__init__.py b/memfactory/stores/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/memfactory/stores/pg_ghola.py b/memfactory/stores/pg_ghola.py
+new file mode 100644
+index 0000000..3315c32
+--- /dev/null
++++ b/memfactory/stores/pg_ghola.py
+@@ -0,0 +1,239 @@
++"""
++pg_ghola storage backend for MemFactory.
++
++Replaces Milvus + Neo4j with a single PostgreSQL database running
++the pg_ghola extension (cognitive memory primitives).
++
++Uses the Chapterhouse MCP API for memory operations, which handles
++embedding generation (Qwen3-Embedding) and cognitive scoring (ACT-R,
++Hebbian, Bayesian, Ebbinghaus).
++"""
++
++import json
++import os
++import subprocess
++from dataclasses import dataclass, field
++from typing import Any, Dict, List, Optional, Tuple
++
++import requests
++
++from ..envs.memory_bank_utils import MemoryItem, generate_id
++
++
++@dataclass
++class PgGholaConfig:
++    """Configuration for the pg_ghola storage backend."""
++    chapterhouse_url: str = "https://chapterhouse.thesgc.internal/mcp/stateless"
++    api_key: str = ""
++    workspace_id: str = ""
++    use_cognitive_scoring: bool = True  # Use full recall pipeline vs naive vector
++    confirm_on_retrieve: bool = True  # Auto-confirm retrieved memories
++    feedback_threshold: float = 0.3  # Min score for auto-confirmation
++
++
++class PgGholaStore:
++    """
++    MemFactory-compatible storage backend backed by pg_ghola.
++    
++    Provides the same interface as MemFactory's Milvus/Neo4j stores
++    but uses pg_ghola's cognitive recall pipeline instead of plain
++    vector similarity.
++    
++    Key difference: retrieval here is COGNITIVE, not just cosine.
++    Results are ranked by:
++    - Vector similarity (Qwen3-Embedding, 1024d)
++    - Full-text search (BM25)
++    - Temporal activation (ACT-R)
++    - Association strength (Hebbian)
++    - Confidence (Bayesian, updated by feedback)
++    """
++    
++    def __init__(self, config: Optional[PgGholaConfig] = None):
++        self.config = config or PgGholaConfig()
++        if not self.config.api_key:
++            self.config.api_key = self._load_api_key()
++        self._session = requests.Session()
++        self._session.headers.update({
++            "Content-Type": "application/json",
++            "Authorization": f"Bearer {self.config.api_key}",
++        })
++        self._session.verify = False  # Internal TLS
++        
++        # Mock mode for RL training (in-memory, no DB)
++        self.use_mock = False
++        self._mock_memories: List[MemoryItem] = []
++    
++    def _load_api_key(self) -> str:
++        """Load API key from secrets file."""
++        for path in [
++            os.path.expanduser("~/.openclaw/secrets.json"),
++            os.path.expanduser("~/.openclaw/workspace/.openclaw/secrets.json"),
++        ]:
++            try:
++                with open(path) as f:
++                    return json.load(f)["values"]["chapterhouse/apiKey"]
++            except (FileNotFoundError, KeyError):
++                continue
++        raise ValueError("Chapterhouse API key not found")
++    
++    def _mcp_call(self, tool: str, arguments: dict) -> str:
++        """Call a Chapterhouse MCP tool."""
++        payload = {
++            "jsonrpc": "2.0",
++            "method": "tools/call",
++            "params": {"name": tool, "arguments": arguments},
++            "id": 1,
++        }
++        resp = self._session.post(self.config.chapterhouse_url, json=payload, timeout=30)
++        result = resp.json()
++        return result["result"]["content"][0]["text"]
++    
++    # -------------------------------------------------------------------------
++    # MemFactory-compatible interface
++    # -------------------------------------------------------------------------
++    
++    def save(self, item: MemoryItem) -> str:
++        """Store a memory. Returns the memory ID."""
++        if self.use_mock:
++            self._mock_memories.append(item)
++            return item.id
++        
++        text = f"{item.key}: {item.value}" if item.key else item.value
++        mem_type = getattr(item, "memory_type", "factual")
++        if mem_type not in ("factual", "experiential", "working"):
++            mem_type = "factual"
++        
++        result = self._mcp_call("remember", {
++            "fact": text,
++            "type": mem_type,
++            "tags": getattr(item, "tags", []),
++        })
++        
++        # Parse ID from response
++        if "id=" in result:
++            return result.split("id=")[1].split(")")[0]
++        return item.id
++    
++    def search_similar(self, query: str, top_k: int = 5) -> List[Tuple[MemoryItem, float]]:
++        """
++        Search for similar memories.
++        
++        Unlike naive vector stores, this uses pg_ghola's full cognitive
++        recall pipeline: vector similarity + FTS + ACT-R + Hebbian + Bayesian.
++        """
++        if self.use_mock:
++            # Simple keyword matching for mock mode
++            results = []
++            query_terms = set(query.lower().split())
++            for mem in self._mock_memories:
++                text = f"{mem.key} {mem.value}".lower()
++                overlap = len(query_terms & set(text.split()))
++                if overlap > 0:
++                    score = overlap / max(len(query_terms), 1)
++                    results.append((mem, score))
++            results.sort(key=lambda x: -x[1])
++            return results[:top_k]
++        
++        result = self._mcp_call("recall", {
++            "query": query,
++            "limit": top_k,
++        })
++        
++        return self._parse_recall_results(result)
++    
++    def delete(self, memory_id: str) -> bool:
++        """Delete a memory by ID."""
++        if self.use_mock:
++            self._mock_memories = [m for m in self._mock_memories if m.id != memory_id]
++            return True
++        
++        try:
++            self._mcp_call("forget", {"fact_id": memory_id})
++            return True
++        except Exception:
++            return False
++    
++    def feedback(self, memory_id: str, rating: str) -> Optional[float]:
++        """
++        Provide explicit feedback on a memory.
++        
++        Args:
++            memory_id: UUID of the memory
++            rating: "positive", "negative", or "wrong"
++            
++        Returns:
++            New confidence value, or None on error.
++        """
++        if self.use_mock:
++            return None
++        
++        try:
++            result = self._mcp_call("feedback", {
++                "memory_id": memory_id,
++                "rating": rating,
++            })
++            # Parse confidence from response
++            if "confidence:" in result:
++                return float(result.split("confidence:")[1].strip())
++        except Exception:
++            pass
++        return None
++    
++    def from_list(self, memories: List[dict]) -> None:
++        """Load memories from a list (for mock/training mode)."""
++        self.use_mock = True
++        self._mock_memories = []
++        for m in memories:
++            if isinstance(m, dict):
++                item = MemoryItem(
++                    id=m.get("id", generate_id()),
++                    key=m.get("key", ""),
++                    value=m.get("value", ""),
++                    memory_type=m.get("memory_type", "factual"),
++                    tags=m.get("tags", []),
++                )
++                self._mock_memories.append(item)
++            elif isinstance(m, MemoryItem):
++                self._mock_memories.append(m)
++    
++    def get_all(self) -> List[MemoryItem]:
++        """Return all memories."""
++        if self.use_mock:
++            return list(self._mock_memories)
++        
++        result = self._mcp_call("list_memories", {"limit": 1000})
++        return self._parse_list_results(result)
++    
++    # -------------------------------------------------------------------------
++    # Parsing helpers
++    # -------------------------------------------------------------------------
++    
++    def _parse_recall_results(self, text: str) -> List[Tuple[MemoryItem, float]]:
++        """Parse Chapterhouse recall output into (MemoryItem, score) pairs."""
++        import re
++        results = []
++        pattern = r'\[([a-f0-9-]+)\] \[(\w+)\] \(score=([\d.]+)\) (.+?)(?=\n\[|$)'
++        for match in re.finditer(pattern, text, re.DOTALL):
++            item = MemoryItem(
++                id=match.group(1),
++                key="",
++                value=match.group(4).strip(),
++                memory_type="factual",
++            )
++            score = float(match.group(3))
++            results.append((item, score))
++        return results
++    
++    def _parse_list_results(self, text: str) -> List[MemoryItem]:
++        """Parse Chapterhouse list_memories output."""
++        import re
++        results = []
++        pattern = r'\[([a-f0-9-]+)\] \[(\w+)\] \[(\w+)\] (.+?)(?=\n\[|$)'
++        for match in re.finditer(pattern, text, re.DOTALL):
++            results.append(MemoryItem(
++                id=match.group(1),
++                key="",
++                value=match.group(4).strip(),
++                memory_type=match.group(2),
++            ))
++        return results

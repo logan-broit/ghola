@@ -1,0 +1,234 @@
+# Plexus Orchestration Report
+
+| | |
+|---|---|
+| **Spec** | spec |
+| **Branch** | `plex/orch/spec` |
+| **Date** | 2026-03-07 16:07 (45m 48s) |
+| **Coordinator** | Claude · claude-opus-4-6 |
+| **Build agents** | Claude · claude-opus-4-6 |
+| **Concurrency** | 3 |
+
+---
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Agents | 7 |
+| Passed | 7 |
+| Files changed | 13 |
+| Lines added | +26925 |
+
+---
+
+## Merge Order
+
+```
+1. bootstrap_extension_skeleton  (no deps)
+2. define_composite_types  (depends on: bootstrap_extension_skeleton)
+3. implement_scoring_primitives  (depends on: bootstrap_extension_skeleton)
+4. create_extension_schema  (depends on: bootstrap_extension_skeleton)
+5. implement_hebbian_helpers  (depends on: implement_scoring_primitives, create_extension_schema)
+6. implement_composite_recall  (depends on: define_composite_types, implement_scoring_primitives, create_extension_schema, implement_hebbian_helpers)
+7. integrate_and_package  (depends on: define_composite_types, implement_scoring_primitives, create_extension_schema, implement_hebbian_helpers, implement_composite_recall)
+```
+
+---
+
+## Per-Agent Detail
+
+### bootstrap_extension_skeleton
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 13m 36s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (11):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +63 |
+| `src/lib.rs` | +28 |
+| `src/recall.rs` | +25 |
+| `src/schema.rs` | +19 |
+| `src/scoring.rs` | +129 |
+| `src/types.rs` | +39 |
+
+---
+
+### define_composite_types
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 5m 20s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (11):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +63 |
+| `src/lib.rs` | +28 |
+| `src/recall.rs` | +25 |
+| `src/schema.rs` | +19 |
+| `src/scoring.rs` | +129 |
+| `src/types.rs` | +304 |
+
+---
+
+### implement_scoring_primitives
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 5m 36s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (11):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +63 |
+| `src/lib.rs` | +28 |
+| `src/recall.rs` | +25 |
+| `src/schema.rs` | +19 |
+| `src/scoring.rs` | +489 |
+| `src/types.rs` | +39 |
+
+---
+
+### create_extension_schema
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 4m 47s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (11):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +63 |
+| `src/lib.rs` | +28 |
+| `src/recall.rs` | +25 |
+| `src/schema.rs` | +284 |
+| `src/scoring.rs` | +129 |
+| `src/types.rs` | +39 |
+
+---
+
+### implement_hebbian_helpers
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 10m 10s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (11):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +818 |
+| `src/lib.rs` | +28 |
+| `src/recall.rs` | +25 |
+| `src/schema.rs` | +284 |
+| `src/scoring.rs` | +489 |
+| `src/types.rs` | +304 |
+
+---
+
+### implement_composite_recall
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 9m 34s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (11):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +818 |
+| `src/lib.rs` | +28 |
+| `src/recall.rs` | +738 |
+| `src/schema.rs` | +284 |
+| `src/scoring.rs` | +489 |
+| `src/types.rs` | +304 |
+
+---
+
+### integrate_and_package
+
+| | |
+|---|---|
+| **Status** | Passed |
+| **Duration** | 6m 49s |
+| **Attempts** | 1 |
+| **Merge** | Clean |
+
+**Files changed (13):**
+
+| File | +/- |
+|------|-----|
+| `.cargo/config.toml` | +2 |
+| `Cargo.lock` | +2345 |
+| `Cargo.toml` | +31 |
+| `README.md` | +247 |
+| `pg_ghola.control` | +7 |
+| `src/bin/pgrx_embed_pg_ghola.rs` | +4 |
+| `src/hebbian.rs` | +818 |
+| `src/integration_tests.rs` | +580 |
+| `src/lib.rs` | +31 |
+| `src/recall.rs` | +738 |
+| `src/schema.rs` | +284 |
+| `src/scoring.rs` | +489 |
+| `src/types.rs` | +304 |
+
+---
+
+---
+
+*Generated by Plexus on 2026-03-07T16:53:20-08:00*

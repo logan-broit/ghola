@@ -1,0 +1,514 @@
+# pg_ghola: Cognitive Memory Primitives for Postgres
+
+A Postgres extension that implements neuroscience-inspired memory primitives —
+ACT-R activation, Hebbian association learning, Bayesian confidence, and
+Ebbinghaus decay — as composable SQL functions over pgvector-enabled tables.
+
+Memories decay with time, strengthen through use, form associations
+automatically through co-activation, and track confidence via Bayesian
+updating. The primary interface is a single recall() function that fuses
+vector similarity, full-text search, temporal relevance, and associative
+context into one ranked result set.
+
+---
+
+CONSTRAINT: rust_extension
+  This extension is built in Rust using pgrx. Not optional. Agents must not
+  choose a different language, PL/pgSQL implementation, or foreign data wrapper
+  approach. The extension compiles to a shared library loaded by Postgres.
+  All SQL-exposed functions are registered via pgrx #[pg_extern] macros.
+
+CONSTRAINT: version_requirements
+  | Dependency | Version    | Notes                              |
+  |------------|------------|------------------------------------|
+  | Rust       | 1.94+      | Stable toolchain                   |
+  | pgrx       | 0.17.x     | With pg18 feature flag              |
+  | PostgreSQL | 18.3+      | Target runtime                     |
+  | pgvector   | 0.8.2+     | Extension control: requires='vector'|
+
+CONSTRAINT: extension_identity
+  Extension is named pg_ghola. All objects live in the pg_ghola schema.
+  Extension version is 0.1.0. The .control file declares
+  requires = 'vector' so pgvector must be installed first.
+
+CONSTRAINT: multi_tenancy
+  All memory-scoped tables include a workspace_id UUID column. The extension
+  does not enforce RLS itself but is designed to work with Postgres RLS
+  policies on workspace_id. Every query-path function accepts workspace_id
+  and filters on it.
+
+CONSTRAINT: v01_scope
+  v0.1 does not include an autonomous background worker, shared_preload_libraries
+  requirement, adaptive polling, or live worker stats. Hebbian processing is
+  driven explicitly through SQL-callable batch functions. The background worker
+  is deferred to v0.2.
+
+CONSTRAINT: file_ownership
+  Each task owns specific files. No task may edit another task's primary owned
+  file unless it is the final integration task. This prevents merge conflicts
+  when tasks execute in parallel. Ownership:
+    - bootstrap: Cargo.toml, pg_ghola.control, src/lib.rs, empty module stubs
+    - types: src/types.rs
+    - scoring: src/scoring.rs
+    - schema: sql/pg_ghola--0.1.0.sql
+    - hebbian: src/hebbian.rs
+    - recall: src/recall.rs
+    - integration: final edits to src/lib.rs, end-to-end tests, README
+
+CONSTRAINT: schema_via_pgrx
+  Tables and indexes are defined using pgrx extension_sql! or
+  extension_sql_file! macros in Rust, not a hand-written SQL install script
+  separate from the crate. The sql/pg_ghola--0.1.0.sql file is generated
+  by cargo pgrx schema. Agents must not write raw SQL that bypasses pgrx
+  registration.
+
+---
+
+DATA: recall_result
+  mneme_id:      uuid
+  score:         float, final composite score
+  content_match: float, vector + FTS fusion component
+  activation:    float, ACT-R base-level activation
+  hebbian_boost: float, association weight sum from co-candidates
+  confidence:    float, current Bayesian confidence
+  concept:       text
+  content:       text
+
+DATA: score_weights
+  semantic:      float, default 0.6, weight for vector cosine similarity
+  fts:           float, default 0.4, weight for full-text search rank
+  actr_decay:    float, default 0.5, ACT-R power-law decay exponent (d parameter)
+  hebbian_scale: float, default 4.0, multiplier for Hebbian boost in activation
+
+---
+
+FUNCTION: bootstrap_extension_skeleton() -> compiling pgrx project
+
+  The foundation that all other work builds on. Produces a pgrx project
+  that compiles, boots Postgres, and accepts CREATE EXTENSION pg_ghola.
+
+  RULES:
+    - Extension named pg_ghola in the pg_ghola schema
+    - pgrx project configured with pg18 feature flag and pgvector dependency
+    - All source modules exist as stubs with placeholder public signatures
+    - recall_result and score_weights composite types have stub definitions
+    - All scoring, recall, and hebbian function signatures are stubbed
+    - Project compiles and boots with cargo pgrx run
+    - CREATE EXTENSION pg_ghola succeeds on the booted instance
+    - Running bootstrap on a workspace with partial files overwrites stubs
+      cleanly without leaving orphaned artifacts
+
+  DONE_WHEN:
+    - cargo pgrx run boots Postgres with the extension loadable
+    - CREATE EXTENSION pg_ghola creates the pg_ghola schema without errors
+    - All downstream module files exist in the source tree as compilable stubs
+
+  EXAMPLES:
+    greenfield workspace with no existing files
+      -> compiling pgrx project, cargo pgrx run boots cleanly,
+         CREATE EXTENSION pg_ghola succeeds
+
+    workspace with partial or stale files from a previous attempt
+      -> stubs are overwritten, project compiles cleanly, no orphaned files
+
+    CREATE EXTENSION pg_ghola on booted instance
+      -> pg_ghola schema exists, stub functions visible, no errors
+
+  ERRORS:
+    - cargo pgrx run fails -> resolve compilation errors before any downstream work
+    - CREATE EXTENSION fails -> extension control file or SQL wiring is malformed
+
+  WRITES:
+    - project skeleton: Cargo.toml, control file, source modules, test stubs
+
+---
+
+FUNCTION: define_composite_types() -> SQL-visible composite types
+
+  Define the two composite types used by recall and scoring functions.
+
+  RULES:
+    - recall_result type registered in pg_ghola schema with all fields from DATA
+    - score_weights type registered in pg_ghola schema with all fields from DATA
+    - Both types are usable in SQL: castable, selectable, returnable from functions
+    - Types are importable by other Rust modules in the same crate
+
+  DONE_WHEN:
+    - Casting a valid literal to pg_ghola.recall_result succeeds in SQL
+    - Casting a valid literal to pg_ghola.score_weights succeeds in SQL
+    - Downstream Rust modules can reference the type definitions
+
+  EXAMPLES:
+    SELECT (gen_random_uuid(), 0.9, 0.8, 2.1, 0.3, 0.7, 'k8s', 'pod scheduling')::pg_ghola.recall_result
+      -> valid composite value, all fields accessible
+    SELECT (0.7, 0.3, 0.5, 4.0)::pg_ghola.score_weights
+      -> valid composite value with custom weights
+    SELECT r.score, r.concept FROM unnest(ARRAY[...]) AS r(pg_ghola.recall_result)
+      -> fields individually selectable from composite
+
+  ERRORS:
+    - Type not found in pg_ghola schema -> pgrx registration is incorrect
+    - Field count mismatch on cast -> type definition does not match DATA spec
+
+  READS:
+    - project skeleton from bootstrap
+
+  WRITES:
+    - types module with recall_result and score_weights definitions
+
+---
+
+FUNCTION: implement_scoring_primitives() -> four SQL-callable scoring functions
+
+  Implement the pure cognitive scoring functions. These are stateless
+  computations with no side effects, callable independently by users who
+  want to compose custom retrieval pipelines.
+
+  RULES:
+    - softplus(x float) returns ln(1 + exp(x))
+    - softplus returns x directly when x > 20 to prevent exp overflow
+    - actr_activation(access_count int, last_access timestamptz) returns
+      base-level activation: B = ln(n+1) - d * ln(max(age_days, 1/1440) / (n+1))
+      where n = access_count + 1, d = 0.5, age_days = days since last_access,
+      and 1/1440 is the one-minute age floor
+    - actr_activation clamps age_days to at least 1/1440 (one minute) to
+      prevent division by zero for very recent accesses
+    - ebbinghaus_decay(last_access timestamptz, access_count int, created_at timestamptz)
+      returns retention factor with spacing-aware stability:
+      stability = clamp(ln(n+1)*20 * (1 + 0.5*tanh(avg_spacing/7)), 14, 365),
+      retention = max(0.05, exp(-days_since / stability)),
+      where avg_spacing = lifespan_days / max(access_count, 1)
+    - bayesian_update(prior float, evidence float) returns posterior with
+      Laplace smoothing: result = 0.95 * (prior*ev / max(prior*ev + (1-prior)*(1-ev), 1e-9)) + 0.025
+    - bayesian_update result is always in [0.025, 0.975], never reaching 0 or 1
+    - All four functions are immutable and parallel_safe in the pg_ghola schema
+
+  DONE_WHEN:
+    - All four functions callable from SQL in the pg_ghola schema
+    - Reference values match within reasonable floating-point tolerance
+    - Functions marked immutable and parallel_safe
+
+  EXAMPLES:
+    softplus(0.0)   -> ~0.6931 (ln(2), normal case)
+    softplus(2.0)   -> ~2.1269 (normal case)
+    softplus(-5.0)  -> ~0.0067 (negative input, near-zero output)
+    softplus(25.0)  -> 25.0    (overflow guard, x > 20)
+
+    actr_activation(13, now() - interval '10 days')
+      -> ~2.08 (frequently accessed, moderate age: high activation)
+    actr_activation(0, now() - interval '1400 days')
+      -> ~-3.27 (never re-accessed, very old: low activation)
+    actr_activation(5, now() - interval '10 seconds')
+      -> age clamped to 1/1440 days (one-minute floor), high activation from recency
+
+    ebbinghaus_decay(now()-'30 days', 50, now()-'180 days')
+      -> ~0.78 (50 accesses spaced over 6 months: high stability, slow decay)
+    ebbinghaus_decay(now()-'30 days', 50, now()-'1 day')
+      -> ~0.12 (50 accesses crammed in 1 day: low stability, fast decay)
+
+    bayesian_update(0.5, 0.95)  -> ~0.925 (neutral prior + strong confirmation)
+    bayesian_update(0.8, 0.10)  -> ~0.32  (confident prior + contradiction)
+    bayesian_update(0.32, 0.10) -> ~0.078 (chained contradiction, confidence collapses)
+
+  ERRORS:
+    - any unhandled condition -> fail with descriptive message
+
+  READS:
+    - project skeleton from bootstrap
+
+  WRITES:
+    - scoring module with all four function implementations
+
+---
+
+FUNCTION: create_extension_schema() -> tables, indexes, constraints
+
+  Define the schema objects that CREATE EXTENSION pg_ghola produces. Tables,
+  indexes, and constraints are declared via pgrx extension_sql! or
+  extension_sql_file! macros so they are registered in the extension's
+  generated install script.
+
+  RULES:
+    - mnemes table: id (uuid PK), workspace_id (uuid NOT NULL),
+      concept (text NOT NULL), content (text NOT NULL),
+      embedding (vector(384) NOT NULL), search_vector (generated tsvector from
+      setweight(to_tsvector('english', concept), 'A') ||
+      setweight(to_tsvector('english', content), 'B')),
+      confidence (float default 0.5), access_count (int default 0),
+      last_access (timestamptz default now()), created_at (timestamptz default now()),
+      state (text default 'active', CHECK in active/archived/dormant)
+    - associations table: src_id and dst_id (uuid FK to mnemes, composite PK),
+      weight (float default 0.01), co_activations (int default 0),
+      updated_at (timestamptz default now()), CHECK (src_id < dst_id)
+    - co_activation_queue table: id (bigserial PK), workspace_id (uuid NOT NULL),
+      mneme_ids (uuid[] NOT NULL), scores (float[] NOT NULL),
+      created_at (timestamptz default now())
+    - HNSW index on mnemes(embedding) with vector_cosine_ops
+    - GIN index on mnemes(search_vector)
+    - B-tree index on mnemes(workspace_id, last_access DESC)
+    - B-tree index on associations(dst_id, src_id)
+    - Embedding dimension hardcoded to 384 for v0.1
+
+  DONE_WHEN:
+    - All three tables exist in pg_ghola schema after CREATE EXTENSION
+    - CHECK constraint on associations rejects src_id >= dst_id
+    - CHECK constraint on mnemes.state rejects values outside active/archived/dormant
+    - search_vector auto-populates when concept or content is inserted or updated
+    - All four indexes are present
+
+  EXAMPLES:
+    CREATE EXTENSION pg_ghola (pgvector already installed)
+      -> all three tables visible in pg_ghola schema
+    INSERT INTO pg_ghola.mnemes with concept='k8s' and content='pod scheduling'
+      -> search_vector column auto-populated with weighted tsvector
+    INSERT INTO pg_ghola.associations with src_id >= dst_id
+      -> CHECK violation error, rejected
+    INSERT INTO pg_ghola.mnemes with state='invalid'
+      -> CHECK violation error, rejected
+    INSERT INTO pg_ghola.mnemes with state='dormant'
+      -> succeeds, valid state value
+
+  ERRORS:
+    - pgvector extension not installed -> CREATE EXTENSION fails with dependency error
+    - any unhandled condition -> fail with descriptive message
+
+  READS:
+    - project skeleton from bootstrap
+
+  WRITES:
+    - schema SQL via pgrx extension_sql! macros in the schema module
+
+---
+
+FUNCTION: implement_hebbian_helpers() -> six SQL-callable Hebbian and confidence functions
+
+  Implement the functions that drive Hebbian learning and confidence tracking.
+  These allow operators to process co-activation events explicitly from SQL,
+  pg_cron, or external schedulers without requiring an autonomous background worker.
+
+  RULES:
+    - record_co_activation(workspace_id uuid, mneme_ids uuid[], scores float[])
+      inserts one row into co_activation_queue
+    - record_co_activation rejects calls where mneme_ids and scores arrays
+      have different lengths
+    - get_associations(mneme_id uuid, min_weight float DEFAULT 0.01) returns
+      all associations for the mneme from both directions (where mneme is src
+      or dst), with the other ID as related_id and the weight, ordered by
+      weight descending
+    - get_associations returns empty result set when no associations exist
+      above the weight threshold
+    - update_confidence(mneme_id uuid, evidence float) atomically reads the
+      mneme's current confidence, applies bayesian_update, writes back, and
+      returns the new confidence
+    - confirm_recall(mneme_ids uuid[]) applies evidence=0.95 to every
+      provided mneme ID via update_confidence
+    - process_co_activation_batch(batch_limit int DEFAULT 100) consumes up to
+      batch_limit rows from co_activation_queue in a single transaction
+    - Batch processing generates all canonical (i,j) pairs where i < j from
+      each event's mneme_ids array
+    - Batch processing aggregates pair signals across all events in the batch
+      as sum(score_i * score_j) for each unique pair
+    - Batch processing upserts associations with log-space weight update:
+      new_weight = min(1.0, exp(ln(current_weight) + signal * ln(1.01)))
+    - New associations not yet in the table are seeded at weight 0.01
+      before the log-space reinforcement is applied
+    - Batch processing updates mnemes.access_count += 1 and
+      mnemes.last_access = now() for all mneme IDs referenced in the batch
+    - Batch processing deletes consumed queue rows after successful processing
+    - process_co_activation_batch returns the number of queue rows processed,
+      or 0 when the queue is empty
+    - process_all_pending_co_activations() repeatedly calls batch processing
+      until the queue is drained and returns total rows processed
+
+  DONE_WHEN:
+    - All six functions callable from SQL in the pg_ghola schema
+    - Co-activation events flow from queue to association weight updates
+    - Access tracking (access_count, last_access) updates on batch processing
+    - Queue rows are deleted after successful processing
+
+  EXAMPLES:
+    record_co_activation('ws1', ARRAY['a','b','c']::uuid[], ARRAY[0.9,0.7,0.5])
+      -> one row inserted into co_activation_queue
+    record_co_activation('ws1', ARRAY['a','b']::uuid[], ARRAY[0.9]::float[])
+      -> error: array length mismatch
+
+    get_associations('mneme-1', 0.01) where mneme-1 has associations as both src and dst
+      -> unified result set from both directions, ordered by weight desc
+    get_associations('mneme-1', 0.01) where mneme-1 has no associations
+      -> empty result set
+    get_associations('mneme-1', 0.5) where all associations have weight < 0.5
+      -> empty result set (filtered by min_weight)
+
+    update_confidence('mneme-1', 0.95) where current confidence is 0.5
+      -> returns ~0.925, mneme's confidence column now ~0.925
+    update_confidence('mneme-1', 0.10) where current confidence is 0.8
+      -> returns ~0.32, confidence decreased by contradiction
+
+    confirm_recall(ARRAY['m1','m2','m3']::uuid[])
+      -> all three mnemes have confidence updated with evidence=0.95
+
+    process_co_activation_batch(100) with 3 pending queue rows
+      -> returns 3, associations upserted for all pairs, access_count incremented,
+         last_access updated, consumed queue rows deleted
+    process_co_activation_batch(100) with empty queue
+      -> returns 0, no side effects
+    process_co_activation_batch(100) with co-activation containing new pair
+      -> new association row created with weight seeded at 0.01 then reinforced
+    process_co_activation_batch(100) with co-activation for existing association
+      -> existing weight updated via log-space reinforcement, weight increases
+
+    process_all_pending_co_activations() with 250 pending rows
+      -> returns 250, queue fully drained across multiple batch cycles
+
+  ERRORS:
+    - mneme_ids and scores arrays have different lengths -> fail with descriptive message
+    - mneme_id not found in mnemes table -> fail with descriptive message
+    - batch transaction fails -> queue rows remain for retry on next call
+    - any unhandled condition -> fail with descriptive message
+
+  READS:
+    - scoring module (uses bayesian_update for confidence operations)
+    - schema (operates on mnemes, associations, co_activation_queue tables)
+
+  WRITES:
+    - hebbian module with all six function implementations
+
+---
+
+FUNCTION: implement_composite_recall() -> SQL-callable recall function
+
+  The primary retrieval entry point. Fuses vector similarity, full-text search,
+  ACT-R temporal activation, Hebbian association strength, and Bayesian
+  confidence into a single ranked result set.
+
+  The SQL signature is:
+    pg_ghola.recall(workspace_id uuid, query_text text,
+      query_embedding vector(384), limit_n int DEFAULT 10,
+      min_confidence float DEFAULT 0.0,
+      weights pg_ghola.score_weights DEFAULT NULL)
+    RETURNS SETOF pg_ghola.recall_result
+
+  RULES:
+    - Candidate pool is the union of HNSW nearest neighbors and FTS ts_rank
+      matches, deduplicated, with pool size = 3 * limit_n
+    - content_match = weights.semantic * vector_cosine_similarity +
+      weights.fts * tanh(fts_rank)
+    - Hebbian boost for each candidate is the sum of association weights
+      to any other candidate in the current result set
+    - temporal_weight = softplus(actr_activation_value +
+      weights.hebbian_scale * hebbian_boost) / (1 + softplus(0)),
+      where actr_activation_value is computed using weights.actr_decay as
+      the decay exponent d (instead of the hardcoded 0.5 default)
+    - Composite score = content_match * temporal_weight * confidence
+    - Only mnemes with state='active' and confidence >= min_confidence
+      are included in results
+    - Results filtered by workspace_id
+    - Results ordered by composite score descending, limited to limit_n
+    - After ranking, the top-n mneme IDs and their scores are enqueued
+      as a co-activation event via record_co_activation
+    - recall does NOT update access_count or last_access directly
+    - When weights parameter is NULL, defaults are used:
+      semantic=0.6, fts=0.4, actr_decay=0.5, hebbian_scale=4.0
+
+  DONE_WHEN:
+    - recall() callable from SQL, returns SETOF pg_ghola.recall_result
+    - Ranking reflects all five scoring signals
+    - Co-activation event enqueued after each recall
+    - Workspace and confidence filtering behave correctly
+    - Default weights applied when weights parameter is NULL
+    - Custom actr_decay value changes temporal scoring relative to defaults
+
+  EXAMPLES:
+    recall('ws1', 'kubernetes pod scheduling', embedding, 10, 0.0, NULL)
+      -> up to 10 results ranked by composite score, co-activation event enqueued,
+         default weights used (semantic=0.6, fts=0.4, actr_decay=0.5, hebbian_scale=4.0)
+
+    recall('ws1', 'database migration', embedding, 5, 0.7, NULL)
+      -> only mnemes with confidence >= 0.7 included, others excluded even if
+         semantically similar
+
+    recall('ws1', 'query', embedding, 10, 0.0, (0.8, 0.2, 0.5, 2.0)::pg_ghola.score_weights)
+      -> custom weights applied: heavier semantic, lighter FTS, reduced hebbian scale
+
+    recall('ws1', 'query', embedding, 10, 0.0, (0.6, 0.4, 0.8, 4.0)::pg_ghola.score_weights)
+      -> actr_decay=0.8 causes faster temporal decay than default 0.5,
+         older mnemes score lower relative to recent ones
+
+    recall('ws1', 'nonexistent topic', embedding, 10, 0.0, NULL)
+      where no mnemes match at all
+      -> empty result set, co-activation event still enqueued (with empty arrays)
+
+    recall('ws1', 'topic', embedding, 10, 0.0, NULL)
+      where two returned mnemes have a strong association
+      -> those mnemes receive hebbian_boost > 0, potentially reranked higher
+         than they would be on content_match alone
+
+    recall('ws1', 'topic', embedding, 10, 0.0, NULL)
+      -> co_activation_queue contains a new row with the returned mneme IDs and scores
+
+  ERRORS:
+    - workspace_id is NULL -> fail with descriptive message
+    - query_embedding has wrong dimensions -> fail with descriptive message
+    - any unhandled condition -> fail with descriptive message
+
+  READS:
+    - types module (recall_result, score_weights)
+    - scoring module (actr_activation, softplus)
+    - schema (mnemes, associations tables)
+    - hebbian module (record_co_activation, get_associations)
+
+  WRITES:
+    - recall module with composite recall function implementation
+
+---
+
+FUNCTION: integrate_and_package() -> releasable extension
+
+  Final integration pass. Wire all independently built modules into a
+  coherent, installable extension and verify end-to-end behavior.
+
+  RULES:
+    - CREATE EXTENSION vector followed by CREATE EXTENSION pg_ghola
+      succeeds on a clean database
+    - All SQL-visible functions, types, and tables are accessible after install
+    - End-to-end flow works: insert mnemes with embeddings, call recall(),
+      observe co-activation events queued, process them with
+      process_co_activation_batch(), observe associations formed, call recall()
+      again and observe hebbian_boost values in results
+    - Extension version reported as 0.1.0
+    - No orphaned or conflicting symbol registrations between modules
+
+  DONE_WHEN:
+    - Clean install on fresh Postgres 18.3+ with pgvector 0.8.2+ succeeds
+    - Full recall-learn-recall cycle produces observable association changes
+    - All functions, types, and tables documented in README with usage examples
+    - No compilation warnings from pgrx
+
+  EXAMPLES:
+    Fresh database: CREATE EXTENSION vector; CREATE EXTENSION pg_ghola;
+      -> all pg_ghola schema objects visible, no errors
+
+    Insert 3 mnemes, call recall() with a related query
+      -> ranked results returned with scores, content_match, activation,
+         confidence fields populated
+
+    After recall(), call process_co_activation_batch()
+      -> associations created between co-activated mnemes,
+         get_associations() returns the new links
+
+    Second recall() after associations formed
+      -> hebbian_boost field is non-zero for associated mnemes,
+         demonstrating the learn-from-usage feedback loop
+
+  ERRORS:
+    - pgvector not installed -> CREATE EXTENSION pg_ghola fails with clear dependency message
+    - Rust function signature does not match SQL expectation -> compilation error
+    - any unhandled condition -> fail with descriptive message
+
+  READS:
+    - all modules: types, scoring, schema, hebbian, recall
+
+  WRITES:
+    - final lib.rs wiring
+    - README with installation and usage documentation
+    - end-to-end integration tests

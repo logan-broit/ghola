@@ -1,0 +1,157 @@
+{
+  "version": "1.0",
+  "description": "pg_ghola cognitive memory benchmark queries",
+  "queries": [
+    {
+      "id": "infra-dns-recovery",
+      "category": "troubleshooting",
+      "query": "DNS is broken in the cluster again, pods can't resolve external hostnames. What should I check and in what order?",
+      "expected_knowledge": [
+        "CoreDNS forwards to Tailscale MagicDNS (100.100.100.100)",
+        "Restarting tailscaled fixes the upstream resolver",
+        "CoreDNS needs a rollout restart after tailscaled recovers",
+        "Internal cluster DNS keeps working when external breaks"
+      ],
+      "reasoning_required": "Must sequence the recovery steps correctly based on prior experience"
+    },
+    {
+      "id": "infra-prowlarr-fix",
+      "category": "troubleshooting",
+      "query": "Prowlarr indexers are showing as unavailable even though DNS seems fine. Sonarr and Radarr can't find anything. What do I do?",
+      "expected_knowledge": [
+        "Prowlarr DB persists indexer failure state after outages",
+        "Running testall via API clears the circuit breaker",
+        "Sonarr/Radarr won't recover until Prowlarr does"
+      ],
+      "reasoning_required": "Must identify that this is a Prowlarr circuit breaker issue, not a DNS issue"
+    },
+    {
+      "id": "infra-pg-deploy",
+      "category": "troubleshooting",
+      "query": "I've built a new pg_recall image. Walk me through deploying it to the CNPG cluster on the NUC.",
+      "expected_knowledge": [
+        "Image needs to be transferred to NUC and imported via k3s ctr images import",
+        "CNPG cluster manifest is at ~/homelab-k3s/chapterhouse/postgres-cluster.yaml",
+        "imagePullPolicy is Never (local images only)",
+        "Single instance means brief downtime during restart",
+        "May need ALTER EXTENSION UPDATE if schema changed"
+      ],
+      "reasoning_required": "Must compose multiple deployment steps from infrastructure knowledge"
+    },
+    {
+      "id": "config-nuc",
+      "category": "configuration",
+      "query": "What's running on the NUC and how do I connect to it?",
+      "expected_knowledge": [
+        "Intel NUC13, i7-1360P, 64GB RAM",
+        "K3s single-node cluster",
+        "LAN IP 10.7.10.143, Tailscale IP 100.65.145.120",
+        "SSH as logan with ed25519 key",
+        "Namespaces: mediaserver, observability, ch-system, argocd"
+      ],
+      "reasoning_required": "Straightforward factual retrieval, possibly composing from multiple memories"
+    },
+    {
+      "id": "config-media-stack",
+      "category": "configuration",
+      "query": "Give me an overview of the media server setup — what services, how they connect, how to manage them.",
+      "expected_knowledge": [
+        "All services in mediaserver namespace on NUC",
+        "Sonarr, Radarr, Lidarr for acquisition",
+        "Prowlarr for indexer management",
+        "Plex/Jellyfin for playback",
+        "API keys in ~/.openclaw/secrets.json"
+      ],
+      "reasoning_required": "Must compose a coherent overview from factual memories about the stack"
+    },
+    {
+      "id": "config-tailscale",
+      "category": "configuration",
+      "query": "What are the Tailscale IPs for all my devices?",
+      "expected_knowledge": [
+        "cachyos-5600x: 100.109.186.38",
+        "i5nuc00: 100.65.145.120",
+        "iphone-13-pro: 100.93.195.49",
+        "ipad-pro-11-gen-1: 100.76.71.15"
+      ],
+      "reasoning_required": "Direct factual retrieval"
+    },
+    {
+      "id": "project-cognitive-models",
+      "category": "project_context",
+      "query": "Explain the cognitive science models that pg_recall implements and why each one matters.",
+      "expected_knowledge": [
+        "ACT-R (Anderson 1993) for temporal activation",
+        "Ebbinghaus forgetting curve with spacing effect",
+        "Hebbian learning (fire together, wire together)",
+        "Bayesian confidence tracking",
+        "Thousand Brains Theory specs for v0.5"
+      ],
+      "reasoning_required": "Must synthesize technical understanding with scientific foundations"
+    },
+    {
+      "id": "project-switch-brief",
+      "category": "project_context",
+      "query": "What were the key findings in the latest Switch intelligence brief?",
+      "expected_knowledge": [
+        "SIB-2026-W14 delivered 2026-03-30",
+        "DBRG shareholder vote April 23",
+        "Preferred holder litigation",
+        "tokencompute.org is Switch's own project"
+      ],
+      "reasoning_required": "Must recall specific intelligence findings from experiential memory"
+    },
+    {
+      "id": "project-multi-agent",
+      "category": "project_context",
+      "query": "How does the multi-agent architecture work? What agents exist and how do they communicate?",
+      "expected_knowledge": [
+        "Nyx (main, Opus) — general assistant",
+        "Scheduler (Sonnet) — cron management",
+        "Argos (Opus) — OSINT research",
+        "Agent-to-agent messaging via agentToAgent.allow",
+        "Cross-agent cron via session:agent:<id>:main"
+      ],
+      "reasoning_required": "Must compose architecture understanding from multiple factual memories"
+    },
+    {
+      "id": "compose-dns-full-recovery",
+      "category": "compositional",
+      "query": "If DNS breaks again and takes down Prowlarr with it, give me the complete recovery runbook from first symptom to full service restoration.",
+      "expected_knowledge": [
+        "Check tailscaled status first",
+        "Restart tailscaled",
+        "Rollout restart CoreDNS",
+        "Wait for DNS to propagate",
+        "Run Prowlarr testall to clear circuit breaker",
+        "Verify Sonarr/Radarr can search again"
+      ],
+      "reasoning_required": "Must compose two separate experiential memories into a sequenced runbook"
+    },
+    {
+      "id": "compose-monitoring-design",
+      "category": "compositional",
+      "query": "Based on the failures we've experienced, design a set of monitoring alerts that would catch these issues early.",
+      "expected_knowledge": [
+        "DNS resolution failure pattern",
+        "CoreDNS upstream health",
+        "Prowlarr indexer circuit breaker state",
+        "LGTM observability stack available on cluster"
+      ],
+      "reasoning_required": "Must generalize from specific incidents to monitoring rules, composing infra knowledge with failure patterns"
+    },
+    {
+      "id": "compose-ghola-deploy",
+      "category": "compositional",
+      "query": "What would the full process look like to rename pg_recall to pg_ghola in production, including the Chapterhouse server changes?",
+      "expected_knowledge": [
+        "ch-server is Go binary from thinkwright/chapterhouse",
+        "It hardcodes pg_recall schema/function names",
+        "CNPG cluster manifest location",
+        "Extension schema must match server expectations",
+        "Need coordinated deploy of both server and extension"
+      ],
+      "reasoning_required": "Must compose knowledge about the extension, the server, and deployment process into a migration plan"
+    }
+  ]
+}
