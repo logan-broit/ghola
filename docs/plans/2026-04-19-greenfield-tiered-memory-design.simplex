@@ -94,13 +94,20 @@ CONSTRAINT: dune_naming
     - MENTAT = distillation LLM (swappable model behind HTTP)
   No agent-facing API surfaces the substrate name.
 
-CONSTRAINT: swappable_models
+CONSTRAINT: swappable_models_and_dimensions
   Melange and Mentat are HTTP services with deployment-time model
-  choices. Qwen3-Embedding-0.6B is the v1a embedding default but BGE,
-  Nomic, or any sentence-transformer producing 1024d vectors is
-  acceptable. Gemma is the v1a Mentat default on local vLLM; any
-  capable local LLM is acceptable. No system behavior is coupled to
-  a specific model.
+  choices. Qwen3-Embedding-0.6B (1024d) is the v1a reference
+  embedding, but any sentence-transformer producing vectors of any
+  integer dimension D is acceptable -- BGE-large (1024), BGE-small
+  (384), Nomic (768), Ada-002 (1536), etc. The embedding dimension D
+  is read from an EMBEDDING_DIM environment variable at deployment
+  time and used to (a) create the pgvector columns with vector(D) in
+  episodic and semantic and (b) declare the sqlite-vec column with
+  FLOAT[D] in sietch. Once set for a deployment, D is immutable --
+  changing models means a fresh deployment or a re-embed migration.
+  Gemma is the v1a Mentat default on local vLLM; any capable local
+  LLM is acceptable. No system behavior is coupled to a specific model
+  or a specific dimension value.
 
 CONSTRAINT: dev_prod_parity
   docker-compose up on a developer laptop produces the same binaries
@@ -136,7 +143,9 @@ DATA: turn
   tool_input:      structured input if role = 'tool' else null
   tool_output:     structured output if role = 'tool' else null
   bookmark_label:  text label if agent explicitly marked this turn
-  embedding:       1024-dimensional float vector produced by Melange
+  embedding:       D-dimensional float vector produced by Melange,
+                   where D is fixed at deployment (see
+                   CONSTRAINT: swappable_models_and_dimensions)
   entities:        array of extracted entity strings
   tags:            array of user-supplied string tags
   created_at:      timestamp at turn creation
@@ -146,7 +155,8 @@ DATA: mneme
   workspace_id:          uuid of owning team
   concept:               short topic label produced by Mentat
   content:               distilled fact body produced by Mentat
-  embedding:             1024-dimensional float vector over concept+content
+  embedding:             D-dimensional float vector over concept+content
+                         (D per CONSTRAINT: swappable_models_and_dimensions)
   confidence:            float in (0, 1), Bayesian-updated
   access_count:          integer, how many recalls have touched this mneme
   last_access:           timestamp of most recent recall

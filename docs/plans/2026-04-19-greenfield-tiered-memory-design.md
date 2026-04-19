@@ -166,7 +166,7 @@ primitives operate on stable facts.
 ║  └──────────────────────────────────────────────────────────────┘  ║
 ║                                                                    ║
 ║  ┌──────────────────────────────────────────────────────────────┐  ║
-║  │ Melange — embedding service (1024d, hot path)                │  ║
+║  │ Melange — embedding service (D-dim, hot path, D at deploy)   │  ║
 ║  └──────────────────────────────────────────────────────────────┘  ║
 ║                                                                    ║
 ║  ┌──────────────────────────────────────────────────────────────┐  ║
@@ -232,7 +232,7 @@ CREATE INDEX turns_bookmarks ON turns(bookmark_label)
 
 CREATE VIRTUAL TABLE turn_embeddings USING vec0(
     turn_id   INTEGER PRIMARY KEY,
-    embedding FLOAT[1024]
+    embedding FLOAT[${EMBEDDING_DIM}]   -- substituted at schema init
 );
 
 CREATE VIRTUAL TABLE turns_fts USING fts5(
@@ -273,7 +273,7 @@ CREATE TABLE episodic.turns (
     tool_input      jsonb,
     tool_output     jsonb,
     bookmark_label  text,
-    embedding       vector(1024),
+    embedding       vector(${EMBEDDING_DIM}),  -- dim set at deploy
     search_vector   tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     entities        text[],
     tags            text[],
@@ -320,7 +320,7 @@ CREATE TABLE semantic.mnemes (
     workspace_id          uuid NOT NULL,
     concept               text NOT NULL,
     content               text NOT NULL,
-    embedding             vector(1024) NOT NULL,
+    embedding             vector(${EMBEDDING_DIM}) NOT NULL,  -- dim at deploy
     search_vector         tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', concept), 'A') ||
         setweight(to_tsvector('english', content), 'B')

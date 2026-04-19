@@ -431,7 +431,7 @@ CREATE TABLE semantic.mnemes (
     workspace_id          uuid NOT NULL,
     concept               text NOT NULL,
     content               text NOT NULL,
-    embedding             vector(1024) NOT NULL,
+    embedding             vector(${EMBEDDING_DIM}) NOT NULL,  -- dim substituted by migration runner
     search_vector         tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', concept), 'A') ||
         setweight(to_tsvector('english', content), 'B')
@@ -834,22 +834,45 @@ Expected: fail (migration runner doesn't exist yet).
   inside a transaction, tracking applied versions in
   `_migrations.applied(name text primary key)`.
 
-**Step 1:** Implement, ~60 lines of Go.
+**Step 1:** Implement, ~60 lines of Go. The runner MUST substitute
+`${EMBEDDING_DIM}` tokens in migration SQL before execution, reading
+the value from the `EMBEDDING_DIM` environment variable. Fail fast if
+`EMBEDDING_DIM` is unset or not a positive integer. This is how we keep
+the substrate dimension-agnostic — same migration file runs against
+768d, 1024d, 1536d, etc. without editing.
 
 **Step 2:** Run tests:
 
 ```bash
-go test ./internal/repository/... -run TestEpisodic -v
+EMBEDDING_DIM=1024 go test ./internal/repository/... -run TestEpisodic -v
 ```
 
-Expected: both pass.
+Expected: both pass. Repeat with `EMBEDDING_DIM=384` and confirm the
+same tests pass against a DB where `\d episodic.turns` reports
+`embedding | vector(384)`.
 
 **Step 3:** Commit:
 
 ```bash
 git add ch-server/internal/repository/
-git commit -m "feat: episodic schema migrations + runner"
+git commit -m "feat: episodic migrations + runner with \${EMBEDDING_DIM} substitution"
 ```
+
+### Task 2.3b: Dimension-agnosticism test
+
+**Files:**
+- Create: `ch-server/internal/repository/dimension_test.go`
+
+**Step 1:** Write a test that:
+  - Spins up Postgres
+  - Runs migrations with `EMBEDDING_DIM=384`
+  - Asserts `episodic.turns.embedding` is `vector(384)`
+  - Inserts a 384-vector, recalls it
+  - Tears down
+  - Repeats with `EMBEDDING_DIM=1536`, asserts `vector(1536)`
+
+**Step 2:** Run; expect pass. Commit. This locks in the dimension-
+agnostic invariant from `CONSTRAINT: swappable_models_and_dimensions`.
 
 ### Task 2.4: Wire migrations into server boot
 
@@ -980,7 +1003,7 @@ Body shape:
     { "id": "uuid", "parent_id": "uuid|null",
       "role": "user|assistant|system|tool", "content": "...",
       "tool_name": "...", "tool_input": {...}, "tool_output": {...},
-      "bookmark_label": null, "embedding": [1024 floats],
+      "bookmark_label": null, "embedding": [D floats; D = EMBEDDING_DIM],
       "entities": ["..."], "tags": ["..."],
       "created_at": "..." }
   ]
@@ -1525,9 +1548,23 @@ Postgres container, this time via the compose stack (`docker compose up
 **Step 1:** `docker compose down -v && time docker compose up -d && wait_healthy`.
 Assert wall-clock < 30s on a fresh clone with image cache populated.
 
+### Task 11.8: Dimension-agnosticism (derived from CONSTRAINT: swappable_models_and_dimensions)
+
+**Step 1:** Run the full E2E suite three times, each with a different
+`EMBEDDING_DIM`:
+- `EMBEDDING_DIM=384` (BGE-small) — uses a stub embedder returning
+  deterministic 384-vectors.
+- `EMBEDDING_DIM=1024` (Qwen3 reference, default).
+- `EMBEDDING_DIM=1536` (Ada-002-shape).
+
+**Step 2:** Assert all 7 prior acceptance tests pass at each dimension
+without SQL or Go edits. If any pass only at 1024, the dim-agnostic
+invariant is broken — fix the leak.
+
 ### Gate 11
 
-All 7 tests green. Tag `ghola@v0.1.0` + `pg_ghola@v0.2.0` + `chapterhouse@v2.0.0`.
+All 8 tests green (criteria 1–7 plus dimension-agnosticism). Tag
+`ghola@v0.1.0` + `pg_ghola@v0.2.0` + `chapterhouse@v2.0.0`.
 
 ---
 
