@@ -17,10 +17,12 @@ episodic; Pipeline B (LLM-assisted, inside Chapterhouse) distills episodic
 → semantic overnight. Cognitive primitives (ACT-R, Hebbian, Bayesian,
 contradiction) run inside Postgres via the pg_ghola v2 Rust extension.
 
-**Tech Stack:** Rust (pgrx, pgvector, HNSW) · Go 1.22+ (pgx, mattn/sqlite,
-asg017/sqlite-vec, github.com/mark3labs/mcp-go) · Postgres 16 (CNPG) ·
-SQLite with sqlite-vec + FTS5 · TypeScript (pi-mono ext) ·
-docker-compose · ArgoCD for production · local vLLM (Gemma) for Mentat.
+**Tech Stack:** Rust (pgrx 0.17, pgvector, HNSW) · Go 1.22+ (pgx,
+mattn/sqlite, asg017/sqlite-vec, github.com/mark3labs/mcp-go) ·
+Postgres 18 for local dev (pg16/17 support deferred to Phase 10 based
+on CNPG image in prod) · SQLite with sqlite-vec + FTS5 · TypeScript
+(pi-mono ext) · docker-compose · ArgoCD for production · local vLLM
+(Gemma) for Mentat.
 
 **Design doc:** `docs/2026-04-19-greenfield-tiered-memory-design.md`
 
@@ -430,7 +432,7 @@ mod tests {
 
 ```bash
 cd /home/loganb/ghola/extension
-cargo pgrx test pg16 2>&1 | grep -E "(FAIL|PASS|test result)"
+cargo pgrx test pg18 2>&1 | grep -E "(FAIL|PASS|test result)"
 ```
 
 Expected: the three new tests fail (current schema has 12 tables under
@@ -527,7 +529,7 @@ CREATE TABLE semantic.contradiction_candidates (
 
 ```bash
 cd /home/loganb/ghola/extension
-cargo pgrx test pg16
+cargo pgrx test pg18
 ```
 
 Expected: the three schema tests now pass. Any test that referenced the
@@ -644,7 +646,7 @@ git rm src/gating_worker.rs
 **Step 3:** Run full test suite:
 
 ```bash
-cargo pgrx test pg16
+cargo pgrx test pg18
 ```
 
 Expected: compiles and existing tests pass.
@@ -675,7 +677,7 @@ grep -n "ghola\." src/*.rs
 Rewrite every `ghola.mnemes` → `semantic.mnemes`, same for associations
 and queues. Do not touch scoring math.
 
-**Step 2:** Run `cargo pgrx test pg16`. Fix any compile errors.
+**Step 2:** Run `cargo pgrx test pg18`. Fix any compile errors.
 
 **Step 3:** Commit:
 
@@ -700,7 +702,7 @@ git commit -m "refactor: rename ghola.* schema refs to semantic.*"
 **Step 2:** Run:
 
 ```bash
-cargo pgrx test pg16
+cargo pgrx test pg18
 ```
 
 Expected: all 5 pass on first run, because the workers kept their logic.
@@ -789,7 +791,7 @@ git push
 
 ### Gate 1
 
-- `cargo pgrx test pg16` passes.
+- `cargo pgrx test pg18` passes.
 - `createdb ghola_smoke && psql -c "CREATE EXTENSION pg_ghola"` succeeds
   on an empty DB with the 5-table schema.
 - No references to `sub_mnemes`, `matched_position`, `clusters`,
