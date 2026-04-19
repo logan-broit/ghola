@@ -38,6 +38,7 @@ temporal-reasoning      3.0%   23.3%   32.1%   0.103     133
 | 13 | 22.5%* | n/a | ts_rank_cd provides real FTS differentiation but amplifies embedding mismatch 34x (27pp variance). Reverted. Analysis scripts kept. | reverted | [013.md](iterations/013.md) |
 | 14 | 9.7% | -8.1* | Cluster pathway floods pool with false positives, FTS saturation can't differentiate. Ablation: 17.8% without clusters. | reverted | [014.md](iterations/014.md) |
 | 15 | 14.9% | -3.0* | vLLM 0.19.1 Docker embedding server: cross-version mismatch WORSE than sentence-transformers (-3pp). Reverted. | reverted | [015.md](iterations/015.md) |
+| 16 | 15.6%* | -11.9 | Multi-granularity: isolated per-turn sub_mneme encoding. Infra kept, encoding reverted. Catastrophic on conversational content (single-session-assistant -55pp, knowledge-update TIED). | reverted (encoding), kept (schema + Go ingest) | [016.md](iterations/016.md) |
 
 **Note**: Iters 0-5 used same ingest (29.2% R@5). Iter 6 re-ingest produced different embeddings.
 Iter 7 established baseline on Iter 6 ingest (10.1%). Iter 7 dump was truncated.
