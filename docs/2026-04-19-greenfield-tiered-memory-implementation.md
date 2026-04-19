@@ -22,7 +22,17 @@ asg017/sqlite-vec, github.com/mark3labs/mcp-go) · Postgres 16 (CNPG) ·
 SQLite with sqlite-vec + FTS5 · TypeScript (pi-mono ext) ·
 docker-compose · ArgoCD for production · local vLLM (Gemma) for Mentat.
 
-**Design doc:** `docs/plans/2026-04-19-greenfield-tiered-memory-design.md`
+**Design doc:** `docs/2026-04-19-greenfield-tiered-memory-design.md`
+
+> **Monorepo pivot (2026-04-19):** Phase 0 originally created three
+> separate repos (`pg_ghola`, `chapterhouse`, `ghola`). Mid-plan we
+> consolidated into a single `logan-broit/ghola` monorepo holding all
+> components (extension/, cmd/, internal/, clients/, deploy/), with
+> history for pg_ghola and chapterhouse imported via `git subtree add`.
+> Chapterhouse content is staged at `_chapterhouse/` and migrates into
+> the root module incrementally during Phases 2, 3, 8. All work now
+> happens on `main` of the single repo; per-phase feature branches
+> optional.
 
 ---
 
@@ -76,8 +86,10 @@ task is not "done" until its relevant gate passes.
 
 - **Commits:** every task ends with a commit. Conventional messages:
   `feat:`, `fix:`, `refactor:`, `test:`, `chore:`, `docs:`.
-- **Branching:** each phase lives on its own feature branch per repo
-  (`v2-<phase>-<slug>`). Merge to `main` only when the phase's gate passes.
+- **Branching:** single monorepo (`logan-broit/ghola`); work lands on
+  `main` directly (atomic commits per task). Per-phase feature branches
+  (`phase-<N>-<slug>`) are optional; use them if a phase is large or
+  needs a PR for review.
 - **TDD order:** write failing test → run it and confirm failure → write
   minimal code → run it and confirm pass → commit.
 - **Never skip hooks:** no `--no-verify`. If a hook fails, fix the
@@ -86,18 +98,34 @@ task is not "done" until its relevant gate passes.
 
 ---
 
-# Phase 0 — Repo cleanup & new repo setup
+# Phase 0 — Repo cleanup & monorepo setup — **DONE (2026-04-19)**
 
-**Purpose:** Decide what survives from the old architecture, archive what
-doesn't, and create the `ghola` repo that holds the new local service.
+**What actually shipped:** Phase 0 pivoted from three separate repos to
+one `logan-broit/ghola` monorepo. The resulting layout:
 
-**Current state of repos** (surveyed 2026-04-19):
+| Path | Contents |
+|---|---|
+| `/home/loganb/ghola/` | Monorepo root (single `go.mod`, `Makefile`) |
+| `/home/loganb/ghola/extension/` | Rust `pg_ghola` extension (imported via `git subtree add` from the old repo's `v2-greenfield` branch; full history preserved) |
+| `/home/loganb/ghola/_chapterhouse/` | Staging area for the former chapterhouse repo (imported via `git subtree add` from `v2-tiered`); migrates into `cmd/ch-server/` + `internal/handler/` + `internal/repository/` + `internal/pipeline_b/` during Phases 2, 3, 8 |
+| `/home/loganb/ghola/cmd/{ghola,ghola-mcp}/` | Local service binaries (scaffolded, Phase 4 writes code) |
+| `/home/loganb/ghola/internal/{core,sietch,pipeline_a,http,mcp,chapterhouse}/` | Shared Go libs (scaffolded) |
+| `/home/loganb/ghola/clients/pi-mono-ext/` | TS pi-mono extension (scaffolded, Phase 7) |
+| `/home/loganb/ghola/deploy/docker-compose/` | Dev stack (scaffolded, Phase 9) |
+| `/home/loganb/ghola/docs/` | Design doc, simplex spec, this implementation plan, `assets/GholaArchitecture.tsx` |
+| `/home/loganb/longmemeval-ghola/` | Left in place — out of v1a scope, revived for benchmarking post-v1a |
 
-| Path | Role now | v1a decision |
-|---|---|---|
-| `/home/loganb/pg_ghola` (`logan-broit/pg_ghola`) | Rust extension, 12 tables, all cognitive primitives | **Keep, scope down to v2 on new branch.** |
-| `/home/loganb/chapterhouse` (`logan-broit/chapterhouse`) | Go server + MCP + ch-web | **Keep, replace MCP tools with REST surface, add Pipeline B.** |
-| `/home/loganb/longmemeval-ghola` (local only) | Python benchmark harness | **Archive — v1a explicitly defers LongMemEval.** |
+Deviations from the original Phase 0 text:
+- Did **not** archive `longmemeval-ghola` (user keeping for later benchmarking).
+- Did **not** create three separate repos — consolidated to one.
+- Did **not** use `v2-greenfield` / `v2-tiered` feature branches going forward — monorepo `main` is the working branch. The subtree imports preserve those branch histories.
+- Pre-existing clutter in the old pg_ghola clone (orphaned `worktrees/implement_scoring_primitives/`, stale analysis scripts, untracked migration SQLs) cleaned up on pg_ghola's `main` before subtree-import.
+
+Original Phase 0 task text below is kept for historical reference only —
+do not execute.
+
+<details>
+<summary>Original Phase 0 tasks (historical)</summary>
 | `/home/loganb/ai/pi-mono` (upstream fork of `badlogic/pi-mono`) | TS agent | **Leave untouched. Ghola extension is a new package in the new `ghola` repo, not a pi-mono fork.** |
 | *(new)* `/home/loganb/ghola` | — | **Create.** New Go monorepo for local service + pi-mono extension + docker-compose. |
 
@@ -149,22 +177,22 @@ their own git history intact.
 **Step 1:** Create branch in pg_ghola:
 
 ```bash
-cd /home/loganb/pg_ghola
+cd /home/loganb/ghola/extension
 git checkout -b v2-greenfield
 ```
 
 **Step 2:** Create branch in chapterhouse:
 
 ```bash
-cd /home/loganb/chapterhouse
+cd /home/loganb/ghola/_chapterhouse
 git checkout -b v2-tiered
 ```
 
 **Step 3:** Push both branches to remotes:
 
 ```bash
-cd /home/loganb/pg_ghola && git push -u origin v2-greenfield
-cd /home/loganb/chapterhouse && git push -u logan v2-tiered
+cd /home/loganb/ghola/extension && git push -u origin v2-greenfield
+cd /home/loganb/ghola/_chapterhouse && git push -u logan v2-tiered
 ```
 
 Expected: both branches visible on GitHub, tracking set.
@@ -213,7 +241,7 @@ go mod init github.com/logan-broit/ghola
 
 **Step 4:** Stub `README.md` (short — one paragraph + link to design doc).
 
-**Step 5:** Copy `LICENSE` from `/home/loganb/pg_ghola/LICENSE` (same MIT).
+**Step 5:** Copy `LICENSE` from `/home/loganb/ghola/extension/LICENSE` (same MIT).
 
 **Step 6:** First commit:
 
@@ -264,13 +292,13 @@ git push
 ### Task 0.5: Copy the greenfield design doc into ghola for colocation
 
 **Files:**
-- Copy: `/home/loganb/pg_ghola/docs/plans/2026-04-19-greenfield-tiered-memory-design.md`
+- Copy: `/home/loganb/ghola/extension/docs/plans/2026-04-19-greenfield-tiered-memory-design.md`
   → `/home/loganb/ghola/docs/2026-04-19-greenfield-tiered-memory-design.md`
 - Copy this plan in similarly once committed.
 
 **Step 1:**
 ```bash
-cp /home/loganb/pg_ghola/docs/plans/2026-04-19-greenfield-tiered-memory-design.md \
+cp /home/loganb/ghola/extension/docs/plans/2026-04-19-greenfield-tiered-memory-design.md \
    /home/loganb/ghola/docs/
 ```
 
@@ -288,13 +316,15 @@ git push
 Run:
 ```bash
 ls /home/loganb/{pg_ghola,chapterhouse,ghola} /home/loganb/archived/
-git -C /home/loganb/pg_ghola branch --show-current
-git -C /home/loganb/chapterhouse branch --show-current
+git -C /home/loganb/ghola/extension branch --show-current
+git -C /home/loganb/ghola/_chapterhouse branch --show-current
 git -C /home/loganb/ghola branch --show-current
 ```
 
 Expected: pg_ghola on `v2-greenfield`, chapterhouse on `v2-tiered`, ghola
 on `main`, archived dir holds longmemeval-ghola. Proceed to Phase 1.
+
+</details>
 
 ---
 
@@ -305,7 +335,8 @@ gating columns, temporal-token infra, matched_position. Keep ACT-R,
 Hebbian, Bayesian, contradiction, archival. Fresh `CREATE EXTENSION`
 installs on an empty DB (Gate 5).
 
-**Branch:** pg_ghola `v2-greenfield`
+**Branch:** `main` (monorepo). All edits land under `extension/` in
+`/home/loganb/ghola/`.
 
 ### Task 1.1: Inventory what to delete vs keep
 
@@ -314,7 +345,7 @@ installs on an empty DB (Gate 5).
 **Step 1:** List current src:
 
 ```bash
-ls /home/loganb/pg_ghola/src/
+ls /home/loganb/ghola/extension/src/
 ```
 
 Existing files: `associations.rs`, `bin/`, `consolidation_worker.rs`,
@@ -340,7 +371,7 @@ one of: KEEP / SIMPLIFY / DELETE with one-line reason. Minimum:
 **Step 3:** Commit:
 
 ```bash
-cd /home/loganb/pg_ghola
+cd /home/loganb/ghola/extension
 git add docs/plans/v2-src-inventory.md
 git commit -m "docs: v2 src inventory (keep/simplify/delete)"
 ```
@@ -348,8 +379,8 @@ git commit -m "docs: v2 src inventory (keep/simplify/delete)"
 ### Task 1.2: Write failing schema test for v2 shape
 
 **Files:**
-- Create: `/home/loganb/pg_ghola/src/tests/schema_v2.rs` (new test module)
-- Modify: `/home/loganb/pg_ghola/src/lib.rs` — register test module gated
+- Create: `/home/loganb/ghola/extension/src/tests/schema_v2.rs` (new test module)
+- Modify: `/home/loganb/ghola/extension/src/lib.rs` — register test module gated
   behind `#[cfg(any(test, feature="pg_test"))]`.
 
 **Step 1:** Write test asserting that after `CREATE EXTENSION pg_ghola`
@@ -398,7 +429,7 @@ mod tests {
 **Step 2:** Run and confirm fail:
 
 ```bash
-cd /home/loganb/pg_ghola
+cd /home/loganb/ghola/extension
 cargo pgrx test pg16 2>&1 | grep -E "(FAIL|PASS|test result)"
 ```
 
@@ -415,7 +446,7 @@ git commit -m "test: failing schema tests for v2 five-table shape"
 ### Task 1.3: Rewrite `schema.rs` for v2
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/src/schema.rs` — replace existing
+- Modify: `/home/loganb/ghola/extension/src/schema.rs` — replace existing
   `extension_sql_file!` body with v2 SQL matching the design doc
   (schema `semantic`, 5 tables, indexes per design).
 - Delete: any `create_sub_mnemes_table`, `create_clusters_table`,
@@ -495,7 +526,7 @@ CREATE TABLE semantic.contradiction_candidates (
 **Step 2:** Run tests:
 
 ```bash
-cd /home/loganb/pg_ghola
+cd /home/loganb/ghola/extension
 cargo pgrx test pg16
 ```
 
@@ -512,7 +543,7 @@ git commit -m "refactor: v2 semantic schema (5 tables)"
 ### Task 1.4: Rewrite `types.rs` — 8-column recall_result
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/src/types.rs` — drop `matched_position`
+- Modify: `/home/loganb/ghola/extension/src/types.rs` — drop `matched_position`
   from `recall_result`. Drop any sub-mneme types.
 
 **Step 1:** Write failing test in
@@ -547,10 +578,10 @@ git commit -m "refactor: recall_result back to 8 columns (no sub_mnemes)"
 ### Task 1.5: Rewire `recall.rs` — no sub_mnemes join
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/src/recall.rs` — remove sub_mneme UNION/
+- Modify: `/home/loganb/ghola/extension/src/recall.rs` — remove sub_mneme UNION/
   JOIN, all references to `matched_position`. Recall now scans only
   `semantic.mnemes`.
-- Modify: `/home/loganb/pg_ghola/src/lib.rs` — drop any
+- Modify: `/home/loganb/ghola/extension/src/lib.rs` — drop any
   `recall_inner` signature params that existed only for sub_mnemes.
 
 **Step 1:** Write failing test that calls `semantic.recall(...)` and
@@ -595,15 +626,15 @@ git commit -m "refactor: recall targets semantic.mnemes only (no sub_mnemes)"
 ### Task 1.6: Delete gating infra
 
 **Files:**
-- Delete: `/home/loganb/pg_ghola/src/gating_worker.rs`
-- Modify: `/home/loganb/pg_ghola/src/lib.rs` — remove its mod line and any
+- Delete: `/home/loganb/ghola/extension/src/gating_worker.rs`
+- Modify: `/home/loganb/ghola/extension/src/lib.rs` — remove its mod line and any
   BGWorker registrations tied to it.
-- Modify: `/home/loganb/pg_ghola/pg_ghola.control` if references exist.
+- Modify: `/home/loganb/ghola/extension/pg_ghola.control` if references exist.
 
 **Step 1:** Delete file:
 
 ```bash
-cd /home/loganb/pg_ghola
+cd /home/loganb/ghola/extension
 git rm src/gating_worker.rs
 ```
 
@@ -628,12 +659,12 @@ git commit -m "refactor: drop gating worker (no gating columns in v2)"
 ### Task 1.7: Rewire Hebbian + contradiction + consolidation workers
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/src/hebbian.rs` — if it references
+- Modify: `/home/loganb/ghola/extension/src/hebbian.rs` — if it references
   `ghola.mnemes`, change to `semantic.mnemes`.
-- Modify: `/home/loganb/pg_ghola/src/associations.rs` — same.
-- Modify: `/home/loganb/pg_ghola/src/contradiction.rs` + `_worker.rs` — same.
-- Modify: `/home/loganb/pg_ghola/src/consolidation_worker.rs` — same.
-- Modify: `/home/loganb/pg_ghola/src/scoring.rs` — same.
+- Modify: `/home/loganb/ghola/extension/src/associations.rs` — same.
+- Modify: `/home/loganb/ghola/extension/src/contradiction.rs` + `_worker.rs` — same.
+- Modify: `/home/loganb/ghola/extension/src/consolidation_worker.rs` — same.
+- Modify: `/home/loganb/ghola/extension/src/scoring.rs` — same.
 
 **Step 1:** For each file, run:
 
@@ -656,7 +687,7 @@ git commit -m "refactor: rename ghola.* schema refs to semantic.*"
 ### Task 1.8: Rewrite `integration_tests.rs` for v2 surface
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/src/integration_tests.rs` — remove all
+- Modify: `/home/loganb/ghola/extension/src/integration_tests.rs` — remove all
   sub_mneme tests, cluster tests, gating tests. Add tests covering:
   - insert → recall round-trip
   - Hebbian weight update fires from co_activation_queue
@@ -684,8 +715,8 @@ git commit -m "test: v2 integration test suite (insert/recall/primitives)"
 ### Task 1.9: Bump extension version → `0.2.0`, update control file
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/pg_ghola.control`
-- Modify: `/home/loganb/pg_ghola/Cargo.toml` (version bump)
+- Modify: `/home/loganb/ghola/extension/pg_ghola.control`
+- Modify: `/home/loganb/ghola/extension/Cargo.toml` (version bump)
 - Delete: old `.sql` migration files
   (`migration-0.0.4-thalamic-gating.sql`, `migration-0.0.5-temporal-tokens.sql`,
    `migration-0.0.6-sub-mnemes.sql`) — v2 is fresh install, no migrations.
@@ -728,14 +759,14 @@ git commit -m "release: pg_ghola v0.2.0 (greenfield v2 schema)"
 ### Task 1.10: Build & ship `pg_ghola` container image
 
 **Files:**
-- Modify: `/home/loganb/pg_ghola/Dockerfile.cnpg` — confirm it still
+- Modify: `/home/loganb/ghola/extension/Dockerfile.cnpg` — confirm it still
   symlinks `pg_ghola.so` → `pg_recall.so` (the prod extension is named
   `pg_recall`; CNPG install expects that name).
 
 **Step 1:** Build:
 
 ```bash
-cd /home/loganb/pg_ghola
+cd /home/loganb/ghola/extension
 docker build -f Dockerfile.cnpg -t ghcr.io/logan-broit/pg-ghola:0.2.0 .
 ```
 
@@ -764,7 +795,7 @@ git push
 - No references to `sub_mnemes`, `matched_position`, `clusters`,
   `gating_*` remain in `src/`.
 
-If all three hold, merge `v2-greenfield` → `main` in pg_ghola.
+If all three hold, tag the Phase 1 completion commit (e.g. `extension-v0.2.0`) on `main`.
 
 ---
 
@@ -774,12 +805,14 @@ If all three hold, merge `v2-greenfield` → `main` in pg_ghola.
 writes to and `/v1/episodic/*` reads from. This schema is NOT managed by
 pg_ghola — it's plain Postgres DDL, applied by Chapterhouse at boot.
 
-**Branch:** chapterhouse `v2-tiered`
+**Branch:** `main` (monorepo). Work occurs in `_chapterhouse/` and
+migrates into `cmd/ch-server/` + `internal/{handler,repository,pipeline_b}/`
+as each piece is touched.
 
 ### Task 2.1: Write schema migration SQL
 
 **Files:**
-- Create: `/home/loganb/chapterhouse/ch-server/internal/repository/migrations/001_episodic.sql`
+- Create: `/home/loganb/ghola/_chapterhouse/ch-server/internal/repository/migrations/001_episodic.sql`
   containing the DDL from the design doc verbatim (sessions, turns, shares
   + all indexes).
 
@@ -796,7 +829,7 @@ CREATE EXTENSION IF NOT EXISTS vector;   -- pgvector
 ### Task 2.2: Write failing integration test
 
 **Files:**
-- Create: `/home/loganb/chapterhouse/ch-server/internal/repository/episodic_schema_test.go`
+- Create: `/home/loganb/ghola/_chapterhouse/ch-server/internal/repository/episodic_schema_test.go`
 
 **Step 1:** Test that, after running migrations on a fresh Postgres:
 
@@ -820,7 +853,7 @@ func TestEpisodicTurnsHasEmbeddingColumn(t *testing.T) {
 **Step 2:** Run:
 
 ```bash
-cd /home/loganb/chapterhouse/ch-server
+cd /home/loganb/ghola/_chapterhouse/ch-server
 go test ./internal/repository/... -run TestEpisodic -v
 ```
 
@@ -829,7 +862,7 @@ Expected: fail (migration runner doesn't exist yet).
 ### Task 2.3: Implement migration runner
 
 **Files:**
-- Create: `/home/loganb/chapterhouse/ch-server/internal/repository/migrate.go`
+- Create: `/home/loganb/ghola/_chapterhouse/ch-server/internal/repository/migrate.go`
   with a simple embed-based migrator that applies `*.sql` in alpha order
   inside a transaction, tracking applied versions in
   `_migrations.applied(name text primary key)`.
@@ -877,7 +910,7 @@ agnostic invariant from `CONSTRAINT: swappable_models_and_dimensions`.
 ### Task 2.4: Wire migrations into server boot
 
 **Files:**
-- Modify: `/home/loganb/chapterhouse/ch-server/cmd/ch-server/main.go`
+- Modify: `/home/loganb/ghola/_chapterhouse/ch-server/cmd/ch-server/main.go`
   (or equivalent entrypoint) — call `repository.ApplyMigrations(ctx, pool)`
   after pool init, before HTTP start.
 
@@ -886,7 +919,7 @@ agnostic invariant from `CONSTRAINT: swappable_models_and_dimensions`.
 **Step 2:** Local smoke test:
 
 ```bash
-cd /home/loganb/chapterhouse
+cd /home/loganb/ghola/_chapterhouse
 docker compose -f deploy/dev-compose.yml up -d postgres
 CH_DATABASE_URL=postgres://... go run ./ch-server/cmd/ch-server
 ```
@@ -916,7 +949,9 @@ git commit -m "feat: apply episodic migrations at server boot"
 `/v1/episodic/*` and `/v1/semantic/*` endpoints called only by the Ghola
 local service.
 
-**Branch:** chapterhouse `v2-tiered`
+**Branch:** `main` (monorepo). Work occurs in `_chapterhouse/` and
+migrates into `cmd/ch-server/` + `internal/{handler,repository,pipeline_b}/`
+as each piece is touched.
 
 ### Task 3.1: Archive legacy MCP tool surface
 
@@ -946,7 +981,7 @@ git commit -m "refactor: park legacy MCP tool surface as mcp_legacy"
 ### Task 3.2: Define REST contract (OpenAPI stub)
 
 **Files:**
-- Create: `/home/loganb/chapterhouse/docs/api/v1-chapterhouse.yaml` —
+- Create: `/home/loganb/ghola/_chapterhouse/docs/api/v1-chapterhouse.yaml` —
   minimal OpenAPI 3.1 listing all 7 endpoints from the design doc
   (`episodic/{ingest,query,share,forget}`, `semantic/{query,feedback,list}`)
   with request/response shapes.
@@ -1096,7 +1131,8 @@ header). Run → fail.
 **Purpose:** The Go binary agents talk to. Single binary, two entrypoints
 (`ghola` = HTTP, `ghola-mcp` = MCP), one shared core library.
 
-**Branch:** ghola `main`
+**Branch:** `main` (monorepo). Work in `cmd/ghola/`, `cmd/ghola-mcp/`,
+and `internal/{core,sietch,pipeline_a,http,mcp,chapterhouse}/`.
 
 ### Task 4.1: Write core interface (Go) — `internal/core/core.go`
 
@@ -1447,7 +1483,7 @@ production DB. New chapterhouse image. No data migration.
 `homelab-k3s/` — ArgoCD will sync):
 
 ```bash
-cd ~/homelab-k3s
+cd ~/ai/homelab-k3s
 # edit apps/chapterhouse/.../values.yaml: replicas: 0
 git add -A && git commit -m "chore: ch-server scale 0 for v2 migration" && git push
 ```
@@ -1467,7 +1503,8 @@ ssh nuc "kubectl -n ch-system exec -it memory-db-1 -- psql -U postgres -d memori
 **Step 1:** Build + push `ghcr.io/logan-broit/pg-ghola:0.2.0`.
 
 **Step 2:** Build + push `ghcr.io/logan-broit/chapterhouse:<sha>` from
-the `v2-tiered` branch.
+the monorepo `main` (after Phase 3's chapterhouse migration is
+complete).
 
 **Step 3:** Update homelab-k3s manifests:
 - Point CNPG to the new pg_ghola image.
@@ -1568,16 +1605,22 @@ All 8 tests green (criteria 1–7 plus dimension-agnosticism). Tag
 
 ---
 
-## Cross-repo commit map
+## Repo commit map
 
 For orientation during execution:
 
-| Repo | Branch | Phases |
-|---|---|---|
-| `pg_ghola` | `v2-greenfield` | 1, 10 |
-| `chapterhouse` | `v2-tiered` | 2, 3, 8, 10 |
-| `ghola` | `main` | 0, 4, 5, 6, 7, 9, 11 |
-| `homelab-k3s` | `main` | 10 |
+| Repo | Path | Phases | Notes |
+|---|---|---|---|
+| `logan-broit/ghola` | `/home/loganb/ghola/` | 0, 1–9, 11 | Monorepo. Work on `main` directly. Subdirs: `extension/` (Phase 1), `_chapterhouse/` (Phase 2, 3, 8 — migrates into root), `cmd/` + `internal/` + `clients/` + `deploy/` + `test/` (Phases 4–9, 11) |
+| `logan-broit/homelab-k3s` | `/home/loganb/ai/homelab-k3s/` | 10 | Manifest updates for production deploy (ArgoCD auto-syncs) |
+
+Archived mid-plan:
+- `logan-broit/pg_ghola` — history preserved inside `ghola/extension/`
+  via `git subtree add`. Repo archived on GitHub once the monorepo
+  push landed.
+- `logan-broit/chapterhouse` — history preserved inside
+  `ghola/_chapterhouse/` via `git subtree add`. Left active on GitHub
+  (not owned by this project).
 
 ## Risk register
 
