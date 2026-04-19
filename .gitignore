@@ -1,0 +1,17 @@
+/ghola
+/ghola-mcp
+/ghola-*.exe
+/.ghola/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+/node_modules/
+/dist/
+/.env
+/.env.local
+/coverage/
+/tmp/
+
+# Rust extension build artifacts
+/extension/target/
