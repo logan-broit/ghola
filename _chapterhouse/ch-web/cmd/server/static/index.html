@@ -1,0 +1,1522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chapterhouse - Cognitive Memory for AI Agents</title>
+    <meta name="description" content="Cognitive memory for AI agents. Memories that strengthen through use, fade when irrelevant, and evolve as understanding changes. Built on primitives modeled after human cognition.">
+    <meta property="og:title" content="Chapterhouse - Cognitive Memory for AI Agents">
+    <meta property="og:description" content="Cognitive memory for AI agents. Memories that strengthen through use, fade when irrelevant, and evolve as understanding changes. Built on primitives modeled after human cognition.">
+    <meta property="og:type" content="website">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0a0a0f;
+            --bg-card: rgba(20, 20, 30, 0.9);
+            --bg-input: rgba(255, 255, 255, 0.05);
+            --border-subtle: rgba(255, 255, 255, 0.1);
+            --border-hover: rgba(255, 255, 255, 0.2);
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --text-muted: rgba(255, 255, 255, 0.5);
+            --accent-teal: #0d9488;
+            --accent-teal-hover: #0f766e;
+            --accent-blue: #3b82f6;
+            --accent-purple: #a78bfa;
+            --accent-green: #34d399;
+            --accent-cyan: #22d3ee;
+            --accent-pink: #f472b6;
+            --accent-yellow: #fbbf24;
+            --accent-orange: #fb923c;
+            --gradient-hero: linear-gradient(135deg, #5eead4, #38bdf8, #818cf8);
+            --font-mono: 'SF Mono', Monaco, Inconsolata, 'Courier New', monospace;
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        [id] {
+            scroll-margin-top: 80px;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            min-height: 100vh;
+            background: linear-gradient(180deg,
+                #0a0a0f 0%,
+                #0a1628 15%,
+                #0f2a4a 40%,
+                #1a3d5c 70%,
+                #2a5a6a 100%
+            );
+            color: var(--text-primary);
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ===== Navigation ===== */
+        .nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 100;
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-logo {
+            font-size: 20px;
+            font-weight: 700;
+            color: white;
+            text-decoration: none;
+            letter-spacing: -0.02em;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 24px;
+            align-items: center;
+        }
+
+        .nav-link {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            color: white;
+        }
+
+        .nav-btn {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 1px solid var(--border-hover);
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .nav-btn:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .nav-toggle {
+            display: none;
+            background: none;
+            border: none;
+            color: white;
+            cursor: pointer;
+            padding: 4px;
+        }
+
+        /* ===== Sections ===== */
+        .section {
+            padding: 100px 24px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-label {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent-teal);
+            margin-bottom: 12px;
+        }
+
+        .section-title {
+            font-size: clamp(1.75rem, 4vw, 2.5rem);
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+            line-height: 1.2;
+        }
+
+        .section-subtitle {
+            font-size: clamp(1rem, 2vw, 1.15rem);
+            color: var(--text-secondary);
+            line-height: 1.7;
+            max-width: 600px;
+        }
+
+        .section-header {
+            margin-bottom: 64px;
+        }
+
+        /* ===== Hero ===== */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 100px 24px 60px;
+            position: relative;
+        }
+
+        .hero-bg {
+            position: absolute;
+            inset: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+
+        .hero-bg-shape {
+            position: absolute;
+            border-radius: 50%;
+            border: 1px solid rgba(94, 234, 212, 0.04);
+        }
+
+        .hero-bg-shape:nth-child(1) {
+            width: 500px;
+            height: 500px;
+            top: 10%;
+            left: -10%;
+            animation: float1 25s ease-in-out infinite;
+        }
+
+        .hero-bg-shape:nth-child(2) {
+            width: 300px;
+            height: 300px;
+            top: 50%;
+            right: -5%;
+            border-color: rgba(56, 189, 248, 0.04);
+            animation: float2 20s ease-in-out infinite;
+        }
+
+        .hero-bg-shape:nth-child(3) {
+            width: 200px;
+            height: 200px;
+            bottom: 15%;
+            left: 20%;
+            border-color: rgba(129, 140, 248, 0.05);
+            animation: float3 18s ease-in-out infinite;
+        }
+
+        @keyframes float1 {
+            0%, 100% { transform: translate(0, 0) rotate(0deg); }
+            50% { transform: translate(30px, -40px) rotate(180deg); }
+        }
+
+        @keyframes float2 {
+            0%, 100% { transform: translate(0, 0) rotate(0deg); }
+            50% { transform: translate(-20px, -30px) rotate(-180deg); }
+        }
+
+        @keyframes float3 {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(15px, -25px); }
+        }
+
+        .hero-content {
+            width: 100%;
+            max-width: 720px;
+            text-align: left;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 50px;
+            border: 1px solid rgba(13, 148, 136, 0.4);
+            background: rgba(13, 148, 136, 0.1);
+            color: #5eead4;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            margin-bottom: 24px;
+        }
+
+        .hero-badge-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #5eead4;
+        }
+
+        .hero-title {
+            font-size: clamp(2.25rem, 6vw, 3.75rem);
+            font-weight: 700;
+            line-height: 1.2;
+            margin: 0 0 16px 0;
+            letter-spacing: -0.03em;
+        }
+
+
+        .hero-subtitle {
+            font-size: clamp(1rem, 2.5vw, 1.2rem);
+            color: var(--text-secondary);
+            margin: 0 0 40px 0;
+            line-height: 1.8;
+        }
+
+        .hero-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--accent-teal);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: var(--radius-sm);
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.2s;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-teal-hover);
+        }
+
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.06);
+            color: white;
+            border: 1px solid var(--border-hover);
+            padding: 11px 24px;
+            border-radius: var(--radius-sm);
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* ===== Features Grid ===== */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 28px 24px;
+            transition: all 0.2s ease;
+        }
+
+        .feature-card:hover {
+            border-color: var(--border-hover);
+            transform: translateY(-2px);
+        }
+
+        .feature-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+        }
+
+        .feature-icon svg {
+            width: 22px;
+            height: 22px;
+        }
+
+        .feature-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            letter-spacing: -0.01em;
+        }
+
+        .feature-desc {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        /* ===== How It Works ===== */
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+            position: relative;
+        }
+
+        .steps::before {
+            content: '';
+            position: absolute;
+            top: 36px;
+            left: calc(33.33% - 12px);
+            right: calc(33.33% - 12px);
+            height: 2px;
+            background: repeating-linear-gradient(
+                90deg,
+                rgba(94, 234, 212, 0.25) 0,
+                rgba(94, 234, 212, 0.25) 8px,
+                transparent 8px,
+                transparent 16px
+            );
+        }
+
+        .step-card {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 28px 24px;
+            text-align: center;
+        }
+
+        .step-number {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: rgba(13, 148, 136, 0.15);
+            color: #5eead4;
+            font-size: 18px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .step-title {
+            font-size: 17px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            letter-spacing: -0.01em;
+        }
+
+        .step-desc {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+
+        .step-example {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: #94a3b8;
+            text-align: left;
+            line-height: 1.5;
+        }
+
+        .step-example .hl {
+            color: #5eead4;
+        }
+
+        /* ===== MCP Tools ===== */
+        .tools-section .section-header {
+            text-align: center;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .tools-section .section-subtitle {
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .tools-container {
+            max-width: 760px;
+            margin: 0 auto;
+        }
+
+        .tools-tabs {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .tool-tab {
+            padding: 7px 16px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: transparent;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tool-tab:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: white;
+        }
+
+        .tool-tab.active {
+            background: var(--accent-teal);
+            border-color: var(--accent-teal);
+            color: white;
+        }
+
+        .tool-panel {
+            display: none;
+        }
+
+        .tool-panel.active {
+            display: block;
+        }
+
+        .tool-desc {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+            line-height: 1.6;
+        }
+
+        .code-block {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: var(--radius-sm);
+            padding: 16px 18px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: #e2e8f0;
+            overflow-x: auto;
+            position: relative;
+            line-height: 1.6;
+        }
+
+        .code-block code {
+            white-space: pre;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-muted);
+            font-size: 11px;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+        }
+
+        .copy-btn.copied {
+            background: rgba(34, 197, 94, 0.2);
+            border-color: rgba(34, 197, 94, 0.3);
+            color: #4ade80;
+        }
+
+        /* ===== Architecture ===== */
+        .arch-section {
+            text-align: center;
+        }
+
+        .arch-section .section-subtitle {
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .arch-diagram {
+            max-width: 800px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+        }
+
+        .arch-node {
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 20px 28px;
+            text-align: center;
+        }
+
+        .arch-node-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .arch-node-sub {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .arch-node-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 12px;
+        }
+
+        .arch-node-icon svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        .arch-node-features {
+            list-style: none;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            text-align: left;
+        }
+
+        .arch-node-features li {
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .arch-node-features li::before {
+            content: '';
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .arch-node-accent[style*="accent-blue"] .arch-node-features li::before {
+            background: var(--accent-blue);
+        }
+
+        .arch-node-accent[style*="accent-purple"] .arch-node-features li::before {
+            background: var(--accent-purple);
+        }
+
+        .arch-node-accent[style*="accent-orange"] .arch-node-features li::before {
+            background: var(--accent-orange);
+        }
+
+        .arch-row .arch-node {
+            padding: 24px;
+        }
+
+        .arch-connector {
+            width: 2px;
+            height: 32px;
+            background: repeating-linear-gradient(
+                180deg,
+                rgba(94, 234, 212, 0.3) 0,
+                rgba(94, 234, 212, 0.3) 6px,
+                transparent 6px,
+                transparent 12px
+            );
+        }
+
+        .arch-connector-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            padding: 4px 0;
+        }
+
+        .arch-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            width: 100%;
+        }
+
+        .arch-node-accent {
+            border-left: 3px solid;
+        }
+
+        .arch-providers {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .arch-provider {
+            padding: 3px 10px;
+            border-radius: 50px;
+            border: 1px solid var(--border-subtle);
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        /* ===== Get Started ===== */
+        .get-started {
+            text-align: center;
+        }
+
+        .get-started .section-subtitle {
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .setup-container {
+            max-width: 720px;
+            margin: 0 auto;
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 24px 28px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            text-align: left;
+        }
+
+        .setup-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .setup-tab {
+            padding: 7px 16px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+
+        .setup-tab:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: white;
+        }
+
+        .setup-tab.active {
+            background: var(--accent-teal);
+            border-color: var(--accent-teal);
+            color: white;
+        }
+
+        .setup-panel {
+            display: none;
+        }
+
+        .setup-panel.active {
+            display: block;
+        }
+
+        .setup-step {
+            margin-bottom: 12px;
+        }
+
+        .setup-step:last-child {
+            margin-bottom: 0;
+        }
+
+        .step-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .setup-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        /* ===== Footer ===== */
+        .footer {
+            border-top: 1px solid var(--border-subtle);
+            padding: 64px 24px 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .footer-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            gap: 48px;
+            margin-bottom: 48px;
+        }
+
+        .footer-brand {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            letter-spacing: -0.02em;
+        }
+
+        .footer-desc {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            max-width: 320px;
+        }
+
+        .footer-heading {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            margin-bottom: 16px;
+        }
+
+        .footer-links {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .footer-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            transition: color 0.2s;
+        }
+
+        .footer-links a:hover {
+            color: white;
+        }
+
+        .footer-bottom {
+            padding-top: 24px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* ===== Animations ===== */
+        .fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        [data-animate] {
+            opacity: 0;
+            transform: translateY(24px);
+            transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+        }
+
+        [data-animate].visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        [data-animate-delay="1"] { transition-delay: 0.1s; }
+        [data-animate-delay="2"] { transition-delay: 0.15s; }
+        [data-animate-delay="3"] { transition-delay: 0.2s; }
+        [data-animate-delay="4"] { transition-delay: 0.25s; }
+        [data-animate-delay="5"] { transition-delay: 0.3s; }
+        [data-animate-delay="6"] { transition-delay: 0.35s; }
+        [data-animate-delay="7"] { transition-delay: 0.4s; }
+        [data-animate-delay="8"] { transition-delay: 0.45s; }
+        [data-animate-delay="9"] { transition-delay: 0.5s; }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 1024px) {
+            .features-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .nav-toggle {
+                display: block;
+            }
+
+            .nav-links {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                flex-direction: column;
+                background: rgba(10, 10, 15, 0.95);
+                backdrop-filter: blur(12px);
+                padding: 16px 24px;
+                gap: 16px;
+                border-bottom: 1px solid var(--border-subtle);
+            }
+
+            .nav-links.open {
+                display: flex;
+            }
+
+            .nav-btn {
+                text-align: center;
+            }
+
+            .hero-content {
+                text-align: center;
+            }
+
+            .hero-actions {
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+
+            .hero-rotate-line {
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .steps {
+                grid-template-columns: 1fr;
+            }
+
+            .steps::before {
+                display: none;
+            }
+
+            .tools-tabs {
+                justify-content: center;
+            }
+
+            .arch-row {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+
+            .setup-tabs {
+                flex-wrap: wrap;
+            }
+
+            .setup-actions {
+                flex-direction: column;
+                gap: 12px;
+            }
+
+            .setup-actions a {
+                width: 100%;
+                text-align: center;
+                justify-content: center;
+            }
+
+            .footer-grid {
+                grid-template-columns: 1fr;
+                gap: 32px;
+            }
+
+            .section {
+                padding: 64px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Navigation -->
+    <nav class="nav">
+        <a href="/" class="nav-logo">Chapterhouse</a>
+        <button class="nav-toggle" aria-label="Toggle navigation">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <div class="nav-links">
+            <a href="#features" class="nav-link">Features</a>
+            <a href="#how-it-works" class="nav-link">How It Works</a>
+            <a href="#tools" class="nav-link">Tools</a>
+            <a href="#get-started" class="nav-link">Get Started</a>
+            <a href="https://github.com/thinkwright/chapterhouse" class="nav-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                GitHub
+            </a>
+            <a href="/admin/" class="nav-btn">Admin Console</a>
+        </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="hero" id="hero">
+        <div class="hero-bg">
+            <div class="hero-bg-shape"></div>
+            <div class="hero-bg-shape"></div>
+            <div class="hero-bg-shape"></div>
+        </div>
+        <div class="hero-content">
+            <div class="hero-badge fade-in" style="animation-delay: 0.1s;">
+                <span class="hero-badge-dot"></span>
+                Chapterhouse: Cognitive Memory for AI Agents
+            </div>
+            <h1 class="hero-title fade-in" style="animation-delay: 0.2s;">
+                Memories that think.
+            </h1>
+
+            <p class="hero-subtitle fade-in" style="animation-delay: 0.3s;">
+                Not a vector database with an MCP wrapper.<br>
+                Memories that strengthen through use, fade when irrelevant,<br>
+                and evolve as understanding changes.<br>
+                Built on primitives modeled after human cognition.
+            </p>
+
+            <div class="hero-actions fade-in" style="animation-delay: 0.4s;">
+                <a href="#get-started" class="btn-primary">Get Started &rarr;</a>
+                <a href="https://github.com/thinkwright/chapterhouse" class="btn-secondary" target="_blank" rel="noopener">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                    View on GitHub
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features -->
+    <section class="section" id="features">
+        <div class="section-header" data-animate>
+            <div class="section-label">Cognitive Primitives</div>
+            <h2 class="section-title">Memory that adapts. Knowledge that evolves.</h2>
+            <p class="section-subtitle">Context that sharpens through use, built on primitives modeled after how cognition actually works.</p>
+        </div>
+        <div class="features-grid">
+            <div class="feature-card" data-animate data-animate-delay="1">
+                <div class="feature-icon" style="background: rgba(129, 140, 248, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+                </div>
+                <div class="feature-title">Typed Knowledge</div>
+                <div class="feature-desc">Facts, experiences, and working context each behave differently. Standards persist. Lessons learned carry weight. Session notes fade naturally.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="2">
+                <div class="feature-icon" style="background: rgba(94, 234, 212, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#5eead4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>
+                </div>
+                <div class="feature-title">Adaptive Recall</div>
+                <div class="feature-desc">Scoring blends semantic similarity, keyword matching, temporal recency, usage patterns, and confidence into a single relevance score. The right memory surfaces at the right time.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="3">
+                <div class="feature-icon" style="background: rgba(56, 189, 248, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
+                </div>
+                <div class="feature-title">Session Continuity</div>
+                <div class="feature-desc">Memories group by session. Resume where you left off, review what happened yesterday, or trace how a decision evolved across sessions.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="4">
+                <div class="feature-icon" style="background: rgba(251, 191, 36, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+                </div>
+                <div class="feature-title">Supersession</div>
+                <div class="feature-desc">Knowledge evolves. When understanding changes, new memories supersede the old while preserving lineage. Your AI's knowledge stays current without losing history.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="5">
+                <div class="feature-icon" style="background: rgba(52, 211, 153, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                </div>
+                <div class="feature-title">Hebbian Reinforcement</div>
+                <div class="feature-desc">Memories recalled together strengthen together. Frequently useful knowledge rises to the top &mdash; the system learns what matters through use.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="6">
+                <div class="feature-icon" style="background: rgba(167, 139, 250, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M2 8c0-3.5 2.5-6.5 6-7"/><path d="M22 8c0-3.5-2.5-6.5-6-7"/></svg>
+                </div>
+                <div class="feature-title">Temporal Decay</div>
+                <div class="feature-desc">Unused memories naturally lose activation over time, keeping recall sharp. Working memories auto-expire after 7 days. Important knowledge persists through reinforcement.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="7">
+                <div class="feature-icon" style="background: rgba(244, 114, 182, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#f472b6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>
+                </div>
+                <div class="feature-title">Contradiction Detection</div>
+                <div class="feature-desc">When new information conflicts with existing knowledge, the system identifies it. Contradictions surface rather than silently coexisting.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="8">
+                <div class="feature-icon" style="background: rgba(251, 146, 60, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                </div>
+                <div class="feature-title">Organization Sharing</div>
+                <div class="feature-desc">Personal memories stay private. Org memories share knowledge across your entire team. Change scope anytime.</div>
+            </div>
+            <div class="feature-card" data-animate data-animate-delay="9">
+                <div class="feature-icon" style="background: rgba(34, 211, 238, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                </div>
+                <div class="feature-title">On-Demand Context</div>
+                <div class="feature-desc">Memories only enter context when recalled. No automatic injection means no wasted tokens &mdash; your AI pulls exactly what it needs.</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- How It Works -->
+    <section class="section" id="how-it-works">
+        <div class="section-header" style="text-align: center;" data-animate>
+            <div class="section-label">How It Works</div>
+            <h2 class="section-title">Three steps to persistent context</h2>
+            <p class="section-subtitle" style="margin-left: auto; margin-right: auto;">From conversation to searchable memory in milliseconds.</p>
+        </div>
+        <div class="steps">
+            <div class="step-card" data-animate data-animate-delay="1">
+                <div class="step-number">1</div>
+                <div class="step-title">Remember</div>
+                <div class="step-desc">Your AI detects important context during conversation and stores it as a typed, tagged memory with scoped visibility.</div>
+                <div class="step-example"><span class="hl">"Remember that</span> our API uses<br>snake_case for all JSON fields<span class="hl">"</span></div>
+            </div>
+            <div class="step-card" data-animate data-animate-delay="2">
+                <div class="step-number">2</div>
+                <div class="step-title">Store &amp; Embed</div>
+                <div class="step-desc">The memory is embedded and stored in PostgreSQL via pg_recall. Full-text search, semantic vectors, and Hebbian scoring are all unified.</div>
+                <div class="step-example"><span class="hl">fact</span> &rarr; pg_recall.mnemes<br><span class="hl">embedding</span> &rarr; pgvector<br><span class="hl">tags</span> &rarr; indexed &amp; filterable</div>
+            </div>
+            <div class="step-card" data-animate data-animate-delay="3">
+                <div class="step-number">3</div>
+                <div class="step-title">Recall</div>
+                <div class="step-desc">When context is needed, hybrid search finds the most relevant memories across all your sessions, filtered by tags and type.</div>
+                <div class="step-example"><span class="hl">"What are</span> our API naming<br>conventions?<span class="hl">"</span><br>&rarr; recalls relevant facts</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- MCP Tools -->
+    <section class="section tools-section" id="tools">
+        <div class="section-header" data-animate>
+            <div class="section-label">Protocol</div>
+            <h2 class="section-title">9 tools. One protocol.</h2>
+            <p class="section-subtitle">Memory management and session lifecycle through the Model Context Protocol.</p>
+        </div>
+        <div class="tools-container" data-animate>
+            <div class="tools-tabs">
+                <button class="tool-tab active" data-tool="remember">remember</button>
+                <button class="tool-tab" data-tool="recall">recall</button>
+                <button class="tool-tab" data-tool="forget">forget</button>
+                <button class="tool-tab" data-tool="list">list</button>
+                <button class="tool-tab" data-tool="share">share</button>
+                <button class="tool-tab" data-tool="export">export</button>
+                <button class="tool-tab" data-tool="sessions">sessions</button>
+                <button class="tool-tab" data-tool="summary">summary</button>
+                <button class="tool-tab" data-tool="context">context</button>
+            </div>
+
+            <div class="tool-panel active" data-tool-panel="remember">
+                <div class="tool-desc">Store a fact with optional tags, memory type, scope, and session ID. Proactively triggered when your AI learns something important.</div>
+                <div class="code-block">
+                    <code>{
+  "fact": "Our API uses snake_case for all JSON fields",
+  "memory_type": "factual",
+  "tags": ["api", "conventions"],
+  "scope": "org",
+  "session_id": "a1b2c3d4-..."
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="recall">
+                <div class="tool-desc">Search across memories by meaning, keywords, or both. Filter by tags and memory type to surface the right context.</div>
+                <div class="code-block">
+                    <code>{
+  "query": "What are our API naming conventions?",
+  "mode": "hybrid",
+  "limit": 5
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="forget">
+                <div class="tool-desc">Remove a specific memory by its ID. Permanently deletes the fact from storage.</div>
+                <div class="code-block">
+                    <code>{
+  "fact_id": 42
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="list">
+                <div class="tool-desc">Browse all stored memories with optional filtering by type, tags, or scope.</div>
+                <div class="code-block">
+                    <code>{
+  "memory_type": "factual",
+  "tags": ["kubernetes"],
+  "limit": 20
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="share">
+                <div class="tool-desc">Change a memory's visibility between personal and org-wide. Only the creator can change scope.</div>
+                <div class="code-block">
+                    <code>{
+  "fact_id": 42,
+  "scope": "org"
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="export">
+                <div class="tool-desc">Export memories to JSONL format for RAG ingestion, backup, or analysis.</div>
+                <div class="code-block">
+                    <code>{
+  "memory_type": "experiential",
+  "tags": ["debugging"],
+  "since": "2025-01-01T00:00:00Z"
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="sessions">
+                <div class="tool-desc">List recent sessions that created memories. Answer "what were we working on yesterday?" and find sessions to resume.</div>
+                <div class="code-block">
+                    <code>{
+  "limit": 10
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="summary">
+                <div class="tool-desc">Get a detailed breakdown of a session: memory count by type, tags used, time range, and truncated previews of each memory.</div>
+                <div class="code-block">
+                    <code>{
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+
+            <div class="tool-panel" data-tool-panel="context">
+                <div class="tool-desc">Resume where you left off. Loads all memories from a previous session, organized by type, for seamless context resumption.</div>
+                <div class="code-block">
+                    <code>{
+  "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}</code>
+                    <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture -->
+    <section class="section arch-section" id="architecture">
+        <div class="section-header" data-animate>
+            <div class="section-label">Architecture</div>
+            <h2 class="section-title">Built for production</h2>
+            <p class="section-subtitle">PostgreSQL with pg_recall for unified storage and cognitive scoring. Your choice of embedding provider.</p>
+        </div>
+        <div class="arch-diagram" data-animate>
+            <div class="arch-node">
+                <div class="arch-node-icon" style="background: rgba(255, 255, 255, 0.08);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+                </div>
+                <div class="arch-node-title">Claude Code / AI Client</div>
+                <div class="arch-node-sub">Any MCP-compatible assistant</div>
+            </div>
+            <div class="arch-connector"></div>
+            <div class="arch-connector-label">MCP (HTTP + Bearer token)</div>
+            <div class="arch-connector"></div>
+            <div class="arch-node" style="border-color: rgba(94, 234, 212, 0.3);">
+                <div class="arch-node-icon" style="background: rgba(94, 234, 212, 0.12);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#5eead4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+                </div>
+                <div class="arch-node-title" style="color: #5eead4;">ch-server</div>
+                <div class="arch-node-sub">Go API + MCP protocol engine</div>
+            </div>
+            <div class="arch-connector"></div>
+            <div class="arch-row">
+                <div class="arch-node arch-node-accent" style="border-left-color: var(--accent-blue);">
+                    <div class="arch-node-icon" style="background: rgba(59, 130, 246, 0.12);">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+                    </div>
+                    <div class="arch-node-title">PostgreSQL 18</div>
+                    <div class="arch-node-sub">Primary data store</div>
+                    <ul class="arch-node-features">
+                        <li>Versioned memory blocks</li>
+                        <li>User &amp; API key management</li>
+                        <li>Full audit trail</li>
+                        <li>GIN + trigram indexes</li>
+                    </ul>
+                </div>
+                <div class="arch-node arch-node-accent" style="border-left-color: var(--accent-purple);">
+                    <div class="arch-node-icon" style="background: rgba(167, 139, 250, 0.12);">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></svg>
+                    </div>
+                    <div class="arch-node-title">pg_recall</div>
+                    <div class="arch-node-sub">Cognitive memory extension</div>
+                    <ul class="arch-node-features">
+                        <li>Unified semantic + FTS recall</li>
+                        <li>Hebbian confidence scoring</li>
+                        <li>Supersession &amp; associations</li>
+                        <li>ACT-R temporal activation</li>
+                    </ul>
+                </div>
+                <div class="arch-node arch-node-accent" style="border-left-color: var(--accent-orange);">
+                    <div class="arch-node-icon" style="background: rgba(251, 146, 60, 0.12);">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg>
+                    </div>
+                    <div class="arch-node-title">Embedding Provider</div>
+                    <div class="arch-node-sub">Vector generation</div>
+                    <ul class="arch-node-features">
+                        <li>OpenAI-compatible API</li>
+                        <li>Configurable dimensions</li>
+                        <li>Batch concurrency control</li>
+                    </ul>
+                    <div class="arch-providers">
+                        <span class="arch-provider">Ollama</span>
+                        <span class="arch-provider">OpenAI</span>
+                        <span class="arch-provider">Together</span>
+                        <span class="arch-provider">vLLM</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Get Started -->
+    <section class="section get-started" id="get-started">
+        <div class="section-header" data-animate>
+            <div class="section-label">Quick Start</div>
+            <h2 class="section-title">Get started in 60 seconds</h2>
+            <p class="section-subtitle">Add persistent memory and context management to your AI assistant.</p>
+        </div>
+        <div class="setup-container" data-animate>
+            <div class="setup-tabs">
+                <button class="setup-tab active" data-setup="claude">Claude Code</button>
+                <button class="setup-tab" data-setup="mcp">MCP Config</button>
+                <button class="setup-tab" data-setup="helm">Helm Deploy</button>
+            </div>
+
+            <div class="setup-panel active" data-setup-panel="claude">
+                <div class="setup-step">
+                    <div class="step-label">Add Chapterhouse to Claude Code</div>
+                    <div class="code-block">
+                        <code>claude mcp add -s user -t http chapterhouse \
+  https://ch.example.com/mcp/stateless \
+  --header "Authorization: Bearer ch_k1_your_api_key"</code>
+                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="setup-panel" data-setup-panel="mcp">
+                <div class="setup-step">
+                    <div class="step-label">MCP server configuration (any compatible client)</div>
+                    <div class="code-block">
+                        <code>{
+  "mcpServers": {
+    "chapterhouse": {
+      "type": "streamable-http",
+      "url": "https://ch.example.com/mcp/stateless",
+      "headers": {
+        "Authorization": "Bearer ch_k1_your_api_key"
+      }
+    }
+  }
+}</code>
+                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="setup-panel" data-setup-panel="helm">
+                <div class="setup-step">
+                    <div class="step-label">Deploy to Kubernetes with Helm</div>
+                    <div class="code-block">
+                        <code>helm upgrade --install ch-server \
+  ch-server/charts/ch-server -n ch-system
+
+helm upgrade --install ch-web \
+  ch-web/charts/ch-web -n ch-system</code>
+                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="setup-actions">
+                <a href="https://github.com/thinkwright/chapterhouse" class="btn-secondary" target="_blank" rel="noopener">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                    View on GitHub
+                </a>
+                <a href="https://github.com/thinkwright/chapterhouse#quick-start" class="btn-primary" target="_blank" rel="noopener">Full Documentation &rarr;</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-grid">
+            <div>
+                <div class="footer-brand">Chapterhouse</div>
+                <div class="footer-desc">Cognitive memory for AI agents.</div>
+            </div>
+            <div>
+                <div class="footer-heading">Resources</div>
+                <ul class="footer-links">
+                    <li><a href="https://github.com/thinkwright/chapterhouse#quick-start" target="_blank" rel="noopener">Documentation</a></li>
+                    <li><a href="https://github.com/thinkwright/chapterhouse/blob/main/RUNBOOK.md" target="_blank" rel="noopener">Deployment Runbook</a></li>
+                    <li><a href="/admin/">Admin Console</a></li>
+                </ul>
+            </div>
+            <div>
+                <div class="footer-heading">Community</div>
+                <ul class="footer-links">
+                    <li><a href="https://github.com/thinkwright/chapterhouse" target="_blank" rel="noopener">GitHub</a></li>
+                    <li><a href="https://github.com/thinkwright/chapterhouse/issues" target="_blank" rel="noopener">Issues</a></li>
+                    <li><a href="https://github.com/thinkwright/chapterhouse/pulls" target="_blank" rel="noopener">Pull Requests</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            &copy; 2026 Thinkwright.
+        </div>
+    </footer>
+
+    <script>
+        // ===== Tab Switching (generic) =====
+        function initTabs(tabSelector, panelSelector) {
+            const tabs = document.querySelectorAll(tabSelector);
+            const panels = document.querySelectorAll(panelSelector);
+            if (!tabs.length) return;
+
+            tabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    const target = tab.dataset.tool || tab.dataset.setup;
+                    tabs.forEach(t => t.classList.toggle('active', t === tab));
+                    panels.forEach(p => {
+                        const panelKey = p.dataset.toolPanel || p.dataset.setupPanel;
+                        p.classList.toggle('active', panelKey === target);
+                    });
+                });
+            });
+        }
+
+        initTabs('[data-tool]', '[data-tool-panel]');
+        initTabs('[data-setup]', '[data-setup-panel]');
+
+        // ===== Copy to Clipboard =====
+        function copyCode(btn) {
+            const codeBlock = btn.parentElement.querySelector('code');
+            const text = codeBlock.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = 'Copy';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        }
+
+        // ===== Scroll Animations =====
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+        document.querySelectorAll('[data-animate]').forEach(el => {
+            observer.observe(el);
+        });
+
+        // ===== Mobile Nav Toggle =====
+        const navToggle = document.querySelector('.nav-toggle');
+        const navLinks = document.querySelector('.nav-links');
+
+        navToggle.addEventListener('click', () => {
+            navLinks.classList.toggle('open');
+        });
+
+        // Close mobile nav when a link is clicked
+        navLinks.querySelectorAll('a').forEach(link => {
+            link.addEventListener('click', () => {
+                navLinks.classList.remove('open');
+            });
+        });
+
+        // ===== Active Nav Highlighting =====
+        const sections = document.querySelectorAll('section[id]');
+        const navAnchors = document.querySelectorAll('.nav-link[href^="#"]');
+
+        const navObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    const id = entry.target.id;
+                    navAnchors.forEach(a => {
+                        a.classList.toggle('active', a.getAttribute('href') === '#' + id);
+                    });
+                }
+            });
+        }, { threshold: 0.2, rootMargin: '-80px 0px -50% 0px' });
+
+        sections.forEach(section => {
+            navObserver.observe(section);
+        });
+    </script>
+</body>
+</html>

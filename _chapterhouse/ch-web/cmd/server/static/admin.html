@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Chapterhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/admin.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <script>window.CH_API_BASE = ''; window.CH_MOCK_MODE = false;</script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-logo">Chapterhouse</div>
+            <div class="sidebar-subtitle">Agentic Memory</div>
+            <nav>
+                <div class="nav-section">
+                    <div class="nav-section-title">Overview</div>
+                    <a class="nav-item" href="admin.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                        Dashboard
+                    </a>
+                </div>
+                <div class="nav-section" data-admin-only>
+                    <div class="nav-section-title">Admin</div>
+                    <a class="nav-item" href="users.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                        Users
+                    </a>
+                    <a class="nav-item" href="keys.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                        API Keys
+                    </a>
+                    <a class="nav-item" href="audit.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                        Audit Log
+                    </a>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">Personal</div>
+                    <a class="nav-item" href="my-keys.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                        My API Keys
+                    </a>
+                    <a class="nav-item" href="my-activity.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        My Activity
+                    </a>
+                    <a class="nav-item" href="settings.html">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                        Settings
+                    </a>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="user-avatar">--</div>
+                    <div class="user-details">
+                        <div class="user-name" id="user-name">Loading...</div>
+                        <div class="user-role" id="user-role">-</div>
+                    </div>
+                </div>
+                <button class="btn btn-secondary" style="width:100%;margin-top:12px" onclick="logout()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    Sign Out
+                </button>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <div class="page-header">
+                <div class="page-header-content">
+                    <h1 class="page-title">Dashboard</h1>
+                </div>
+            </div>
+
+            <!-- Row 1: Stats -->
+            <div class="stats-row" id="stats-row"></div>
+
+            <!-- Row 2: Charts + Health -->
+            <div class="dashboard-grid-2col mb-2">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Memory Distribution</h3></div>
+                    <div class="card-body">
+                        <div class="chart-pair">
+                            <div class="chart-container">
+                                <div class="chart-label">By Type</div>
+                                <canvas id="type-chart" width="140" height="140"></canvas>
+                                <div id="type-legend" class="chart-legend"></div>
+                            </div>
+                            <div class="chart-container">
+                                <div class="chart-label">By Scope</div>
+                                <canvas id="scope-chart" width="140" height="140"></canvas>
+                                <div id="scope-legend" class="chart-legend"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">System Health</h3></div>
+                    <div id="health-container">
+                        <div class="health-section"><span class="text-muted" style="font-size:12px">Loading...</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Row 3: Tags + Activity -->
+            <div class="dashboard-grid-2col">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Top Tags</h3></div>
+                    <div class="card-body" id="tags-container">
+                        <p class="text-muted">Loading...</p>
+                    </div>
+                </div>
+                <div class="card dashboard-activity">
+                    <div class="card-header">
+                        <h3 class="card-title">Recent Activity</h3>
+                        <a href="audit.html" class="text-muted" style="font-size:11px;text-decoration:none">View all</a>
+                    </div>
+                    <div class="card-body" style="padding:0">
+                        <ul class="activity-list" id="activity-list">
+                            <li class="text-muted" style="padding:14px">Loading...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/ui.js"></script>
+    <script>
+        const ch = window.chapterhouse;
+
+        // Chart.js center-text plugin
+        const centerTextPlugin = {
+            id: 'centerText',
+            afterDraw(chart) {
+                const { ctx, chartArea: { left, right, top, bottom } } = chart;
+                const total = chart.config.options.plugins.centerText?.total;
+                if (total === undefined) return;
+                const cx = (left + right) / 2;
+                const cy = (top + bottom) / 2;
+                ctx.save();
+                ctx.font = 'bold 18px Inter, sans-serif';
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(total, cx, cy);
+                ctx.restore();
+            }
+        };
+        Chart.register(centerTextPlugin);
+
+        // Chart colors
+        const CHART_COLORS = [
+            'rgba(59, 130, 246, 0.85)',   // blue
+            'rgba(167, 139, 250, 0.85)',  // purple
+            'rgba(244, 114, 182, 0.85)',  // pink
+            'rgba(52, 211, 153, 0.85)',   // green
+            'rgba(251, 191, 36, 0.85)',   // yellow
+            'rgba(249, 115, 22, 0.85)',   // orange
+            'rgba(34, 211, 238, 0.85)',   // cyan
+        ];
+
+        function renderDonut(canvasId, legendId, data, labelKey, valueKey) {
+            const canvas = document.getElementById(canvasId);
+            const legendEl = document.getElementById(legendId);
+            if (!canvas || !legendEl) return;
+
+            if (!data || data.length === 0) {
+                canvas.style.display = 'none';
+                legendEl.innerHTML = '<span class="text-muted" style="font-size:11px">No data</span>';
+                return;
+            }
+
+            const labels = data.map(d => d[labelKey]);
+            const values = data.map(d => d[valueKey]);
+            const total = values.reduce((a, b) => a + b, 0);
+            const colors = data.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]);
+
+            new Chart(canvas, {
+                type: 'doughnut',
+                data: {
+                    labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: colors,
+                        borderColor: 'rgba(10, 10, 15, 0.8)',
+                        borderWidth: 2,
+                        hoverOffset: 4,
+                    }]
+                },
+                options: {
+                    responsive: false,
+                    cutout: '65%',
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(20, 20, 30, 0.95)',
+                            titleFont: { family: 'Inter', size: 11 },
+                            bodyFont: { family: 'Inter', size: 11 },
+                            padding: 8,
+                            cornerRadius: 6,
+                        },
+                        centerText: { total }
+                    }
+                }
+            });
+
+            // Custom legend
+            legendEl.innerHTML = data.map((d, i) => `
+                <div class="chart-legend-item">
+                    <span class="chart-legend-dot" style="background:${colors[i]}"></span>
+                    <span>${d[labelKey]}</span>
+                    <span class="chart-legend-count">${d[valueKey]}</span>
+                </div>
+            `).join('');
+        }
+
+        function renderHealth(sys) {
+            const el = document.getElementById('health-container');
+            if (!el || !sys) return;
+
+            const sections = [];
+
+            if (sys.postgres) {
+                sections.push(`
+                    <div class="health-section">
+                        <div class="health-section-title">PostgreSQL</div>
+                        <div class="health-pairs">
+                            <div class="health-pair"><div class="health-pair-label">Pool</div><div class="health-pair-value">${sys.postgres.acquired_conns}/${sys.postgres.max_conns}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Idle</div><div class="health-pair-value">${sys.postgres.idle_conns}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Acquires</div><div class="health-pair-value">${sys.postgres.acquire_count.toLocaleString()}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Empty</div><div class="health-pair-value">${sys.postgres.empty_acquire_count}</div></div>
+                        </div>
+                    </div>
+                `);
+            }
+
+            if (sys.memory) {
+                sections.push(`
+                    <div class="health-section">
+                        <div class="health-section-title">Mnemes</div>
+                        <div class="health-pairs">
+                            <div class="health-pair"><div class="health-pair-label">Active</div><div class="health-pair-value">${sys.memory.total_memory_blocks}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Concepts</div><div class="health-pair-value">${sys.memory.unique_memory_names}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Size</div><div class="health-pair-value">${ch.formatBytes(sys.memory.total_content_bytes)}</div></div>
+                            <div class="health-pair"><div class="health-pair-label">Users</div><div class="health-pair-value">${sys.memory.users_with_memories}</div></div>
+                        </div>
+                    </div>
+                `);
+            }
+
+            el.innerHTML = sections.length ? sections.join('') : '<div class="health-section"><span class="text-muted" style="font-size:12px">No health data</span></div>';
+        }
+
+        function statCard(label, value, sub, accent) {
+            return `<div class="stat-card" data-accent="${accent}">
+                <div class="stat-label">${label}</div>
+                <div class="stat-value">${value}</div>
+                ${sub ? `<div class="stat-sub">${sub}</div>` : ''}
+            </div>`;
+        }
+
+        function activityIconClass(action) {
+            if (action.startsWith('mcp.')) return 'memory';
+            if (action === 'login' || action === 'logout') return 'success';
+            if (action === 'create') return 'api';
+            return 'user';
+        }
+
+        async function loadDashboard() {
+            try {
+                const [s, sys, typeDist, scopeDist, tags, audit] = await Promise.all([
+                    ch.stats.get(),
+                    ch.stats.getSystem(),
+                    ch.stats.getMemoryTypeDistribution(),
+                    ch.stats.getMemoryScopeDistribution(),
+                    ch.stats.getTopTags(),
+                    ch.adminAudit.list({ limit: 8 }),
+                ]);
+
+                // Stats row
+                document.getElementById('stats-row').innerHTML = [
+                    statCard('Users', s.active_users, `${s.admin_users} admins`, 'blue'),
+                    statCard('API Keys', s.active_api_keys, null, 'purple'),
+                    statCard('Sessions', s.active_sessions, null, 'green'),
+                    statCard('Mnemes', sys?.memory?.total_memory_blocks ?? '-', sys?.memory ? `${sys.memory.unique_memory_names} concepts` : '', 'cyan'),
+                ].join('');
+
+                // Donut charts
+                renderDonut('type-chart', 'type-legend', typeDist, 'memory_type', 'count');
+                renderDonut('scope-chart', 'scope-legend', scopeDist, 'scope', 'count');
+
+                // Health
+                renderHealth(sys);
+
+                // Tags
+                renderTagCloud('tags-container', tags);
+
+                // Activity
+                const actList = document.getElementById('activity-list');
+                if (audit.entries && audit.entries.length > 0) {
+                    actList.innerHTML = audit.entries.map(e => `
+                        <li class="activity-item">
+                            <div class="activity-icon ${activityIconClass(e.action)}">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                                </svg>
+                            </div>
+                            <div class="activity-content">
+                                <div class="activity-text"><strong>${e.actor_username || ch.truncateId(e.actor_id)}</strong> ${e.action} ${e.resource_type}</div>
+                                <div class="activity-time">${ch.formatRelativeTime(e.created_at)}</div>
+                            </div>
+                        </li>
+                    `).join('');
+                } else {
+                    actList.innerHTML = '<li class="text-muted" style="padding:14px">No recent activity</li>';
+                }
+            } catch (err) {
+                console.error('Dashboard load error:', err);
+            }
+        }
+
+        loadDashboard();
+    </script>
+</body>
+</html>

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Keys - Chapterhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/admin.css">
+    <script>window.CH_API_BASE = ''; window.CH_MOCK_MODE = false;</script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-logo">Chapterhouse</div>
+            <div class="sidebar-subtitle">Agentic Memory</div>
+            <nav>
+                <div class="nav-section">
+                    <div class="nav-section-title">Overview</div>
+                    <a class="nav-item" href="admin.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Dashboard</a>
+                </div>
+                <div class="nav-section" data-admin-only>
+                    <div class="nav-section-title">Admin</div>
+                    <a class="nav-item" href="users.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Users</a>
+                    <a class="nav-item" href="keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API Keys</a>
+                    <a class="nav-item" href="audit.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Audit Log</a>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">Personal</div>
+                    <a class="nav-item" href="my-keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>My API Keys</a>
+                    <a class="nav-item" href="my-activity.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>My Activity</a>
+                    <a class="nav-item" href="settings.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</a>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="user-avatar">--</div>
+                    <div class="user-details"><div class="user-name" id="user-name">Loading...</div><div class="user-role" id="user-role">-</div></div>
+                </div>
+                <button class="btn btn-secondary" style="width:100%;margin-top:12px" onclick="logout()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Sign Out</button>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <div class="page-header">
+                <div class="page-header-content">
+                    <h1 class="page-title">API Keys</h1>
+                    <p class="page-subtitle">Manage API keys for all users</p>
+                </div>
+                <div class="page-actions">
+                    <button class="btn btn-primary" onclick="showCreateKey()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        Create Key
+                    </button>
+                </div>
+            </div>
+
+            <div class="search-bar">
+                <select class="form-select" id="user-filter" onchange="loadKeys()" style="max-width:250px">
+                    <option value="">All Users</option>
+                </select>
+            </div>
+
+            <div class="card">
+                <div id="keys-table"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/ui.js"></script>
+    <script>
+        const ch = window.chapterhouse;
+        let allUsers = [];
+
+        async function init() {
+            try {
+                const result = await ch.users.list({ limit: 100, active: true });
+                allUsers = result.data || [];
+                const select = document.getElementById('user-filter');
+                allUsers.forEach(u => {
+                    const opt = document.createElement('option');
+                    opt.value = u.id;
+                    opt.textContent = u.username;
+                    select.appendChild(opt);
+                });
+
+                // Check for ?user= query param
+                const params = new URLSearchParams(window.location.search);
+                if (params.get('user')) {
+                    select.value = params.get('user');
+                }
+            } catch (err) {
+                console.error('Failed to load users:', err);
+            }
+            loadKeys();
+        }
+
+        async function loadKeys() {
+            const userId = document.getElementById('user-filter').value;
+            try {
+                const result = userId
+                    ? await ch.adminKeys.listByUser(userId)
+                    : await ch.adminKeys.listAll();
+
+                renderTable('keys-table', [
+                    { label: 'Name', render: k => `<span class="text-cyan">${k.name}</span>` },
+                    { label: 'Key Prefix', render: k => `<span class="api-key">${k.key_prefix}...</span> <button class="copy-btn" onclick="copyToClipboard('${k.key_prefix}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` },
+                    { label: 'User', render: k => `<span class="text-secondary" style="font-size:13px">${k.username || ch.truncateId(k.user_id)}</span>` },
+                    { label: 'Status', render: k => statusBadge(ch.keyStatus(k)) },
+                    { label: 'Last Used', render: k => ch.formatRelativeTime(k.last_used_at) },
+                    { label: 'Created', render: k => ch.formatDate(k.created_at) },
+                    { label: 'Actions', render: k => k.revoked_at ? '' : `<button class="btn btn-xs btn-danger" onclick="revokeKey('${k.id}', '${k.name}')">Revoke</button>` },
+                ], result.keys, { emptyTitle: 'No API keys', emptyText: 'No API keys found.' });
+            } catch (err) {
+                toast.error('Failed to load keys');
+            }
+        }
+
+        function showCreateKey() {
+            const userOptions = allUsers.map(u => `<option value="${u.id}">${u.username}</option>`).join('');
+            const content = `
+                <form id="create-key-form">
+                    <div class="form-group">
+                        <label class="form-label required">Key Name</label>
+                        <input type="text" name="name" class="form-input" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label required">User</label>
+                        <select name="user_id" class="form-select" required>${userOptions}</select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Expires In (days)</label>
+                        <input type="number" name="expires_in" class="form-input" placeholder="90" min="1" max="365">
+                    </div>
+                </form>
+            `;
+            const footer = document.createElement('div');
+            footer.innerHTML = '<button class="btn btn-secondary" onclick="modal.close()">Cancel</button><button class="btn btn-primary" id="create-btn">Create Key</button>';
+            modal.open({ title: 'Create API Key', content, footer });
+
+            footer.querySelector('#create-btn').onclick = async () => {
+                const data = getFormData(document.getElementById('create-key-form'));
+                if (!data.name || !data.user_id) { toast.error('Name and user are required'); return; }
+                const payload = { name: data.name };
+                if (data.expires_in) payload.expires_in = data.expires_in + 'd';
+                try {
+                    const result = await ch.adminKeys.create(data.user_id, payload);
+                    modal.close();
+                    showKeyReveal(result);
+                    loadKeys();
+                } catch (err) {
+                    toast.error(err.message || 'Failed to create key');
+                }
+            };
+        }
+
+        function showKeyReveal(keyData) {
+            const content = `
+                <p class="mb-2">API key created. Copy it now - you won't see it again.</p>
+                <div class="code-block" style="word-break:break-all">${keyData.key}<button class="copy-btn" onclick="copyToClipboard('${keyData.key}', 'API key copied!')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
+            `;
+            modal.open({ title: 'API Key Created', content, footer: '<button class="btn btn-primary" onclick="modal.close()">Done</button>' });
+        }
+
+        async function revokeKey(id, name) {
+            const confirmed = await modal.confirm(`Revoke API key "${name}"? This cannot be undone.`, 'Revoke API Key');
+            if (!confirmed) return;
+            try {
+                await ch.adminKeys.revoke(id);
+                toast.success('API key revoked');
+                loadKeys();
+            } catch (err) {
+                toast.error(err.message || 'Failed to revoke key');
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

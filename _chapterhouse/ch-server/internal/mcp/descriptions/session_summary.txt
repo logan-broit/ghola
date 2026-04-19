@@ -1,0 +1,14 @@
+Get a detailed summary of a specific session's memories. Shows what was learned, decided, and worked on during that session.
+
+Returns:
+- Time range and duration
+- Memory count grouped by type (factual, experiential, working)
+- Tags used during the session
+- Preview of each memory (truncated for readability)
+
+WHEN TO USE:
+- User wants to understand what happened in a specific session
+- Before deciding whether to resume a session's context
+- Reviewing past work for status updates or handoffs
+
+Requires a session_id — use list_sessions first if you don't have one.

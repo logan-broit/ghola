@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ch-server
+  labels:
+    app: ch-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ch-server
+  template:
+    metadata:
+      labels:
+        app: ch-server
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: ch-server
+          image: registry.example.com/chapterhouse/ch-server:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: ch-server-config
+          env:
+            # Database credentials from CNPG auto-generated secret
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: chapterhouse-db-app
+                  key: username
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chapterhouse-db-app
+                  key: password
+            # Admin bootstrap credentials
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: ch-admin-bootstrap
+                  key: ADMIN_USERNAME
+                  optional: true
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ch-admin-bootstrap
+                  key: ADMIN_PASSWORD
+                  optional: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3

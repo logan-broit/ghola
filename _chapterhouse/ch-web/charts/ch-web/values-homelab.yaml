@@ -1,0 +1,23 @@
+# Chapterhouse Web - Homelab (K3s) Overrides
+# ============================================
+# Usage: helm upgrade --install ch-web ./ch-web/charts/ch-web -f ch-web/charts/ch-web/values-homelab.yaml
+
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: thinkwright/chapterhouse/ch-web
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+resources:
+  requests:
+    cpu: 5m
+    memory: 8Mi
+  limits:
+    cpu: 50m
+    memory: 16Mi
+
+virtualService:
+  enabled: false

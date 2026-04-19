@@ -1,0 +1,57 @@
+Store a multi-turn conversation as one memory with per-turn granularity. Use this when you want to preserve a conversation (or any structured multi-turn exchange) as a single session memory whose individual turns are separately retrievable.
+
+WHEN TO USE remember_session vs remember:
+- Use `remember` for a single self-contained fact: "The prod DB is Postgres 18."
+- Use `remember_session` for a multi-turn exchange where individual turns matter:
+  a debugging session, a research conversation, a planning discussion, a code
+  review, a design review, an interview transcript, a support ticket thread.
+
+WHY IT MATTERS:
+A session-level embedding blurs fine detail; specific turns get lost in the
+average. remember_session stores one embedding per turn so queries about a
+specific fact from turn 3 match turn 3 directly, while all the cognitive
+primitives (Hebbian associations, confidence evolution, consolidation,
+contradiction detection) continue to operate at the session level.
+
+TURN STRUCTURE:
+Each turn is {role, content}. Role is one of: user | assistant | system | tool.
+Content is the exact text of that turn, INCLUDING any role markers or
+separators the caller wants to preserve (e.g., "USER: " prefixes, leading
+newlines). The server does NOT invent or normalize role markers.
+
+CRITICAL: concatenating turn contents in order MUST equal session_text
+byte-for-byte. Gaps, overlaps, or content mismatches fail the call before
+any memory is stored. This is how the server verifies the caller hasn't
+dropped or duplicated content.
+
+EXAMPLES:
+
+A debugging session with role markers in content:
+  session_text: "USER: my pod is OOMKilled\nASSISTANT: what are the limits?"
+  turns:
+    [{role: "user", content: "USER: my pod is OOMKilled"},
+     {role: "assistant", content: "\nASSISTANT: what are the limits?"}]
+
+A clean two-turn exchange without role markers:
+  session_text: "Do we ship on Friday?Yes, cut the release branch Thursday."
+  turns:
+    [{role: "user", content: "Do we ship on Friday?"},
+     {role: "assistant", content: "Yes, cut the release branch Thursday."}]
+  (concatenation reconstructs session_text exactly; no role markers needed
+   if the caller doesn't want them)
+
+CLASSIFICATION (same as remember):
+- memory_type: 'factual' (default) | 'experiential' | 'working'
+- scope: 'personal' (default) | 'org'
+- tags: free-form list
+
+SESSION TRACKING:
+- session_id: optional UUID to group this memory with other session memories.
+  If not provided, the transport session ID is used.
+
+RETURNS: parent memory UUID, sub_mneme count, optional near-duplicate notice.
+
+COST NOTES:
+- Two embedding HTTP calls per ingest: one for the session-level parent
+  embedding, one batched call for all turn embeddings.
+- Atomic: parent + all per-turn records land together or not at all.

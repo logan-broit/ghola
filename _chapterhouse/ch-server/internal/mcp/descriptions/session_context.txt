@@ -1,0 +1,13 @@
+Load all memories from a previous session for context resumption. Use this to "resume where you left off" by loading the full context of a past session.
+
+Returns all memories from the session, organized by type:
+1. Factual memories (standards, policies, infrastructure)
+2. Experiential memories (solutions, lessons learned)
+3. Working memories (session-specific context)
+
+WHEN TO USE:
+- User says "continue where we left off" or "resume that session"
+- Starting a new session that continues work from a previous one
+- Need to reload context from a specific past session
+
+Requires a session_id — use list_sessions first if you don't have one.
