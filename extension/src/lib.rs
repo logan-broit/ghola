@@ -29,6 +29,9 @@ pub mod associations;
 #[cfg(any(test, feature = "pg_test"))]
 pub mod integration_tests;
 
+#[cfg(any(test, feature = "pg_test"))]
+pub mod tests;
+
 // ---------------------------------------------------------------------------
 // GUC: pg_ghola.database
 // ---------------------------------------------------------------------------
