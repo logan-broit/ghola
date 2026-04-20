@@ -50,9 +50,6 @@ pub static PG_GHOLA_DATABASE: GucSetting<Option<CString>> =
 #[allow(non_snake_case)]
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
-    use pgrx::bgworkers::*;
-    use std::time::Duration;
-
     GucRegistry::define_string_guc(
         c"ghola.database",
         c"Target database for the pg_ghola background worker.",
@@ -61,6 +58,20 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
+
+    register_background_workers();
+}
+
+// Workers are skipped under the pg_test feature during the v2 rewrite:
+// they still reference the old `ghola.*` schema and would crash-loop
+// against a test instance seeded with the new `semantic.*` schema.
+// Task 1.6 removes the gating worker; Task 1.7 rewires consolidation
+// and contradiction to `semantic.*`; at that point the test-side
+// skip can drop.
+#[cfg(not(feature = "pg_test"))]
+fn register_background_workers() {
+    use pgrx::bgworkers::*;
+    use std::time::Duration;
 
     BackgroundWorkerBuilder::new("pg_ghola Consolidation Worker")
         .set_function("consolidation_worker_main")
@@ -80,7 +91,6 @@ pub extern "C-unwind" fn _PG_init() {
         .set_restart_time(Some(Duration::from_secs(10)))
         .load();
 
-    // Gating extraction worker
     BackgroundWorkerBuilder::new("pg_ghola Gating Worker")
         .set_function("gating_worker_main")
         .set_library("pg_ghola")
@@ -89,6 +99,11 @@ pub extern "C-unwind" fn _PG_init() {
         .set_start_time(BgWorkerStartTime::RecoveryFinished)
         .set_restart_time(Some(Duration::from_secs(10)))
         .load();
+}
+
+#[cfg(feature = "pg_test")]
+fn register_background_workers() {
+    // Disabled under pg_test — see comment above.
 }
 
 #[cfg(test)]
