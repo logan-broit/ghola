@@ -19,7 +19,6 @@ pub mod scoring;
 pub mod schema;
 pub mod hebbian;
 pub mod recall;
-pub mod worker_stats;
 pub mod consolidation_worker;
 pub mod contradiction;
 pub mod contradiction_worker;
