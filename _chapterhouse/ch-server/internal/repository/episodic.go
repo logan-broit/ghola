@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -215,6 +216,96 @@ ON CONFLICT (id) DO UPDATE SET
 	created_at     = EXCLUDED.created_at
 RETURNING (xmax = 0)
 `
+
+// ---------------------------------------------------------------------
+// Share / Forget
+// ---------------------------------------------------------------------
+
+// ErrShareNotOwned signals a 403: the caller is trying to share a
+// scope they don't own.
+var ErrShareNotOwned = fmt.Errorf("caller does not own the referenced scope")
+
+// CreateShareParams carries the validated inputs for creating a share.
+type CreateShareParams struct {
+	Caller    uuid.UUID
+	Target    string
+	TargetID  *uuid.UUID
+	ScopeType string
+	ScopeID   uuid.UUID
+}
+
+// CreateEpisodicShare inserts a share row after verifying the caller
+// owns the referenced scope. Returns ErrShareNotOwned if not.
+func (r *Repository) CreateEpisodicShare(ctx context.Context, p CreateShareParams) (uuid.UUID, error) {
+	if err := r.verifyScopeOwnership(ctx, p.Caller, p.ScopeType, p.ScopeID); err != nil {
+		return uuid.Nil, err
+	}
+
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO episodic.shares
+			(owner_user_id, target, target_id, scope_type, scope_id)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id
+	`, p.Caller, p.Target, p.TargetID, p.ScopeType, p.ScopeID).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert share: %w", err)
+	}
+	return id, nil
+}
+
+// verifyScopeOwnership checks that `caller` is the user_id on the
+// referenced session / event. For branch scopes the check is against
+// the root event (scope_id itself).
+func (r *Repository) verifyScopeOwnership(
+	ctx context.Context, caller uuid.UUID, scopeType string, scopeID uuid.UUID,
+) error {
+	var table string
+	switch scopeType {
+	case "session":
+		table = "episodic.sessions"
+	case "event", "branch":
+		table = "episodic.events"
+	default:
+		return fmt.Errorf("unknown scope_type %q", scopeType)
+	}
+
+	var ownerID uuid.UUID
+	err := r.pool.QueryRow(ctx,
+		`SELECT user_id FROM `+table+` WHERE id = $1`,
+		scopeID,
+	).Scan(&ownerID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrShareNotOwned
+		}
+		return fmt.Errorf("lookup scope owner: %w", err)
+	}
+	if ownerID != caller {
+		return ErrShareNotOwned
+	}
+	return nil
+}
+
+// SoftDeleteEpisodicEvents flips the target events to the "forgotten"
+// state: text='[forgotten]', embedding=NULL. The tree's parent_id
+// links stay intact so descendants aren't orphaned. Caller can only
+// forget events they own; the WHERE user_id = $caller clause is what
+// enforces that.
+func (r *Repository) SoftDeleteEpisodicEvents(
+	ctx context.Context, caller uuid.UUID, ids []uuid.UUID,
+) (int, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE episodic.events
+		SET text = '[forgotten]',
+		    embedding = NULL
+		WHERE user_id = $1 AND id = ANY($2::uuid[])
+	`, caller, ids)
+	if err != nil {
+		return 0, fmt.Errorf("soft delete: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
 
 // ---------------------------------------------------------------------
 // Query

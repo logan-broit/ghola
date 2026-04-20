@@ -223,10 +223,119 @@ func (h *EpisodicHandler) Query(w http.ResponseWriter, r *http.Request) {
 	OK(w, out)
 }
 
+// ---------------------------------------------------------------------
+// Share
+// ---------------------------------------------------------------------
+
+type shareRequest struct {
+	OwnerUserID uuid.UUID  `json:"owner_user_id"`
+	Target      string     `json:"target"`
+	TargetID    *uuid.UUID `json:"target_id,omitempty"`
+	ScopeType   string     `json:"scope_type"`
+	ScopeID     uuid.UUID  `json:"scope_id"`
+}
+
+type shareResponse struct {
+	ID uuid.UUID `json:"id"`
+}
+
 func (h *EpisodicHandler) Share(w http.ResponseWriter, r *http.Request) {
-	apierror.InternalError("/v1/episodic/share lands in Phase 3.6").WriteJSON(w)
+	caller := auth.UserIDFromContext(r.Context())
+	if caller == uuid.Nil {
+		apierror.Unauthorized("missing auth context").WriteJSON(w)
+		return
+	}
+
+	var req shareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierror.BadRequest("body decode: " + err.Error()).WriteJSON(w)
+		return
+	}
+	if req.OwnerUserID != caller {
+		apierror.Forbidden("owner_user_id must match caller").WriteJSON(w)
+		return
+	}
+	switch req.Target {
+	case "team", "user":
+	default:
+		apierror.BadRequest("target must be 'team' or 'user'").WriteJSON(w)
+		return
+	}
+	if req.Target == "user" && (req.TargetID == nil || *req.TargetID == uuid.Nil) {
+		apierror.BadRequest("target_id is required when target='user'").WriteJSON(w)
+		return
+	}
+	switch req.ScopeType {
+	case "session", "branch", "event":
+	default:
+		apierror.BadRequest("scope_type must be 'session' | 'branch' | 'event'").WriteJSON(w)
+		return
+	}
+	if req.ScopeID == uuid.Nil {
+		apierror.BadRequest("scope_id is required").WriteJSON(w)
+		return
+	}
+
+	id, err := h.repo.CreateEpisodicShare(r.Context(), repository.CreateShareParams{
+		Caller:    caller,
+		Target:    req.Target,
+		TargetID:  req.TargetID,
+		ScopeType: req.ScopeType,
+		ScopeID:   req.ScopeID,
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrShareNotOwned) {
+			apierror.Forbidden("caller does not own the referenced scope").WriteJSON(w)
+			return
+		}
+		slog.Error("episodic share failed", "err", err.Error())
+		apierror.InternalError("share failed").WithError(err).WriteJSON(w)
+		return
+	}
+
+	OK(w, shareResponse{ID: id})
+}
+
+// ---------------------------------------------------------------------
+// Forget
+// ---------------------------------------------------------------------
+
+type forgetRequest struct {
+	UserID   uuid.UUID   `json:"user_id"`
+	EventIDs []uuid.UUID `json:"event_ids"`
+}
+
+type forgetResponse struct {
+	Forgotten int `json:"forgotten"`
 }
 
 func (h *EpisodicHandler) Forget(w http.ResponseWriter, r *http.Request) {
-	apierror.InternalError("/v1/episodic/forget lands in Phase 3.6").WriteJSON(w)
+	caller := auth.UserIDFromContext(r.Context())
+	if caller == uuid.Nil {
+		apierror.Unauthorized("missing auth context").WriteJSON(w)
+		return
+	}
+
+	var req forgetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierror.BadRequest("body decode: " + err.Error()).WriteJSON(w)
+		return
+	}
+	if req.UserID != uuid.Nil && req.UserID != caller {
+		apierror.Forbidden("user_id must match caller").WriteJSON(w)
+		return
+	}
+	if len(req.EventIDs) == 0 {
+		apierror.BadRequest("event_ids must be non-empty").WriteJSON(w)
+		return
+	}
+
+	forgotten, err := h.repo.SoftDeleteEpisodicEvents(r.Context(), caller, req.EventIDs)
+	if err != nil {
+		slog.Error("episodic forget failed", "err", err.Error())
+		apierror.InternalError("forget failed").WithError(err).WriteJSON(w)
+		return
+	}
+
+	OK(w, forgetResponse{Forgotten: forgotten})
 }
