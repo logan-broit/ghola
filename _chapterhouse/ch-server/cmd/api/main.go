@@ -117,19 +117,28 @@ func run() error {
 
 	apiKeyProvider := auth.NewAPIKeyProviderWithAdapter(queries)
 	apiAuthProvider := auth.NewCompositeProvider(apiKeyProvider, authProvider)
-	_ = apiAuthProvider // unused until the v2 /v1 API handlers land in Phase 3.4+
+
+	// v2 /v1 surface — consumed only by the ghola local service.
+	episodicHandler := handler.NewEpisodicHandler(repo)
+	semanticHandler := handler.NewSemanticHandler(repo)
 
 	// Legacy MCP transport removed in v2: agents now talk to the
 	// ghola local service, which in turn calls chapterhouse's
-	// internal /v1 REST surface (Phase 3.4+). The old MCP code is
-	// kept in internal/mcp_legacy for reference.
+	// internal /v1 REST surface. The old MCP code is kept in
+	// internal/mcp_legacy for reference.
 
 	// Rate limiter for the admin login path only (MCP limiter dropped
 	// with the MCP route).
 	loginLimiter := middleware.NewRateLimiter(5.0/60.0, 5)
 	defer loginLimiter.Close()
 
-	router := buildRouter(cfg, logger, sessionProvider, healthHandler, adminHandler, systemStatsHandler, loginLimiter)
+	router := buildRouter(
+		cfg, logger,
+		sessionProvider, apiAuthProvider,
+		healthHandler, adminHandler, systemStatsHandler,
+		episodicHandler, semanticHandler,
+		loginLimiter,
+	)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
@@ -177,9 +186,12 @@ func buildRouter(
 	cfg *config.Config,
 	logger *slog.Logger,
 	sessionProvider *auth.SessionProvider,
+	apiAuthProvider auth.Provider,
 	healthHandler *handler.HealthHandler,
 	adminHandler *handler.AdminHandler,
 	systemStatsHandler *handler.SystemStatsHandler,
+	episodicHandler *handler.EpisodicHandler,
+	semanticHandler *handler.SemanticHandler,
 	loginLimiter *middleware.RateLimiter,
 ) *chi.Mux {
 	r := chi.NewRouter()
@@ -195,6 +207,27 @@ func buildRouter(
 	// Health endpoints (no auth required)
 	r.Get("/health", healthHandler.Health)
 	r.Get("/ready", healthHandler.Ready)
+
+	// v2 internal API — called only by the ghola local service.
+	// Bearer API key required; middleware populates auth.Context which
+	// the handlers read via auth.UserIDFromContext.
+	r.Route("/v1", func(r chi.Router) {
+		r.Use(middleware.AuthMiddleware(apiAuthProvider))
+		r.Use(middleware.ContentTypeJSON)
+
+		r.Route("/episodic", func(r chi.Router) {
+			r.Post("/ingest", episodicHandler.Ingest)
+			r.Post("/query", episodicHandler.Query)
+			r.Post("/share", episodicHandler.Share)
+			r.Post("/forget", episodicHandler.Forget)
+		})
+
+		r.Route("/semantic", func(r chi.Router) {
+			r.Post("/query", semanticHandler.Query)
+			r.Post("/feedback", semanticHandler.Feedback)
+			r.Post("/list", semanticHandler.List)
+		})
+	})
 
 	// API routes
 	r.Route("/api/v1", func(r chi.Router) {
