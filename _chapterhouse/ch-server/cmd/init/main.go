@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/config"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -52,13 +53,21 @@ func run() error {
 	}
 	logger.Info("database connectivity verified")
 
-	// Verify pg_ghola extension is available
+	// Verify ghola extension is available (renamed from pg_ghola in v2).
 	var extVersion string
-	err = pool.QueryRow(ctx, "SELECT extversion FROM pg_extension WHERE extname = 'pg_ghola'").Scan(&extVersion)
+	err = pool.QueryRow(ctx, "SELECT extversion FROM pg_extension WHERE extname = 'ghola'").Scan(&extVersion)
 	if err != nil {
-		return fmt.Errorf("pg_ghola extension not found — ensure the custom CNPG image includes pg_ghola: %w", err)
+		return fmt.Errorf("ghola extension not found — ensure the custom CNPG image includes ghola: %w", err)
 	}
-	logger.Info("pg_ghola extension verified", slog.String("version", extVersion))
+	logger.Info("ghola extension verified", slog.String("version", extVersion))
+
+	// Apply episodic migrations. This is idempotent — already-applied
+	// migrations are skipped via _migrations.applied. Requires
+	// EMBEDDING_DIM to be set (see repository/migrate.go).
+	if err := repository.ApplyMigrations(ctx, pool); err != nil {
+		return fmt.Errorf("apply episodic migrations: %w", err)
+	}
+	logger.Info("episodic migrations applied")
 
 	logger.Info("init complete")
 	return nil
