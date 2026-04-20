@@ -85,8 +85,8 @@ impl ContradictionStateMachine {
 fn process_one_contradiction() -> (i64, i64) {
     let result = Spi::get_one::<pgrx::Uuid>(
         "WITH d AS ( \
-             DELETE FROM ghola.contradiction_queue \
-             WHERE id = (SELECT id FROM ghola.contradiction_queue ORDER BY id LIMIT 1) \
+             DELETE FROM semantic.contradiction_queue \
+             WHERE id = (SELECT id FROM semantic.contradiction_queue ORDER BY id LIMIT 1) \
              RETURNING mneme_id \
          ) SELECT mneme_id FROM d"
     );
@@ -94,7 +94,7 @@ fn process_one_contradiction() -> (i64, i64) {
     match result {
         Ok(Some(mneme_id)) => {
             let candidates = Spi::get_one::<i64>(&format!(
-                "SELECT ghola.flag_contradictions('{mneme_id}'::uuid, 0.85)"
+                "SELECT semantic.flag_contradictions('{mneme_id}'::uuid, 0.85)"
             ))
             .unwrap_or(Some(0))
             .unwrap_or(0);
@@ -108,36 +108,6 @@ fn process_one_contradiction() -> (i64, i64) {
         }
         _ => (0, 0),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Stats updates
-// ---------------------------------------------------------------------------
-
-fn write_contradiction_stats(
-    state: &str,
-    scans: i64,
-    candidates: i64,
-    poll_ms: i32,
-) {
-    let queue_depth = Spi::get_one::<i64>(
-        "SELECT count(*) FROM ghola.contradiction_queue",
-    )
-    .unwrap_or(Some(0))
-    .unwrap_or(0);
-
-    Spi::run(&format!(
-        "UPDATE ghola.contradiction_worker_stats SET \
-             state = '{state}', \
-             queue_depth = {queue_depth}, \
-             scans_completed = {scans}, \
-             candidates_found = {candidates}, \
-             last_scan_at = now(), \
-             poll_interval_ms = {poll_ms}, \
-             updated_at = now() \
-         WHERE id = 1",
-    ))
-    .unwrap_or_else(|e| log!("pg_ghola contradiction worker: stats update failed: {e}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -164,36 +134,16 @@ pub extern "C-unwind" fn contradiction_worker_main(_arg: pg_sys::Datum) {
     let mut total_scans: i64 = 0;
     let mut total_candidates: i64 = 0;
 
-    // Mark worker as running
-    BackgroundWorker::transaction(|| {
-        Spi::run(
-            "UPDATE ghola.contradiction_worker_stats SET \
-                 state = 'active', \
-                 started_at = now(), \
-                 updated_at = now() \
-             WHERE id = 1",
-        )
-        .unwrap_or_else(|e| log!("pg_ghola contradiction worker: init failed: {e}"));
-    });
-
     loop {
         if BackgroundWorker::sigterm_received() {
-            log!("pg_ghola contradiction worker: SIGTERM received, shutting down");
-            let state_name = sm.state.name().to_string();
-            let poll_ms = sm.state.poll_interval_ms() as i32;
-            let scans = total_scans;
-            let candidates = total_candidates;
-            BackgroundWorker::transaction(move || {
-                write_contradiction_stats(&state_name, scans, candidates, poll_ms);
-            });
             log!(
-                "pg_ghola contradiction worker: shutdown complete, {} scans, {} candidates",
+                "pg_ghola contradiction worker: SIGTERM received, \
+                 shutdown complete, {} scans, {} candidates",
                 total_scans, total_candidates
             );
             break;
         }
 
-        // Process one queue item
         let (processed, candidates) = BackgroundWorker::transaction(|| {
             process_one_contradiction()
         });
@@ -203,15 +153,6 @@ pub extern "C-unwind" fn contradiction_worker_main(_arg: pg_sys::Datum) {
             total_candidates += candidates;
         }
         sm.transition(processed);
-
-        // Update stats periodically
-        let state_name = sm.state.name().to_string();
-        let poll_ms = sm.state.poll_interval_ms() as i32;
-        let scans = total_scans;
-        let candidates = total_candidates;
-        BackgroundWorker::transaction(move || {
-            write_contradiction_stats(&state_name, scans, candidates, poll_ms);
-        });
 
         BackgroundWorker::wait_latch(Some(sm.poll_interval()));
     }
