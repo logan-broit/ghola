@@ -12,11 +12,8 @@ import (
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/config"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/mcp"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/middleware"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/mneme"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 
 	"github.com/go-chi/chi/v5"
@@ -107,22 +104,6 @@ func run() error {
 		)
 	}
 
-	var embedder embedding.Provider
-	embeddingCfg := embedding.Config{
-		URL:         cfg.Embedding.URL,
-		Model:       cfg.Embedding.Model,
-		Dimensions:  cfg.Embedding.Dimensions,
-		Concurrency: cfg.Embedding.Concurrency,
-	}
-	embedder = embedding.NewOpenAIProvider(embeddingCfg, cfg.Embedding.APIKey)
-	logger.Info("using OpenAI-compatible embedding provider",
-		slog.String("url", cfg.Embedding.URL),
-		slog.String("model", cfg.Embedding.Model),
-	)
-
-	// pg_ghola store — replaces Qdrant + memory_blocks
-	store := mneme.NewStore(pool, embedder, logger)
-
 	healthHandler := handler.NewHealthHandler(pool)
 	sessionProvider := auth.NewSessionProviderWithAdapter(auth.SessionProviderConfig{
 		Queries:         queries,
@@ -136,19 +117,19 @@ func run() error {
 
 	apiKeyProvider := auth.NewAPIKeyProviderWithAdapter(queries)
 	apiAuthProvider := auth.NewCompositeProvider(apiKeyProvider, authProvider)
+	_ = apiAuthProvider // unused until the v2 /v1 API handlers land in Phase 3.4+
 
-	// MCP endpoints only accept API key auth (no fallback to default provider)
-	mcpServer := mcp.NewServer(store, queries, logger)
-	mcpHTTPHandler := mcp.NewStreamableHTTPHandler(mcpServer, apiKeyProvider, logger)
-	mcpStatelessHandler := mcp.NewStatelessHTTPHandler(mcpServer, apiKeyProvider, logger)
+	// Legacy MCP transport removed in v2: agents now talk to the
+	// ghola local service, which in turn calls chapterhouse's
+	// internal /v1 REST surface (Phase 3.4+). The old MCP code is
+	// kept in internal/mcp_legacy for reference.
 
-	// Rate limiters: login (5 req/min per IP), MCP (10 req/sec, burst 50 per user)
+	// Rate limiter for the admin login path only (MCP limiter dropped
+	// with the MCP route).
 	loginLimiter := middleware.NewRateLimiter(5.0/60.0, 5)
 	defer loginLimiter.Close()
-	mcpLimiter := middleware.NewRateLimiter(10, 50)
-	defer mcpLimiter.Close()
 
-	router := buildRouter(cfg, logger, apiAuthProvider, sessionProvider, healthHandler, adminHandler, systemStatsHandler, mcpHTTPHandler, mcpStatelessHandler, loginLimiter, mcpLimiter)
+	router := buildRouter(cfg, logger, sessionProvider, healthHandler, adminHandler, systemStatsHandler, loginLimiter)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
@@ -188,10 +169,6 @@ func run() error {
 		return server.Close()
 	}
 
-	// Stop session cleanup goroutine and wait for in-flight background operations
-	mcpHTTPHandler.Close()
-	mcpServer.Wait()
-
 	logger.Info("server shutdown complete")
 	return nil
 }
@@ -199,15 +176,11 @@ func run() error {
 func buildRouter(
 	cfg *config.Config,
 	logger *slog.Logger,
-	authProvider auth.Provider,
 	sessionProvider *auth.SessionProvider,
 	healthHandler *handler.HealthHandler,
 	adminHandler *handler.AdminHandler,
 	systemStatsHandler *handler.SystemStatsHandler,
-	mcpHTTPHandler *mcp.StreamableHTTPHandler,
-	mcpStatelessHandler *mcp.StatelessHTTPHandler,
 	loginLimiter *middleware.RateLimiter,
-	mcpLimiter *middleware.RateLimiter,
 ) *chi.Mux {
 	r := chi.NewRouter()
 
@@ -222,15 +195,6 @@ func buildRouter(
 	// Health endpoints (no auth required)
 	r.Get("/health", healthHandler.Health)
 	r.Get("/ready", healthHandler.Ready)
-
-	// MCP endpoints - both transports available
-	// /mcp - Streamable HTTP transport (session-based, 2025-06-18 spec)
-	// /mcp/stateless - Simple stateless HTTP (for Claude Code `-t http`)
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.IPRateLimitMiddleware(mcpLimiter))
-		r.Handle("/mcp", mcpHTTPHandler)
-		r.Handle("/mcp/stateless", mcpStatelessHandler)
-	})
 
 	// API routes
 	r.Route("/api/v1", func(r chi.Router) {

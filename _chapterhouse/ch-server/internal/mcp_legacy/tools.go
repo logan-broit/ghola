@@ -1,4 +1,4 @@
-package mcp
+package mcp_legacy
 
 import (
 	"context"
