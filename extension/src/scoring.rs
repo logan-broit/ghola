@@ -365,7 +365,7 @@ mod tests {
         // producing very high activation. This tests the timestamptz→days conversion
         // path that unit tests can't exercise.
         let result = Spi::get_one::<f64>(
-            "SELECT ghola.actr_activation(5, now() - interval '10 seconds')",
+            "SELECT semantic.actr_activation(5, now() - interval '10 seconds')",
         )
         .expect("query failed")
         .expect("null result");
@@ -380,13 +380,13 @@ mod tests {
         // Crammed vs well-spaced via real timestamps — tests the timestamp
         // conversion path: same days_since, different lifespans.
         let crammed = Spi::get_one::<f64>(
-            "SELECT ghola.ebbinghaus_decay(\
+            "SELECT semantic.ebbinghaus_decay(\
                 now() - interval '30 days', 50, now() - interval '1 day')",
         )
         .expect("query failed")
         .expect("null result");
         let spaced = Spi::get_one::<f64>(
-            "SELECT ghola.ebbinghaus_decay(\
+            "SELECT semantic.ebbinghaus_decay(\
                 now() - interval '30 days', 50, now() - interval '180 days')",
         )
         .expect("query failed")
@@ -404,7 +404,7 @@ mod tests {
         let mut conf = 0.5_f64;
         for _ in 0..20 {
             conf = Spi::get_one::<f64>(&format!(
-                "SELECT ghola.bayesian_update({conf}, 0.05)"
+                "SELECT semantic.bayesian_update({conf}, 0.05)"
             ))
             .expect("query failed")
             .expect("null");
@@ -418,7 +418,7 @@ mod tests {
         conf = 0.5;
         for _ in 0..20 {
             conf = Spi::get_one::<f64>(&format!(
-                "SELECT ghola.bayesian_update({conf}, 0.99)"
+                "SELECT semantic.bayesian_update({conf}, 0.99)"
             ))
             .expect("query failed")
             .expect("null");

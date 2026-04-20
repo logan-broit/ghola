@@ -22,7 +22,7 @@ fn mark_supersedes(newer_id: pgrx::Uuid, older_id: pgrx::Uuid) -> &'static str {
         let count = client
             .select(
                 &format!(
-                    "SELECT count(*) FROM ghola.mnemes \
+                    "SELECT count(*) FROM semantic.mnemes \
                      WHERE id IN ('{newer_id}'::uuid, '{older_id}'::uuid)"
                 ),
                 None,
@@ -42,7 +42,7 @@ fn mark_supersedes(newer_id: pgrx::Uuid, older_id: pgrx::Uuid) -> &'static str {
         client
             .update(
                 &format!(
-                    "INSERT INTO ghola.associations \
+                    "INSERT INTO semantic.associations \
                      (src_id, dst_id, association_type, weight, co_activations, updated_at) \
                      VALUES ('{newer_id}'::uuid, '{older_id}'::uuid, 'supersedes', 1.0, 1, now()) \
                      ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
@@ -57,7 +57,7 @@ fn mark_supersedes(newer_id: pgrx::Uuid, older_id: pgrx::Uuid) -> &'static str {
         client
             .update(
                 &format!(
-                    "UPDATE ghola.mnemes SET state = 'archived' \
+                    "UPDATE semantic.mnemes SET state = 'archived' \
                      WHERE id = '{older_id}'::uuid"
                 ),
                 None,
@@ -82,7 +82,7 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
         let count = client
             .select(
                 &format!(
-                    "SELECT count(*) FROM ghola.mnemes \
+                    "SELECT count(*) FROM semantic.mnemes \
                      WHERE id IN ('{supporting_id}'::uuid, '{supported_id}'::uuid)"
                 ),
                 None,
@@ -102,7 +102,7 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
         client
             .update(
                 &format!(
-                    "INSERT INTO ghola.associations \
+                    "INSERT INTO semantic.associations \
                      (src_id, dst_id, association_type, weight, co_activations, updated_at) \
                      VALUES ('{supporting_id}'::uuid, '{supported_id}'::uuid, 'supports', 1.0, 1, now()) \
                      ON CONFLICT (src_id, dst_id, association_type) DO UPDATE SET \
@@ -113,11 +113,13 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
             )
             .expect("failed to create supports association");
 
-        // Boost the supported mneme's confidence
+        // Boost the supported mneme's confidence.
+        // v2 drops the `tier` column (core/index/state) — no per-tier
+        // confidence floor anymore; just a single floor of 0.025.
         let prior_row = client
             .select(
                 &format!(
-                    "SELECT confidence, tier FROM ghola.mnemes \
+                    "SELECT confidence FROM semantic.mnemes \
                      WHERE id = '{supported_id}'::uuid FOR UPDATE"
                 ),
                 None,
@@ -127,18 +129,13 @@ fn mark_supports(supporting_id: pgrx::Uuid, supported_id: pgrx::Uuid) -> &'stati
 
         if let Some(r) = prior_row.into_iter().next() {
             let prior: f64 = r.get::<f64>(1).expect("err").expect("null confidence");
-            let tier: String = r.get::<String>(2).expect("err").expect("null tier");
             let posterior = bayesian_update_inner(prior, 0.65);
-            let floor = match tier.as_str() {
-                "core" => 0.30,
-                _ => 0.025,
-            };
-            let clamped = posterior.max(floor);
+            let clamped = posterior.max(0.025);
 
             client
                 .update(
                     &format!(
-                        "UPDATE ghola.mnemes SET confidence = {clamped} \
+                        "UPDATE semantic.mnemes SET confidence = {clamped} \
                          WHERE id = '{supported_id}'::uuid"
                     ),
                     None,
@@ -176,11 +173,11 @@ fn get_typed_associations(
         let query = format!(
             "SELECT related_id, association_type, weight, direction FROM ( \
                 SELECT dst_id AS related_id, association_type, weight, 'outgoing' AS direction \
-                FROM ghola.associations \
+                FROM semantic.associations \
                 WHERE src_id = '{mneme_id}' AND weight >= {min_weight}{type_filter} \
                 UNION ALL \
                 SELECT src_id AS related_id, association_type, weight, 'incoming' AS direction \
-                FROM ghola.associations \
+                FROM semantic.associations \
                 WHERE dst_id = '{mneme_id}' AND weight >= {min_weight}{type_filter} \
             ) sub \
             ORDER BY weight DESC"
@@ -213,7 +210,8 @@ fn get_typed_associations(
 mod tests {
     use pgrx::prelude::*;
 
-    const DIMS: usize = 768;
+    // v2 default embedding dim is 1024 (Qwen3-Embedding).
+    const DIMS: usize = 1024;
 
     fn zero_embedding() -> String {
         let zeros: Vec<String> = (0..DIMS).map(|_| "0".to_string()).collect();
@@ -222,30 +220,16 @@ mod tests {
 
     fn insert_mneme(ws: &str, concept: &str, content: &str) -> String {
         let emb = zero_embedding();
-        // Disable triggers to avoid interference
-        Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_insert_enqueue"
-        ).expect("disable");
-        Spi::run(
-            "ALTER TABLE ghola.mnemes DISABLE TRIGGER mneme_session_association"
-        ).expect("disable");
-
-        let id = Spi::get_one::<String>(&format!(
-            "INSERT INTO ghola.mnemes (workspace_id, concept, content, embedding) \
+        // v1 mneme_insert_enqueue + mneme_session_association triggers
+        // are gone in v2 (gating queue dropped, session_id column gone),
+        // so no ENABLE/DISABLE dance is needed.
+        Spi::get_one::<String>(&format!(
+            "INSERT INTO semantic.mnemes (workspace_id, concept, content, embedding) \
              VALUES ('{ws}', '{concept}', '{content}', '{emb}'::vector({DIMS})) \
              RETURNING id::text"
         ))
         .expect("insert failed")
-        .expect("null");
-
-        Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_insert_enqueue"
-        ).expect("enable");
-        Spi::run(
-            "ALTER TABLE ghola.mnemes ENABLE TRIGGER mneme_session_association"
-        ).expect("enable");
-
-        id
+        .expect("null")
     }
 
     // ── mark_supersedes ──
@@ -259,13 +243,13 @@ mod tests {
         let m2 = insert_mneme(ws, "fact", "new version");
 
         Spi::run(&format!(
-            "SELECT ghola.mark_supersedes('{m2}'::uuid, '{m1}'::uuid)"
+            "SELECT semantic.mark_supersedes('{m2}'::uuid, '{m1}'::uuid)"
         ))
         .expect("mark_supersedes failed");
 
         // Older mneme should be archived
         let state = Spi::get_one::<String>(&format!(
-            "SELECT state FROM ghola.mnemes WHERE id = '{m1}'::uuid"
+            "SELECT state FROM semantic.mnemes WHERE id = '{m1}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -274,7 +258,7 @@ mod tests {
 
         // Supersedes association should exist
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM ghola.associations \
+            "SELECT count(*) FROM semantic.associations \
              WHERE src_id = '{m2}'::uuid AND dst_id = '{m1}'::uuid \
                AND association_type = 'supersedes'"
         ))
@@ -293,7 +277,7 @@ mod tests {
         let m1 = insert_mneme(ws, "fact", "content");
 
         Spi::run(&format!(
-            "SELECT ghola.mark_supersedes('{m1}'::uuid, '{m1}'::uuid)"
+            "SELECT semantic.mark_supersedes('{m1}'::uuid, '{m1}'::uuid)"
         ))
         .expect("should panic");
     }
@@ -309,18 +293,18 @@ mod tests {
         let m2 = insert_mneme(ws, "claim", "the claim");
 
         let before = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM semantic.mnemes WHERE id = '{m2}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
 
         Spi::run(&format!(
-            "SELECT ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
+            "SELECT semantic.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
         ))
         .expect("mark_supports failed");
 
         let after = Spi::get_one::<f64>(&format!(
-            "SELECT confidence FROM ghola.mnemes WHERE id = '{m2}'::uuid"
+            "SELECT confidence FROM semantic.mnemes WHERE id = '{m2}'::uuid"
         ))
         .expect("query failed")
         .expect("null");
@@ -332,7 +316,7 @@ mod tests {
 
         // Supports association should exist
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM ghola.associations \
+            "SELECT count(*) FROM semantic.associations \
              WHERE src_id = '{m1}'::uuid AND dst_id = '{m2}'::uuid \
                AND association_type = 'supports'"
         ))
@@ -355,15 +339,15 @@ mod tests {
 
         // Create different typed associations
         Spi::run(&format!(
-            "SELECT ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
+            "SELECT semantic.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
         )).expect("supports failed");
         Spi::run(&format!(
-            "SELECT ghola.mark_supersedes('{m3}'::uuid, '{m2}'::uuid)"
+            "SELECT semantic.mark_supersedes('{m3}'::uuid, '{m2}'::uuid)"
         )).expect("supersedes failed");
 
         // Get all associations for m2
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM ghola.get_typed_associations('{m2}'::uuid)"
+            "SELECT count(*) FROM semantic.get_typed_associations('{m2}'::uuid)"
         ))
         .expect("query failed")
         .expect("null");
@@ -381,17 +365,17 @@ mod tests {
         let m3 = insert_mneme(ws, "c", "content c");
 
         Spi::run(&format!(
-            "SELECT ghola.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
+            "SELECT semantic.mark_supports('{m1}'::uuid, '{m2}'::uuid)"
         )).expect("supports failed");
         Spi::run(&format!(
-            "INSERT INTO ghola.associations \
+            "INSERT INTO semantic.associations \
              (src_id, dst_id, association_type, weight) \
              VALUES ('{m2}'::uuid, '{m3}'::uuid, 'hebbian', 0.5)"
         )).expect("insert failed");
 
         // Filter to supports only
         let count = Spi::get_one::<i64>(&format!(
-            "SELECT count(*) FROM ghola.get_typed_associations('{m2}'::uuid, 'supports')"
+            "SELECT count(*) FROM semantic.get_typed_associations('{m2}'::uuid, 'supports')"
         ))
         .expect("query failed")
         .expect("null");
