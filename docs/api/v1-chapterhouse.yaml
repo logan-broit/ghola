@@ -1,0 +1,525 @@
+openapi: 3.1.0
+
+info:
+  title: Chapterhouse Internal API
+  version: "1.0.0-draft"
+  description: |
+    Private HTTP surface consumed only by the ghola local service on
+    behalf of agents. Not an agent-facing protocol — agents talk to
+    ghola, ghola talks to this API.
+
+    Event shape follows
+    `docs/2026-04-20-jsonl-native-event-shape.md` (one row per JSONL
+    line; `raw_event` is authoritative, projections drive indexing).
+
+    All endpoints require `Authorization: Bearer <api-key>`. See
+    `/v1/auth` doc in Phase 3.8.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://chapterhouse.thesgc.internal
+    description: Production (NUC)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: episodic
+    description: Raw per-user event store (chapterhouse's source-of-truth tier).
+  - name: semantic
+    description: Distilled, shared mnemes (pg_ghola v2 cognitive scoring).
+
+paths:
+
+  /v1/episodic/ingest:
+    post:
+      tags: [episodic]
+      summary: Batch-insert a session and its events
+      description: |
+        Idempotent upsert on `events.id` and `sessions.id`
+        (ON CONFLICT DO UPDATE). Pipeline A in the ghola local service
+        relies on this idempotency: if a batch fails midway the
+        watermark is not advanced, and the next tick will re-POST the
+        same events safely.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngestRequest"
+      responses:
+        "200":
+          description: Upsert complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+
+  /v1/episodic/query:
+    post:
+      tags: [episodic]
+      summary: Hybrid vector + FTS query over episodic events
+      description: |
+        Returns events ranked by a weighted merge of pgvector cosine
+        similarity and Postgres FTS `ts_rank`. Respects ACL: only
+        events where `user_id = <caller>` OR an `episodic.shares` row
+        grants access are returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EpisodicQueryRequest"
+      responses:
+        "200":
+          description: Ranked results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EpisodicQueryResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/episodic/share:
+    post:
+      tags: [episodic]
+      summary: Grant another user or the team access to a scope
+      description: |
+        `scope_type` = session | branch | event. Session share exposes
+        all events with that `session_id`. Branch share exposes the
+        subtree rooted at `scope_id`. Event share exposes one row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareRequest"
+      responses:
+        "200":
+          description: Share created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller does not own the referenced scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/episodic/forget:
+    post:
+      tags: [episodic]
+      summary: Soft-delete events by id
+      description: |
+        Replaces `text` with `"[forgotten]"` and nullifies `embedding`
+        so the tree structure stays intact (children keep their
+        `parent_id`) but the event is no longer retrievable via query.
+        Hard-delete is a separate admin-only endpoint, out of scope
+        for v1a.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgetRequest"
+      responses:
+        "200":
+          description: Forgotten
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgetResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/semantic/query:
+    post:
+      tags: [semantic]
+      summary: Query distilled semantic mnemes with cognitive scoring
+      description: |
+        Wraps the `semantic.recall(...)` SQL function from the ghola
+        extension. Hybrid vector+FTS candidate pool, ACT-R + Hebbian
+        scoring, Bayesian confidence weighting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SemanticQueryRequest"
+      responses:
+        "200":
+          description: Ranked mnemes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SemanticQueryResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/semantic/feedback:
+    post:
+      tags: [semantic]
+      summary: Apply Bayesian evidence to a mneme's confidence
+      description: |
+        Evidence in [0, 1]. Calls `semantic.update_confidence(id,
+        evidence)` and returns the new posterior (clamped to the
+        Laplace floor 0.025).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Mneme not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/semantic/list:
+    post:
+      tags: [semantic]
+      summary: Paginated listing of semantic mnemes with filters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SemanticListRequest"
+      responses:
+        "200":
+          description: Page of mnemes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SemanticListResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: api-key
+
+  responses:
+    BadRequest:
+      description: Malformed request body
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: Batch exceeds per-request limits
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:    { type: string, example: "invalid_request" }
+        message: { type: string }
+
+    Uuid:
+      type: string
+      format: uuid
+      example: "69e56182-0000-0000-0000-000000000001"
+
+    Embedding:
+      type: array
+      description: |
+        Pre-computed embedding vector; dimension must match the
+        deployment's EMBEDDING_DIM. Optional on ingest — if omitted,
+        the row is inserted with NULL embedding and will not be
+        returned by vector search until embedded later.
+      items: { type: number }
+      minItems: 1
+
+    Jsonb:
+      description: Arbitrary JSON value stored as jsonb.
+      nullable: true
+
+    Session:
+      type: object
+      required: [id, user_id, started_at]
+      properties:
+        id:             { $ref: "#/components/schemas/Uuid" }
+        user_id:        { $ref: "#/components/schemas/Uuid" }
+        started_at:     { type: string, format: date-time }
+        ended_at:       { type: string, format: date-time, nullable: true }
+        event_count:    { type: integer, minimum: 0 }
+        summary:        { type: string, nullable: true }
+        cwd:            { type: string, nullable: true }
+        git_branch:     { type: string, nullable: true }
+        agent_kind:     { type: string, nullable: true, description: "claude-code, pi-mono, etc." }
+        source_device:  { type: string, nullable: true }
+
+    Event:
+      type: object
+      required: [id, session_id, user_id, type, raw_event, created_at]
+      properties:
+        id:             { $ref: "#/components/schemas/Uuid" }
+        parent_id:      { oneOf: [{ $ref: "#/components/schemas/Uuid" }], nullable: true }
+        session_id:     { $ref: "#/components/schemas/Uuid" }
+        user_id:        { $ref: "#/components/schemas/Uuid" }
+        request_id:     { type: string, nullable: true, description: "Groups events of one API response into a 'turn' at query time." }
+        type:
+          type: string
+          enum: [user, assistant, tool_result, system]
+        role:           { type: string, nullable: true }
+        text:           { type: string, nullable: true, description: "Deterministic projection per the event-shape addendum; FTS + embedding target." }
+        tool_name:      { type: string, nullable: true }
+        tool_use_id:    { type: string, nullable: true }
+        tool_input:     { $ref: "#/components/schemas/Jsonb" }
+        tool_output:    { $ref: "#/components/schemas/Jsonb" }
+        bookmark_label: { type: string, nullable: true }
+        cwd:            { type: string, nullable: true }
+        git_branch:     { type: string, nullable: true }
+        agent_id:       { type: string, nullable: true }
+        is_sidechain:   { type: boolean, default: false }
+        model:          { type: string, nullable: true }
+        raw_event:      { $ref: "#/components/schemas/Jsonb" }
+        embedding:      { oneOf: [{ $ref: "#/components/schemas/Embedding" }], nullable: true }
+        entities:       { type: array, items: { type: string } }
+        tags:           { type: array, items: { type: string } }
+        source_device:  { type: string, nullable: true }
+        created_at:     { type: string, format: date-time }
+
+    EventHit:
+      allOf:
+        - $ref: "#/components/schemas/Event"
+        - type: object
+          required: [score]
+          properties:
+            score:
+              type: object
+              properties:
+                semantic: { type: number }
+                fts:      { type: number }
+                merged:   { type: number }
+            tier:
+              type: string
+              const: episodic
+
+    IngestRequest:
+      type: object
+      required: [session, events]
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+          maxItems: 1000
+
+    IngestResponse:
+      type: object
+      required: [session_id, inserted, updated]
+      properties:
+        session_id: { $ref: "#/components/schemas/Uuid" }
+        inserted:   { type: integer, description: "events that were new" }
+        updated:    { type: integer, description: "events that already existed and were updated in place" }
+
+    EpisodicQueryFilters:
+      type: object
+      properties:
+        session_id:   { oneOf: [{ $ref: "#/components/schemas/Uuid" }], nullable: true }
+        entities:     { type: array, items: { type: string } }
+        tags:         { type: array, items: { type: string } }
+        tool_name:    { type: string, nullable: true }
+        is_sidechain: { type: boolean, nullable: true }
+        since:        { type: string, format: date-time, nullable: true }
+        until:        { type: string, format: date-time, nullable: true }
+
+    EpisodicQueryRequest:
+      type: object
+      required: [user_id, query_text, query_embedding]
+      properties:
+        user_id:         { $ref: "#/components/schemas/Uuid" }
+        query_text:      { type: string }
+        query_embedding: { $ref: "#/components/schemas/Embedding" }
+        limit:           { type: integer, default: 10, minimum: 1, maximum: 200 }
+        include_shared:  { type: boolean, default: true }
+        w_semantic:      { type: number, default: 0.6 }
+        w_fts:           { type: number, default: 0.4 }
+        filters:         { $ref: "#/components/schemas/EpisodicQueryFilters" }
+
+    EpisodicQueryResponse:
+      type: object
+      required: [hits]
+      properties:
+        hits:
+          type: array
+          items: { $ref: "#/components/schemas/EventHit" }
+
+    ShareRequest:
+      type: object
+      required: [owner_user_id, target, scope_type, scope_id]
+      properties:
+        owner_user_id: { $ref: "#/components/schemas/Uuid" }
+        target:
+          type: string
+          enum: [team, user]
+        target_id:     { oneOf: [{ $ref: "#/components/schemas/Uuid" }], nullable: true, description: "Required when target = user; ignored when target = team." }
+        scope_type:
+          type: string
+          enum: [session, branch, event]
+        scope_id:      { $ref: "#/components/schemas/Uuid" }
+
+    ShareResponse:
+      type: object
+      required: [id]
+      properties:
+        id: { $ref: "#/components/schemas/Uuid" }
+
+    ForgetRequest:
+      type: object
+      required: [user_id, event_ids]
+      properties:
+        user_id:   { $ref: "#/components/schemas/Uuid" }
+        event_ids:
+          type: array
+          items: { $ref: "#/components/schemas/Uuid" }
+          minItems: 1
+          maxItems: 1000
+
+    ForgetResponse:
+      type: object
+      required: [forgotten]
+      properties:
+        forgotten: { type: integer }
+
+    Mneme:
+      type: object
+      required: [id, workspace_id, concept, content, confidence, state, memory_type, created_at, last_access]
+      properties:
+        id:                   { $ref: "#/components/schemas/Uuid" }
+        workspace_id:         { $ref: "#/components/schemas/Uuid" }
+        concept:              { type: string }
+        content:              { type: string }
+        confidence:           { type: number }
+        access_count:         { type: integer }
+        last_access:          { type: string, format: date-time }
+        created_at:           { type: string, format: date-time }
+        state:
+          type: string
+          enum: [active, archived]
+        memory_type:
+          type: string
+          enum: [factual, experiential, procedural]
+        tags:                 { type: array, items: { type: string } }
+        entities:             { type: array, items: { type: string } }
+        source_episodic_ids:  { type: array, items: { $ref: "#/components/schemas/Uuid" } }
+        contributor_user_ids: { type: array, items: { $ref: "#/components/schemas/Uuid" } }
+
+    MnemeHit:
+      type: object
+      required: [mneme_id, score, content_match, activation, hebbian_boost, confidence, concept, content]
+      properties:
+        mneme_id:       { $ref: "#/components/schemas/Uuid" }
+        score:          { type: number }
+        content_match:  { type: number }
+        activation:     { type: number }
+        hebbian_boost:  { type: number }
+        confidence:     { type: number }
+        concept:        { type: string }
+        content:        { type: string }
+        tier:
+          type: string
+          const: semantic
+
+    SemanticQueryRequest:
+      type: object
+      required: [workspace_id, query_text, query_embedding]
+      properties:
+        workspace_id:    { $ref: "#/components/schemas/Uuid" }
+        query_text:      { type: string }
+        query_embedding: { $ref: "#/components/schemas/Embedding" }
+        limit:           { type: integer, default: 10, minimum: 1, maximum: 200 }
+        min_confidence:  { type: number, default: 0.0 }
+        memory_type:
+          type: string
+          enum: [factual, experiential, procedural]
+          nullable: true
+        tags:            { type: array, items: { type: string } }
+        filter_entities: { type: array, items: { type: string } }
+
+    SemanticQueryResponse:
+      type: object
+      required: [hits]
+      properties:
+        hits:
+          type: array
+          items: { $ref: "#/components/schemas/MnemeHit" }
+
+    FeedbackRequest:
+      type: object
+      required: [mneme_id, evidence]
+      properties:
+        mneme_id: { $ref: "#/components/schemas/Uuid" }
+        evidence:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    FeedbackResponse:
+      type: object
+      required: [mneme_id, confidence]
+      properties:
+        mneme_id:    { $ref: "#/components/schemas/Uuid" }
+        confidence:  { type: number, description: "Clamped posterior in [0.025, 0.975]." }
+
+    SemanticListFilters:
+      type: object
+      properties:
+        memory_type:
+          type: string
+          enum: [factual, experiential, procedural]
+          nullable: true
+        state:
+          type: string
+          enum: [active, archived]
+          nullable: true
+        tags:     { type: array, items: { type: string } }
+        entities: { type: array, items: { type: string } }
+
+    SemanticListRequest:
+      type: object
+      required: [workspace_id]
+      properties:
+        workspace_id: { $ref: "#/components/schemas/Uuid" }
+        limit:        { type: integer, default: 50, minimum: 1, maximum: 500 }
+        cursor:       { type: string, nullable: true, description: "Opaque pagination cursor from a previous response." }
+        filters:      { $ref: "#/components/schemas/SemanticListFilters" }
+
+    SemanticListResponse:
+      type: object
+      required: [mnemes]
+      properties:
+        mnemes:
+          type: array
+          items: { $ref: "#/components/schemas/Mneme" }
+        next_cursor:
+          type: string
+          nullable: true
