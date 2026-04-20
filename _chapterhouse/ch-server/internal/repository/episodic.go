@@ -216,6 +216,214 @@ ON CONFLICT (id) DO UPDATE SET
 RETURNING (xmax = 0)
 `
 
+// ---------------------------------------------------------------------
+// Query
+// ---------------------------------------------------------------------
+
+// QueryFilters narrows the event pool by optional structured fields.
+// All fields are zero-value-means-not-filtered.
+type QueryFilters struct {
+	SessionID   *uuid.UUID `json:"session_id,omitempty"`
+	Entities    []string   `json:"entities,omitempty"`
+	Tags        []string   `json:"tags,omitempty"`
+	ToolName    *string    `json:"tool_name,omitempty"`
+	IsSidechain *bool      `json:"is_sidechain,omitempty"`
+	Since       *time.Time `json:"since,omitempty"`
+	Until       *time.Time `json:"until,omitempty"`
+}
+
+// EpisodicQueryParams is the full input to QueryEpisodicEvents.
+type EpisodicQueryParams struct {
+	UserID         uuid.UUID
+	QueryText      string
+	QueryEmbedding []float64
+	Limit          int
+	IncludeShared  bool
+	WSemantic      float64
+	WFTS           float64
+	Filters        QueryFilters
+}
+
+// EpisodicEventHit is a scored event from QueryEpisodicEvents.
+type EpisodicEventHit struct {
+	Event    EpisodicEvent
+	Semantic float64
+	FTS      float64
+	Merged   float64
+}
+
+// QueryEpisodicEvents runs the hybrid vector+FTS search scoped to the
+// caller's visibility (own events + shares). Top-level SQL:
+//
+//   WITH accessible    AS (...)
+//        vector_hits   AS (top N by cosine over accessible)
+//        lexical_hits  AS (top N by ts_rank over accessible)
+//        merged        AS (max-merge per event id)
+//   SELECT ... FROM merged JOIN events WHERE <filters>
+//   ORDER BY w_sem*semantic + w_fts*fts DESC LIMIT N
+//
+// Branch-scope shares are out of scope for v1a — only session and
+// event scopes are honored by the accessible CTE here. Adding
+// branch support is a recursive-CTE extension of that block.
+func (r *Repository) QueryEpisodicEvents(
+	ctx context.Context, p EpisodicQueryParams,
+) ([]EpisodicEventHit, error) {
+	if p.Limit <= 0 {
+		p.Limit = 10
+	}
+	pool := 3 * p.Limit
+
+	// Concrete string (not any-wrapping) so pgx passes it as text and
+	// the ::vector cast in SQL works uniformly. Empty string
+	// short-circuits the vector pathway via the `$2 <> ''` guard.
+	var embLit string
+	if len(p.QueryEmbedding) > 0 {
+		parts := make([]string, len(p.QueryEmbedding))
+		for i, x := range p.QueryEmbedding {
+			parts[i] = strconv.FormatFloat(x, 'f', -1, 64)
+		}
+		embLit = "[" + strings.Join(parts, ",") + "]"
+	}
+
+	// Accessible CTE: own events, optionally UNION'd with shares.
+	accessible := `SELECT id FROM episodic.events WHERE user_id = $1`
+	if p.IncludeShared {
+		accessible += `
+			UNION
+			SELECT e.id FROM episodic.events e
+			JOIN episodic.shares s ON
+				(s.scope_type = 'event'   AND s.scope_id = e.id)
+				OR (s.scope_type = 'session' AND s.scope_id = e.session_id)
+			WHERE s.target = 'team' OR (s.target = 'user' AND s.target_id = $1)`
+	}
+
+	// Filters: pushed into the final SELECT so one set of predicates
+	// covers both pathways without duplication.
+	filterSQL, filterArgs := buildFilterSQL(p.Filters, /*baseIdx=*/7)
+
+	sql := `
+WITH accessible AS (
+	` + accessible + `
+), vector_hits AS (
+	SELECT id,
+	       1 - (embedding <=> ($2::text)::vector) AS semantic_score,
+	       0::double precision            AS fts_score
+	FROM episodic.events
+	WHERE id IN (SELECT id FROM accessible)
+	  AND embedding IS NOT NULL
+	  AND $2 <> ''
+	ORDER BY embedding <=> ($2::text)::vector
+	LIMIT $3
+), lexical_hits AS (
+	SELECT id,
+	       0::double precision AS semantic_score,
+	       ts_rank(search_vector, plainto_tsquery('english', $4)) AS fts_score
+	FROM episodic.events
+	WHERE id IN (SELECT id FROM accessible)
+	  AND $4 <> ''
+	  AND search_vector @@ plainto_tsquery('english', $4)
+	ORDER BY fts_score DESC
+	LIMIT $3
+), merged AS (
+	SELECT id, max(semantic_score) AS semantic_score, max(fts_score) AS fts_score
+	FROM (SELECT * FROM vector_hits UNION ALL SELECT * FROM lexical_hits) u
+	GROUP BY id
+)
+SELECT e.id, e.parent_id, e.session_id, e.user_id, e.request_id, e.type,
+       e.role, e.text, e.tool_name, e.tool_use_id, e.tool_input,
+       e.tool_output, e.bookmark_label, e.cwd, e.git_branch, e.agent_id,
+       e.is_sidechain, e.model, e.raw_event, e.entities, e.tags,
+       e.source_device, e.created_at,
+       m.semantic_score, m.fts_score,
+       ($5 * m.semantic_score + $6 * m.fts_score) AS merged_score
+FROM merged m
+JOIN episodic.events e ON e.id = m.id
+WHERE TRUE ` + filterSQL + `
+ORDER BY merged_score DESC
+LIMIT $7
+`
+
+	args := []any{p.UserID, embLit, pool, p.QueryText, p.WSemantic, p.WFTS, p.Limit}
+	args = append(args, filterArgs...)
+
+	rows, err := r.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+
+	var hits []EpisodicEventHit
+	for rows.Next() {
+		var ev EpisodicEvent
+		var h EpisodicEventHit
+		var toolIn, toolOut, rawEvent []byte
+
+		if err := rows.Scan(
+			&ev.ID, &ev.ParentID, &ev.SessionID, &ev.UserID, &ev.RequestID, &ev.Type,
+			&ev.Role, &ev.Text, &ev.ToolName, &ev.ToolUseID, &toolIn,
+			&toolOut, &ev.BookmarkLabel, &ev.Cwd, &ev.GitBranch, &ev.AgentID,
+			&ev.IsSidechain, &ev.Model, &rawEvent, &ev.Entities, &ev.Tags,
+			&ev.SourceDevice, &ev.CreatedAt,
+			&h.Semantic, &h.FTS, &h.Merged,
+		); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		ev.ToolInput = toolIn
+		ev.ToolOutput = toolOut
+		ev.RawEvent = rawEvent
+		h.Event = ev
+		hits = append(hits, h)
+	}
+	return hits, rows.Err()
+}
+
+// buildFilterSQL folds the optional filters into AND clauses using
+// placeholder indices starting at baseIdx. Returns the SQL fragment
+// (leading space, each clause prefixed with AND) and the appended
+// args in order.
+func buildFilterSQL(f QueryFilters, baseIdx int) (string, []any) {
+	var b strings.Builder
+	var args []any
+	next := baseIdx
+
+	if f.SessionID != nil {
+		b.WriteString(fmt.Sprintf(" AND e.session_id = $%d", next))
+		args = append(args, *f.SessionID)
+		next++
+	}
+	if len(f.Entities) > 0 {
+		b.WriteString(fmt.Sprintf(" AND e.entities && $%d::text[]", next))
+		args = append(args, f.Entities)
+		next++
+	}
+	if len(f.Tags) > 0 {
+		b.WriteString(fmt.Sprintf(" AND e.tags @> $%d::text[]", next))
+		args = append(args, f.Tags)
+		next++
+	}
+	if f.ToolName != nil {
+		b.WriteString(fmt.Sprintf(" AND e.tool_name = $%d", next))
+		args = append(args, *f.ToolName)
+		next++
+	}
+	if f.IsSidechain != nil {
+		b.WriteString(fmt.Sprintf(" AND e.is_sidechain = $%d", next))
+		args = append(args, *f.IsSidechain)
+		next++
+	}
+	if f.Since != nil {
+		b.WriteString(fmt.Sprintf(" AND e.created_at >= $%d", next))
+		args = append(args, *f.Since)
+		next++
+	}
+	if f.Until != nil {
+		b.WriteString(fmt.Sprintf(" AND e.created_at <= $%d", next))
+		args = append(args, *f.Until)
+		next++
+	}
+	return b.String(), args
+}
+
 // vectorLiteralOrNil returns a pgvector text literal like "[1,2,3]"
 // or nil (maps to SQL NULL) when the slice is empty.
 func vectorLiteralOrNil(v []float64) any {

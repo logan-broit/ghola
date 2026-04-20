@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -124,8 +125,102 @@ func validateIngest(req *ingestRequest, caller uuid.UUID) error {
 // Query / Share / Forget — implemented in Tasks 3.5 + 3.6.
 // ---------------------------------------------------------------------
 
+// queryRequest mirrors the OpenAPI EpisodicQueryRequest.
+type queryRequest struct {
+	UserID         uuid.UUID               `json:"user_id"`
+	QueryText      string                  `json:"query_text"`
+	QueryEmbedding []float64               `json:"query_embedding"`
+	Limit          int                     `json:"limit"`
+	IncludeShared  *bool                   `json:"include_shared,omitempty"`
+	WSemantic      *float64                `json:"w_semantic,omitempty"`
+	WFTS           *float64                `json:"w_fts,omitempty"`
+	Filters        *repository.QueryFilters `json:"filters,omitempty"`
+}
+
+type queryResponse struct {
+	Hits []eventHit `json:"hits"`
+}
+
+type eventHit struct {
+	repository.EpisodicEvent
+	Score scoreBreakdown `json:"score"`
+	Tier  string         `json:"tier"`
+}
+
+type scoreBreakdown struct {
+	Semantic float64 `json:"semantic"`
+	FTS      float64 `json:"fts"`
+	Merged   float64 `json:"merged"`
+}
+
 func (h *EpisodicHandler) Query(w http.ResponseWriter, r *http.Request) {
-	apierror.InternalError("/v1/episodic/query lands in Phase 3.5").WriteJSON(w)
+	userID := auth.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		apierror.Unauthorized("missing auth context").WriteJSON(w)
+		return
+	}
+
+	var req queryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierror.BadRequest("body decode: " + err.Error()).WriteJSON(w)
+		return
+	}
+	if req.UserID == uuid.Nil {
+		apierror.BadRequest("user_id is required").WriteJSON(w)
+		return
+	}
+	if req.UserID != userID {
+		// Agents may only query as themselves. (A future admin
+		// endpoint could lift this; not v1a.)
+		apierror.Forbidden("user_id must match caller").WriteJSON(w)
+		return
+	}
+
+	params := repository.EpisodicQueryParams{
+		UserID:         userID,
+		QueryText:      req.QueryText,
+		QueryEmbedding: req.QueryEmbedding,
+		Limit:          req.Limit,
+		IncludeShared:  true,
+		WSemantic:      0.6,
+		WFTS:           0.4,
+	}
+	if req.Limit <= 0 {
+		params.Limit = 10
+	}
+	if req.IncludeShared != nil {
+		params.IncludeShared = *req.IncludeShared
+	}
+	if req.WSemantic != nil {
+		params.WSemantic = *req.WSemantic
+	}
+	if req.WFTS != nil {
+		params.WFTS = *req.WFTS
+	}
+	if req.Filters != nil {
+		params.Filters = *req.Filters
+	}
+
+	hits, err := h.repo.QueryEpisodicEvents(r.Context(), params)
+	if err != nil {
+		slog.Error("episodic query failed", "err", err.Error())
+		apierror.InternalError("query failed").WithError(err).WriteJSON(w)
+		return
+	}
+
+	out := queryResponse{Hits: make([]eventHit, 0, len(hits))}
+	for _, h := range hits {
+		out.Hits = append(out.Hits, eventHit{
+			EpisodicEvent: h.Event,
+			Score: scoreBreakdown{
+				Semantic: h.Semantic,
+				FTS:      h.FTS,
+				Merged:   h.Merged,
+			},
+			Tier: "episodic",
+		})
+	}
+	OK(w, out)
 }
 
 func (h *EpisodicHandler) Share(w http.ResponseWriter, r *http.Request) {
