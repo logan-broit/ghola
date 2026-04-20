@@ -25,8 +25,6 @@ use pgrx::prelude::*;
 
 extension_sql!(
     r#"
-CREATE SCHEMA IF NOT EXISTS semantic;
-
 CREATE TABLE semantic.mnemes (
     id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id          uuid NOT NULL,

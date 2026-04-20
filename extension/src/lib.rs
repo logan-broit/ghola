@@ -1,16 +1,12 @@
-// pg_ghola: Cognitive Memory Primitives for Postgres
-// A pgrx extension implementing neuroscience-inspired memory primitives.
+// pg_ghola: Cognitive Memory Primitives for Postgres (v2)
 //
-// All extension objects are installed into the pg_ghola schema via the
-// control file's `schema = 'pg_ghola'` directive. We do NOT use pgrx's
-// #[pg_schema] or schema = "pg_ghola" in #[pg_extern] because:
-// 1. PG18 reserves pg_ prefix for system schemas (requires allow_system_table_mods)
-// 2. The control file handles schema placement automatically
+// A pgrx extension. All extension objects install into the `semantic`
+// schema via the control file's `schema = 'semantic'` directive.
 //
-// v0.2: Background workers for autonomous memory consolidation.
-// Requires shared_preload_libraries = 'pg_ghola' for workers to start.
-// Configure target database via postgresql.conf: pg_ghola.database = 'memories'
-// (defaults to 'postgres' if not set)
+// v2 background workers (consolidation + contradiction) target
+// semantic.* and require shared_preload_libraries = 'pg_ghola' in
+// postgresql.conf. Target database is configured via the
+// ghola.database GUC (defaults to 'memories').
 
 ::pgrx::pg_module_magic!();
 
@@ -50,8 +46,8 @@ pub static PG_GHOLA_DATABASE: GucSetting<Option<CString>> =
 pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
         c"ghola.database",
-        c"Target database for the pg_ghola background worker.",
-        c"The background worker will connect to this database for memory consolidation.",
+        c"Target database for the pg_ghola background workers.",
+        c"Workers connect to this database for consolidation and contradiction scanning.",
         &PG_GHOLA_DATABASE,
         GucContext::Sighup,
         GucFlags::default(),
@@ -60,12 +56,14 @@ pub extern "C-unwind" fn _PG_init() {
     register_background_workers();
 }
 
-// Workers are skipped under the pg_test feature during the v2 rewrite:
-// they still reference the old `ghola.*` schema and would crash-loop
-// against a test instance seeded with the new `semantic.*` schema.
-// Task 1.6 removes the gating worker; Task 1.7 rewires consolidation
-// and contradiction to `semantic.*`; at that point the test-side
-// skip can drop.
+// Workers are only registered outside the pg_test feature. Under
+// pg_test, pgrx spawns an ephemeral database whose name is not
+// 'memories' (the GUC default), so the workers' connect_worker_to_spi
+// call fails and triggers a 10-second restart loop that hangs the
+// test harness. Task 1.8 rewires the integration tests to drive the
+// workers explicitly (via process_co_activation_batch and direct
+// SQL on the decay/archival queries) rather than relying on the
+// BGWorker lifecycle.
 #[cfg(not(feature = "pg_test"))]
 fn register_background_workers() {
     use pgrx::bgworkers::*;
@@ -92,7 +90,7 @@ fn register_background_workers() {
 
 #[cfg(feature = "pg_test")]
 fn register_background_workers() {
-    // Disabled under pg_test — see comment above.
+    // See comment above: tests drive workers directly.
 }
 
 #[cfg(test)]
@@ -102,7 +100,9 @@ pub mod pg_test {
     }
 
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        // PG18 reserves pg_ prefix for system schemas; allow it for our extension
-        vec!["allow_system_table_mods = on"]
+        // v2 schema is `semantic`, not `pg_*`, so we no longer need
+        // allow_system_table_mods. Leave the hook in place for future
+        // per-test GUCs without polluting production configuration.
+        vec![]
     }
 }
