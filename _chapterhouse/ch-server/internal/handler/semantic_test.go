@@ -72,6 +72,40 @@ func newSemanticFixture(t *testing.T) *semanticFixture {
 			WHERE id = mid
 			RETURNING confidence;
 		$$;
+
+		-- Minimal stub of the ghola extension's recall_result composite
+		-- type + recall(...) function. The production version (from
+		-- the pg_ghola extension) applies ACT-R + Hebbian + Bayesian
+		-- scoring; this stub just returns candidate rows with fixed
+		-- placeholder scores so handler tests can verify request /
+		-- response plumbing without booting a ghola-extension image.
+		CREATE TYPE semantic.recall_result AS (
+			mneme_id       uuid,
+			score          double precision,
+			content_match  double precision,
+			activation     double precision,
+			hebbian_boost  double precision,
+			confidence     double precision,
+			concept        text,
+			content        text
+		);
+
+		CREATE OR REPLACE FUNCTION semantic.recall(
+			ws        uuid,
+			qtext     text,
+			qembed    vector,
+			limit_n   int,
+			min_conf  double precision
+		) RETURNS SETOF semantic.recall_result LANGUAGE SQL AS $$
+			SELECT id, 0.5::double precision, 0.5::double precision,
+			       0.0::double precision, 0.0::double precision,
+			       confidence, concept, content
+			FROM semantic.mnemes
+			WHERE workspace_id = ws
+			  AND confidence >= min_conf
+			ORDER BY 1 - (embedding <=> qembed) DESC
+			LIMIT limit_n;
+		$$;
 	`)
 	require.NoError(t, err)
 
