@@ -23,7 +23,6 @@ pub mod worker_stats;
 pub mod consolidation_worker;
 pub mod contradiction;
 pub mod contradiction_worker;
-pub mod gating_worker;
 pub mod associations;
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -84,15 +83,6 @@ fn register_background_workers() {
 
     BackgroundWorkerBuilder::new("pg_ghola Contradiction Worker")
         .set_function("contradiction_worker_main")
-        .set_library("pg_ghola")
-        .set_argument(0i32.into_datum())
-        .enable_spi_access()
-        .set_start_time(BgWorkerStartTime::RecoveryFinished)
-        .set_restart_time(Some(Duration::from_secs(10)))
-        .load();
-
-    BackgroundWorkerBuilder::new("pg_ghola Gating Worker")
-        .set_function("gating_worker_main")
         .set_library("pg_ghola")
         .set_argument(0i32.into_datum())
         .enable_spi_access()
