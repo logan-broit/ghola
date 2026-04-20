@@ -1,4 +1,4 @@
-// pg_ghola::contradiction — Contradiction detection and flagging
+// ghola::contradiction — Contradiction detection and flagging
 //
 // Detects when a new mneme potentially contradicts existing mnemes in the same
 // workspace based on high semantic similarity. Surfaces candidates for review

@@ -1,4 +1,4 @@
-// pg_ghola::schema — v2 semantic-tier DDL
+// ghola::schema — v2 semantic-tier DDL
 //
 // Five tables under the `semantic` schema:
 //   - mnemes                    (primary store; distilled facts)

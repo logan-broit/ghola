@@ -1,4 +1,4 @@
-// pg_ghola::recall — v2 composite recall function
+// ghola::recall — v2 composite recall function
 //
 // Fuses vector similarity, FTS, ACT-R temporal activation, Hebbian
 // association strength, and Bayesian confidence into a single ranked

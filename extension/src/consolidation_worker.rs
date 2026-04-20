@@ -1,4 +1,4 @@
-// pg_ghola::consolidation_worker — v2 background consolidation loop
+// ghola::consolidation_worker — v2 background consolidation loop
 //
 // Responsibilities:
 // 1. Drain semantic.co_activation_queue via process_co_activation_batch.
@@ -20,7 +20,7 @@ use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::time::{Duration, Instant};
 
-use crate::PG_GHOLA_DATABASE;
+use crate::GHOLA_DATABASE;
 
 // ---------------------------------------------------------------------------
 // Adaptive polling state machine
@@ -106,7 +106,7 @@ fn run_decay_pruning() {
          SET weight = weight * 0.999, updated_at = now() \
          WHERE updated_at < now() - interval '1 day'",
     )
-    .unwrap_or_else(|e| log!("pg_ghola consolidation worker: decay failed: {e}"));
+    .unwrap_or_else(|e| log!("ghola consolidation worker: decay failed: {e}"));
 
     // Prune: drop associations below the floor.
     let pruned = Spi::get_one::<i64>(
@@ -121,7 +121,7 @@ fn run_decay_pruning() {
 
     if pruned > 0 {
         log!(
-            "pg_ghola consolidation worker: decay/prune cycle pruned {pruned} associations"
+            "ghola consolidation worker: decay/prune cycle pruned {pruned} associations"
         );
     }
 }
@@ -147,7 +147,7 @@ fn run_archival() {
 
     if archived > 0 {
         log!(
-            "pg_ghola consolidation worker: archived {archived} stale low-confidence mnemes"
+            "ghola consolidation worker: archived {archived} stale low-confidence mnemes"
         );
     }
 }
@@ -163,7 +163,7 @@ fn drain_via_transactions() -> i64 {
     loop {
         if start.elapsed() >= DRAIN_TIMEOUT {
             log!(
-                "pg_ghola consolidation worker: drain timeout after {}s, {total} rows processed",
+                "ghola consolidation worker: drain timeout after {}s, {total} rows processed",
                 DRAIN_TIMEOUT.as_secs()
             );
             break;
@@ -193,7 +193,7 @@ fn drain_via_transactions() -> i64 {
 pub extern "C-unwind" fn consolidation_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
-    let db_name = PG_GHOLA_DATABASE
+    let db_name = GHOLA_DATABASE
         .get()
         .and_then(|cs| cs.to_str().ok().map(|s| s.to_string()))
         .unwrap_or_else(|| "memories".to_string());
@@ -201,7 +201,7 @@ pub extern "C-unwind" fn consolidation_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     log!(
-        "pg_ghola consolidation worker: started, connected to database '{db_name}'"
+        "ghola consolidation worker: started, connected to database '{db_name}'"
     );
 
     let mut sm = StateMachine::new();
@@ -210,10 +210,10 @@ pub extern "C-unwind" fn consolidation_worker_main(_arg: pg_sys::Datum) {
 
     loop {
         if BackgroundWorker::sigterm_received() {
-            log!("pg_ghola consolidation worker: SIGTERM received, draining");
+            log!("ghola consolidation worker: SIGTERM received, draining");
             let drained = drain_via_transactions();
             log!(
-                "pg_ghola consolidation worker: shutdown complete, drained {drained} rows"
+                "ghola consolidation worker: shutdown complete, drained {drained} rows"
             );
             break;
         }

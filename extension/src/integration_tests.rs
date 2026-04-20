@@ -1,4 +1,4 @@
-// pg_ghola::integration_tests — End-to-end integration tests
+// ghola::integration_tests — End-to-end integration tests
 //
 // Verifies the full recall-learn-recall cycle works end-to-end:
 // 1. Install extension on clean database
@@ -42,7 +42,7 @@ mod tests {
     #[pg_test]
     fn test_extension_version() {
         let version = Spi::get_one::<String>(
-            "SELECT extversion FROM pg_extension WHERE extname = 'pg_ghola'",
+            "SELECT extversion FROM pg_extension WHERE extname = 'ghola'",
         )
         .expect("query failed")
         .expect("null version");
@@ -50,13 +50,13 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_pg_ghola_schema_exists() {
+    fn test_ghola_schema_exists() {
         let exists = Spi::get_one::<bool>(
-            "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'pg_ghola')",
+            "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'ghola')",
         )
         .expect("query failed")
         .expect("null");
-        assert!(exists, "pg_ghola schema should exist after CREATE EXTENSION");
+        assert!(exists, "ghola schema should exist after CREATE EXTENSION");
     }
 
     #[pg_test]
@@ -64,7 +64,7 @@ mod tests {
         for table in &["mnemes", "associations", "co_activation_queue", "contradiction_candidates", "config", "contradiction_queue", "contradiction_worker_stats", "gating_queue", "gating_worker_stats", "consolidation_worker_stats", "cluster_centroids"] {
             let exists = Spi::get_one::<bool>(&format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
-                 WHERE table_schema = 'pg_ghola' AND table_name = '{table}')"
+                 WHERE table_schema = 'ghola' AND table_name = '{table}')"
             ))
             .expect("query failed")
             .expect("null");
@@ -79,7 +79,7 @@ mod tests {
                 "SELECT EXISTS( \
                     SELECT 1 FROM pg_type t \
                     JOIN pg_namespace n ON t.typnamespace = n.oid \
-                    WHERE n.nspname = 'pg_ghola' AND t.typname = '{typ}' \
+                    WHERE n.nspname = 'ghola' AND t.typname = '{typ}' \
                 )"
             ))
             .expect("query failed")
@@ -120,7 +120,7 @@ mod tests {
                 "SELECT EXISTS( \
                     SELECT 1 FROM pg_proc p \
                     JOIN pg_namespace n ON p.pronamespace = n.oid \
-                    WHERE n.nspname = 'pg_ghola' AND p.proname = '{func}' \
+                    WHERE n.nspname = 'ghola' AND p.proname = '{func}' \
                 )"
             ))
             .expect("query failed")
@@ -597,12 +597,12 @@ mod tests {
         let exists = Spi::get_one::<bool>(
             "SELECT EXISTS(
                 SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'pg_ghola' AND table_name = 'consolidation_worker_stats'
+                WHERE table_schema = 'ghola' AND table_name = 'consolidation_worker_stats'
             )",
         )
         .unwrap()
         .unwrap();
-        assert!(exists, "consolidation_worker_stats table should exist in pg_ghola schema");
+        assert!(exists, "consolidation_worker_stats table should exist in ghola schema");
     }
 
     #[pg_test]
@@ -611,12 +611,12 @@ mod tests {
             "SELECT EXISTS(
                 SELECT 1 FROM pg_type t
                 JOIN pg_namespace n ON t.typnamespace = n.oid
-                WHERE n.nspname = 'pg_ghola' AND t.typname = 'consolidation_worker_status'
+                WHERE n.nspname = 'ghola' AND t.typname = 'consolidation_worker_status'
             )",
         )
         .unwrap()
         .unwrap();
-        assert!(exists, "consolidation_worker_status type should exist in pg_ghola schema");
+        assert!(exists, "consolidation_worker_status type should exist in ghola schema");
     }
 
     #[pg_test]

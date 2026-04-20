@@ -1,10 +1,10 @@
-// pg_ghola: Cognitive Memory Primitives for Postgres (v2)
+// ghola: Cognitive Memory Primitives for Postgres (v2)
 //
 // A pgrx extension. All extension objects install into the `semantic`
 // schema via the control file's `schema = 'semantic'` directive.
 //
 // v2 background workers (consolidation + contradiction) target
-// semantic.* and require shared_preload_libraries = 'pg_ghola' in
+// semantic.* and require shared_preload_libraries = 'ghola' in
 // postgresql.conf. Target database is configured via the
 // ghola.database GUC (defaults to 'memories').
 
@@ -27,14 +27,14 @@ pub mod integration_tests;
 pub mod tests;
 
 // ---------------------------------------------------------------------------
-// GUC: pg_ghola.database
+// GUC: ghola.database
 // ---------------------------------------------------------------------------
 
 use pgrx::prelude::*;
 use pgrx::guc::*;
 use std::ffi::CString;
 
-pub static PG_GHOLA_DATABASE: GucSetting<Option<CString>> =
+pub static GHOLA_DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 
 // ---------------------------------------------------------------------------
@@ -46,9 +46,9 @@ pub static PG_GHOLA_DATABASE: GucSetting<Option<CString>> =
 pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
         c"ghola.database",
-        c"Target database for the pg_ghola background workers.",
+        c"Target database for the ghola background workers.",
         c"Workers connect to this database for consolidation and contradiction scanning.",
-        &PG_GHOLA_DATABASE,
+        &GHOLA_DATABASE,
         GucContext::Sighup,
         GucFlags::default(),
     );
@@ -69,18 +69,18 @@ fn register_background_workers() {
     use pgrx::bgworkers::*;
     use std::time::Duration;
 
-    BackgroundWorkerBuilder::new("pg_ghola Consolidation Worker")
+    BackgroundWorkerBuilder::new("ghola Consolidation Worker")
         .set_function("consolidation_worker_main")
-        .set_library("pg_ghola")
+        .set_library("ghola")
         .set_argument(0i32.into_datum())
         .enable_spi_access()
         .set_start_time(BgWorkerStartTime::RecoveryFinished)
         .set_restart_time(Some(Duration::from_secs(10)))
         .load();
 
-    BackgroundWorkerBuilder::new("pg_ghola Contradiction Worker")
+    BackgroundWorkerBuilder::new("ghola Contradiction Worker")
         .set_function("contradiction_worker_main")
-        .set_library("pg_ghola")
+        .set_library("ghola")
         .set_argument(0i32.into_datum())
         .enable_spi_access()
         .set_start_time(BgWorkerStartTime::RecoveryFinished)

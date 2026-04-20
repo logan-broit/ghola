@@ -1,4 +1,4 @@
-// pg_ghola::types — v2 composite types for recall_result and score_weights
+// ghola::types — v2 composite types for recall_result and score_weights
 //
 // These types are defined as SQL composite types via extension_sql! and
 // live in the `semantic` schema (via the control file's

@@ -1,6 +1,6 @@
-comment = 'pg_ghola: Cognitive Memory Primitives for Postgres'
+comment = 'ghola: Cognitive Memory Primitives for Postgres'
 default_version = '0.0.1'
-module_pathname = '$libdir/pg_ghola'
+module_pathname = '$libdir/ghola'
 relocatable = false
 superuser = true
 schema = 'semantic'

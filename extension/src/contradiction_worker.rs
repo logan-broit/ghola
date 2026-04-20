@@ -1,4 +1,4 @@
-// pg_ghola::contradiction_worker -- Async contradiction detection worker
+// ghola::contradiction_worker -- Async contradiction detection worker
 //
 // Drains the contradiction_queue table and runs HNSW similarity scans
 // to flag potential contradictions. Follows the same pattern as the
@@ -9,7 +9,7 @@ use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::prelude::*;
 use std::time::{Duration, Instant};
 
-use crate::PG_GHOLA_DATABASE;
+use crate::GHOLA_DATABASE;
 
 // ---------------------------------------------------------------------------
 // Contradiction worker state machine (slower cadence than Hebbian)
@@ -101,7 +101,7 @@ fn process_one_contradiction() -> (i64, i64) {
 
             if candidates > 0 {
                 log!(
-                    "pg_ghola contradiction worker: flagged {candidates} candidates for mneme {mneme_id}"
+                    "ghola contradiction worker: flagged {candidates} candidates for mneme {mneme_id}"
                 );
             }
             (1, candidates)
@@ -119,7 +119,7 @@ fn process_one_contradiction() -> (i64, i64) {
 pub extern "C-unwind" fn contradiction_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
 
-    let db_name = PG_GHOLA_DATABASE
+    let db_name = GHOLA_DATABASE
         .get()
         .and_then(|cs| cs.to_str().ok().map(|s| s.to_string()))
         .unwrap_or_else(|| "memories".to_string());
@@ -127,7 +127,7 @@ pub extern "C-unwind" fn contradiction_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::connect_worker_to_spi(Some(&db_name), None);
 
     log!(
-        "pg_ghola contradiction worker: started, connected to database '{db_name}'"
+        "ghola contradiction worker: started, connected to database '{db_name}'"
     );
 
     let mut sm = ContradictionStateMachine::new();
@@ -137,7 +137,7 @@ pub extern "C-unwind" fn contradiction_worker_main(_arg: pg_sys::Datum) {
     loop {
         if BackgroundWorker::sigterm_received() {
             log!(
-                "pg_ghola contradiction worker: SIGTERM received, \
+                "ghola contradiction worker: SIGTERM received, \
                  shutdown complete, {} scans, {} candidates",
                 total_scans, total_candidates
             );

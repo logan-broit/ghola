@@ -1,4 +1,4 @@
-// pg_ghola::hebbian — v2 Hebbian learning and confidence functions
+// ghola::hebbian — v2 Hebbian learning and confidence functions
 //
 // Drains `semantic.co_activation_queue` (one row per unordered mneme
 // pair, inserted by `recall`), strengthens the corresponding `hebbian`

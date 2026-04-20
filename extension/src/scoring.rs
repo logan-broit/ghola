@@ -1,8 +1,8 @@
-// pg_ghola::scoring — Pure cognitive scoring functions
+// ghola::scoring — Pure cognitive scoring functions
 //
 // Implements softplus, actr_activation, ebbinghaus_decay, bayesian_update.
 // All functions are stateless, immutable, and parallel-safe.
-// The control file's schema directive places all objects in pg_ghola automatically.
+// The control file's schema directive places all objects in `semantic` automatically.
 //
 // Owned by: implement_scoring_primitives task
 

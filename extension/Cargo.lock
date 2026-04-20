@@ -492,6 +492,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghola"
+version = "0.0.1"
+dependencies = [
+ "pgrx",
+ "pgrx-tests",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -882,14 +890,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "serde",
-]
-
-[[package]]
-name = "pg_ghola"
-version = "0.0.1"
-dependencies = [
- "pgrx",
- "pgrx-tests",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 // v2 schema shape tests. Pinned BEFORE the schema.rs rewrite so we can
-// watch them fail against the v1 schema (12 tables under `pg_ghola`)
+// watch them fail against the v1 schema (12 tables under `ghola`)
 // and then go green once Task 1.3 installs the 5-table `semantic` schema.
 
 #[cfg(any(test, feature = "pg_test"))]

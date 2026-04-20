@@ -1,4 +1,4 @@
-// pg_ghola::associations — Typed association management
+// ghola::associations — Typed association management
 //
 // Provides functions for creating and querying typed associations:
 // - mark_supersedes: creates 'supersedes' link and archives the older mneme
