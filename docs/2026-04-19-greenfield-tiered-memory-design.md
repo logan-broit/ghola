@@ -204,6 +204,15 @@ coworker recalling a fact that promoted from the first user's session.
 
 ## Data models
 
+> **Superseded by
+> [`2026-04-20-jsonl-native-event-shape.md`](2026-04-20-jsonl-native-event-shape.md).**
+> The schemas in this section describe the original "one row per
+> turn" model. The addendum re-bases both tiers on Claude Code's
+> real JSONL shape (one row per content block, projections + raw
+> event, queryable tool I/O, agent-session forensics). Everything
+> else in this document still applies unchanged; only the `turns` /
+> episodic-turns DDL below is historical.
+
 ### Sietch (working, SQLite, per-session, ephemeral)
 
 ```sql

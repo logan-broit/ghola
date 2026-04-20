@@ -807,6 +807,12 @@ If all three hold, tag the Phase 1 completion commit (e.g. `extension-v0.2.0`) o
 writes to and `/v1/episodic/*` reads from. This schema is NOT managed by
 pg_ghola — it's plain Postgres DDL, applied by Chapterhouse at boot.
 
+**Shape:** follow
+[`docs/2026-04-20-jsonl-native-event-shape.md`](../2026-04-20-jsonl-native-event-shape.md)
+verbatim. Core tables are `episodic.sessions`, `episodic.events`
+(formerly `episodic.events`), and `episodic.shares`. All references to
+`turns` below are historical and should be read as `events`.
+
 **Branch:** `main` (monorepo). Work occurs in `_chapterhouse/` and
 migrates into `cmd/ch-server/` + `internal/{handler,repository,pipeline_b}/`
 as each piece is touched.
@@ -840,14 +846,14 @@ func TestEpisodicSchemaHasExpectedTables(t *testing.T) {
     db := testutil.NewPostgres(t) // spins up ephemeral pg with extensions
     ApplyMigrations(t, db)
     got := queryTables(t, db, "episodic")
-    want := []string{"sessions", "shares", "turns"}
+    want := []string{"events", "sessions", "shares"}
     require.Equal(t, want, got)
 }
 
-func TestEpisodicTurnsHasEmbeddingColumn(t *testing.T) {
+func TestEpisodicEventsHasEmbeddingColumn(t *testing.T) {
     db := testutil.NewPostgres(t)
     ApplyMigrations(t, db)
-    typ := columnType(t, db, "episodic", "turns", "embedding")
+    typ := columnType(t, db, "episodic", "events", "embedding")
     require.Equal(t, "vector", typ)
 }
 ```
@@ -883,7 +889,7 @@ EMBEDDING_DIM=1024 go test ./internal/repository/... -run TestEpisodic -v
 ```
 
 Expected: both pass. Repeat with `EMBEDDING_DIM=384` and confirm the
-same tests pass against a DB where `\d episodic.turns` reports
+same tests pass against a DB where `\d episodic.events` reports
 `embedding | vector(384)`.
 
 **Step 3:** Commit:
@@ -901,7 +907,7 @@ git commit -m "feat: episodic migrations + runner with \${EMBEDDING_DIM} substit
 **Step 1:** Write a test that:
   - Spins up Postgres
   - Runs migrations with `EMBEDDING_DIM=384`
-  - Asserts `episodic.turns.embedding` is `vector(384)`
+  - Asserts `episodic.events.embedding` is `vector(384)`
   - Inserts a 384-vector, recalls it
   - Tears down
   - Repeats with `EMBEDDING_DIM=1536`, asserts `vector(1536)`
@@ -940,7 +946,7 @@ git commit -m "feat: apply episodic migrations at server boot"
 
 - Fresh Postgres → `ch-server` boots → `\dt episodic.*` shows
   `sessions`, `shares`, `turns`.
-- All pgvector / FTS / GIN indexes present (`\d episodic.turns`).
+- All pgvector / FTS / GIN indexes present (`\d episodic.events`).
 
 ---
 
@@ -1121,7 +1127,7 @@ header). Run → fail.
 
 ### Gate 3
 
-- `curl -H "Authorization: Bearer <key>" -X POST http://localhost:8080/v1/episodic/ingest -d '{...}'` returns 200 + inserted rows visible in `episodic.turns`.
+- `curl -H "Authorization: Bearer <key>" -X POST http://localhost:8080/v1/episodic/ingest -d '{...}'` returns 200 + inserted rows visible in `episodic.events`.
 - `curl .../v1/semantic/query` against a seeded DB returns ranked mnemes
   with full pg_ghola v2 cognitive scoring.
 - All handler tests pass.
@@ -1386,7 +1392,7 @@ detector yields that pair with `support_count=5`. Given a pair in only
 
 ```sql
 WITH pairs AS (
-  SELECT unnest(entities) AS e, session_id FROM episodic.turns
+  SELECT unnest(entities) AS e, session_id FROM episodic.events
    WHERE ingested_at >= now() - interval '24 hours'
 )
 SELECT a.e AS e1, b.e AS e2, count(DISTINCT a.session_id) AS support
