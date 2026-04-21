@@ -7,16 +7,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/config"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/middleware"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -147,6 +151,52 @@ func run() error {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
+	// Pipeline B (nightly episodic → semantic distillation). Opt-in
+	// via PIPELINE_B_ENABLED so dev instances that don't have a
+	// mentat (vLLM) available don't spin the scheduler.
+	pbCtx, pbCancel := context.WithCancel(context.Background())
+	defer pbCancel()
+	if os.Getenv("PIPELINE_B_ENABLED") == "true" {
+		ws, err := uuid.Parse(os.Getenv("PIPELINE_B_WORKSPACE_ID"))
+		if err != nil {
+			return fmt.Errorf("PIPELINE_B_WORKSPACE_ID: %w", err)
+		}
+		hour := envInt("PIPELINE_B_HOUR", 2)
+		minSupport := envInt("PIPELINE_B_MIN_SUPPORT", 3)
+		windowH := envInt("PIPELINE_B_WINDOW_HOURS", 24)
+
+		mentat := &pipeline_b.MentatClient{
+			BaseURL: os.Getenv("MENTAT_URL"),
+			APIKey:  os.Getenv("MENTAT_API_KEY"),
+			Model:   os.Getenv("MENTAT_MODEL"),
+		}
+		embedProv := embedding.NewOpenAIProvider(embedding.Config{
+			URL:        cfg.Embedding.URL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		}, cfg.Embedding.APIKey)
+		worker := &pipeline_b.Worker{
+			Pool:     pool,
+			Mentat:   mentat,
+			Embedder: embedProv,
+			Cfg: pipeline_b.WorkerConfig{
+				Window:      time.Duration(windowH) * time.Hour,
+				MinSupport:  minSupport,
+				WorkspaceID: ws,
+			},
+		}
+		sched := pipeline_b.Scheduler{Hour: hour, Min: 0}
+		logger.Info("pipeline B scheduler starting",
+			slog.Int("hour", hour),
+			slog.String("workspace", ws.String()),
+		)
+		go func() {
+			if err := sched.Run(pbCtx, worker.RunOnce); err != nil && err != context.Canceled {
+				logger.Error("pipeline B exited", slog.String("err", err.Error()))
+			}
+		}()
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("HTTP server listening",
@@ -180,6 +230,15 @@ func run() error {
 
 	logger.Info("server shutdown complete")
 	return nil
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func buildRouter(
