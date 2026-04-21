@@ -76,10 +76,10 @@ type Session struct {
 // the embedding + the projected `text` field if the caller doesn't
 // supply them.
 type RecordInput struct {
-	SessionID string
-	UserID    string
-	ParentID  *string
-	Event     Event // partial — ID/embedding/CreatedAt may be filled
+	SessionID string  `json:"session_id"`
+	UserID    string  `json:"user_id"`
+	ParentID  *string `json:"parent_id,omitempty"`
+	Event     Event   `json:"event"` // partial — ID/embedding/CreatedAt may be filled
 }
 
 // RecallInput is the unified cross-tier query. The service fans out
@@ -87,15 +87,15 @@ type RecordInput struct {
 // query, merges by score with tier attribution, and returns at most
 // Limit rows.
 type RecallInput struct {
-	SessionID      string
-	UserID         string
-	Workspace      string
-	QueryText      string
-	Limit          int
-	IncludeShared  bool
-	IncludeSietch  bool
-	IncludeEpisode bool
-	IncludeSemant  bool
+	SessionID      string `json:"session_id,omitempty"`
+	UserID         string `json:"user_id"`
+	Workspace      string `json:"workspace,omitempty"`
+	QueryText      string `json:"query_text,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	IncludeShared  bool   `json:"include_shared,omitempty"`
+	IncludeSietch  bool   `json:"include_sietch,omitempty"`
+	IncludeEpisode bool   `json:"include_episode,omitempty"`
+	IncludeSemant  bool   `json:"include_semant,omitempty"`
 }
 
 // RecallHit is one merged result across all tiers with attribution.
@@ -118,25 +118,25 @@ type RecallResult struct {
 
 // ShareInput for `share`.
 type ShareInput struct {
-	UserID    string
-	Target    string     // "team" | "user"
-	TargetID  *string    // uuid, required when target="user"
-	ScopeType string     // "session" | "branch" | "event"
-	ScopeID   string
+	UserID    string  `json:"user_id"`
+	Target    string  `json:"target"`               // "team" | "user"
+	TargetID  *string `json:"target_id,omitempty"`  // uuid, required when target="user"
+	ScopeType string  `json:"scope_type"`           // "session" | "branch" | "event"
+	ScopeID   string  `json:"scope_id"`
 }
 
 // ForgetInput for `forget`.
 type ForgetInput struct {
-	SessionID string
-	UserID    string
-	EventIDs  []string
+	SessionID string   `json:"session_id,omitempty"`
+	UserID    string   `json:"user_id"`
+	EventIDs  []string `json:"event_ids"`
 }
 
 // SessionStartInput for `session_start`.
 type SessionStartInput struct {
-	UserID       string
-	AgentKind    *string
-	Cwd          *string
-	GitBranch    *string
-	SourceDevice *string
+	UserID       string  `json:"user_id"`
+	AgentKind    *string `json:"agent_kind,omitempty"`
+	Cwd          *string `json:"cwd,omitempty"`
+	GitBranch    *string `json:"git_branch,omitempty"`
+	SourceDevice *string `json:"source_device,omitempty"`
 }

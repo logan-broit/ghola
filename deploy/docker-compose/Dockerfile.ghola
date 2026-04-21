@@ -1,0 +1,19 @@
+# Multi-stage build for the ghola local service + MCP bridge.
+# Build context is the ghola monorepo root.
+FROM golang:1.25-alpine AS build
+
+WORKDIR /src
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/ghola      ./cmd/ghola \
+ && CGO_ENABLED=0 go build -o /out/ghola-mcp  ./cmd/ghola-mcp
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=build /out/ghola      /usr/local/bin/ghola
+COPY --from=build /out/ghola-mcp  /usr/local/bin/ghola-mcp
+ENTRYPOINT ["/usr/local/bin/ghola"]

@@ -54,12 +54,20 @@ func run() error {
 	logger.Info("database connectivity verified")
 
 	// Verify ghola extension is available (renamed from pg_ghola in v2).
+	// Dev stacks running on vanilla pgvector skip this by setting
+	// GHOLA_EXTENSION_OPTIONAL=true — the replay pipeline falls back
+	// to a test-stub semantic schema seeded by seed.sql.
 	var extVersion string
 	err = pool.QueryRow(ctx, "SELECT extversion FROM pg_extension WHERE extname = 'ghola'").Scan(&extVersion)
 	if err != nil {
-		return fmt.Errorf("ghola extension not found — ensure the custom CNPG image includes ghola: %w", err)
+		if os.Getenv("GHOLA_EXTENSION_OPTIONAL") == "true" {
+			logger.Warn("ghola extension not installed; continuing because GHOLA_EXTENSION_OPTIONAL=true")
+		} else {
+			return fmt.Errorf("ghola extension not found — ensure the custom CNPG image includes ghola: %w", err)
+		}
+	} else {
+		logger.Info("ghola extension verified", slog.String("version", extVersion))
 	}
-	logger.Info("ghola extension verified", slog.String("version", extVersion))
 
 	// Apply episodic migrations. This is idempotent — already-applied
 	// migrations are skipped via _migrations.applied. Requires

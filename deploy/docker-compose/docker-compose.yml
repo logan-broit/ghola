@@ -1,0 +1,133 @@
+# Local dev stack for the ghola tiered-memory system.
+#
+#   docker compose up -d                   # episodic + semantic-stub path
+#   docker compose --profile all up -d     # also start the ghola daemon
+#                                           # on the host network (MCP)
+#
+# Services:
+#   postgres        pgvector/pgvector:pg17, bootstrapped by seed.sql
+#   ch-init         one-shot; applies episodic migrations then exits
+#   chapterhouse    ch-server HTTP API (:8080)
+#   ghola           ghola local daemon (:7421) — profile "all"
+#
+# NOT included in v1a dev stack (bring your own):
+#   melange         embedding service; point MELANGE_URL at an external
+#                   service (e.g. Together.ai OpenAI-compatible endpoint)
+#   mentat          vLLM for replay; enable via REPLAY_ENABLED=true +
+#                   MENTAT_URL pointing at your local model
+
+services:
+  melange:
+    image: python:3.12-alpine
+    command: ["python", "/stub.py"]
+    environment:
+      PORT: "8082"
+      STUB_EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+    volumes:
+      - ./melange-stub/stub.py:/stub.py:ro
+    ports:
+      - "${MELANGE_PORT:-8082}:8082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health').read()"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memory_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-memories}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./seed.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memory_api} -d ${POSTGRES_DB:-memories}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ch-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.chapterhouse
+    image: ghola/chapterhouse:dev
+    entrypoint: ["/usr/local/bin/ch-init"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      GHOLA_EXTENSION_OPTIONAL: "true"
+    restart: "no"
+
+  chapterhouse:
+    image: ghola/chapterhouse:dev
+    depends_on:
+      ch-init:
+        condition: service_completed_successfully
+      melange:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: local
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+      AUTH_PROVIDER: default
+      AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://melange:8082}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      REPLAY_ENABLED: ${REPLAY_ENABLED:-false}
+      REPLAY_WORKSPACE_ID: ${REPLAY_WORKSPACE_ID:-00000000-0000-0000-0000-000000000010}
+      MENTAT_URL: ${MENTAT_URL:-}
+      MENTAT_MODEL: ${MENTAT_MODEL:-}
+      MENTAT_API_KEY: ${MENTAT_API_KEY:-}
+    ports:
+      - "${CHAPTERHOUSE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ghola:
+    profiles: ["all"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.ghola
+    image: ghola/ghola:dev
+    depends_on:
+      chapterhouse:
+        condition: service_healthy
+      melange:
+        condition: service_healthy
+    environment:
+      GHOLA_ADDR: 0.0.0.0:7421
+      GHOLA_LOOPBACK_ONLY: "false"
+      CHAPTERHOUSE_URL: http://chapterhouse:8080
+      CHAPTERHOUSE_API_KEY: ${CHAPTERHOUSE_API_KEY:-}
+      CHAPTERHOUSE_REQUIRE_KEY: "false"
+      MELANGE_URL: ${MELANGE_URL:-http://melange:8082}
+      MELANGE_MODEL: ${MELANGE_MODEL:-qwen3-embedding}
+      ENCODING_INTERVAL: ${ENCODING_INTERVAL:-5m}
+    ports:
+      - "${GHOLA_PORT:-7421}:7421"
+
+volumes:
+  postgres-data:
