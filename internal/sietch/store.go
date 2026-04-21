@@ -373,6 +373,29 @@ func (s *Store) SearchFTS(ctx context.Context, sessionID, text string, limit int
 // Sessions list / soft forget / watermark / pending
 // ---------------------------------------------------------------------
 
+// ActiveSessionIDs returns the ids of every session whose file is
+// present under the store root, regardless of user. Pipeline A uses
+// this to know which sessions to tick through on each consolidation
+// pass.
+func (s *Store) ActiveSessionIDs(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sqlite") {
+			continue
+		}
+		out = append(out, strings.TrimSuffix(e.Name(), ".sqlite"))
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *Store) ListSessions(ctx context.Context, userID string) ([]core.Session, error) {
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
@@ -490,22 +513,18 @@ func (s *Store) SetWatermark(ctx context.Context, sessionID, eventID string) err
 	return err
 }
 
-// PendingEvents returns events created after the watermark event (or
-// all events when watermark is empty), in insertion order.
+// PendingEvents returns events created strictly after `afterEventID`
+// (or every active event when afterEventID is empty) in id order.
+//
+// Event ids are ULIDs packed into the UUID string format (see
+// core.NewID), so id comparison and id ordering are equivalent to
+// chronological comparison and chronological ordering — no rowid /
+// timestamp trickery needed. Empty afterEventID compares less than
+// any real id, so the "no watermark yet" path returns everything.
 func (s *Store) PendingEvents(ctx context.Context, sessionID, afterEventID string) ([]core.Event, error) {
 	db, err := s.sessionConn(sessionID)
 	if err != nil {
 		return nil, err
-	}
-
-	var cutoff int64
-	if afterEventID != "" {
-		err := db.QueryRowContext(ctx,
-			`SELECT created_at FROM events WHERE id = ?`, afterEventID,
-		).Scan(&cutoff)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
 	}
 
 	rows, err := db.QueryContext(ctx, `
@@ -515,9 +534,9 @@ func (s *Store) PendingEvents(ctx context.Context, sessionID, afterEventID strin
 		       cwd, git_branch, agent_id, is_sidechain, model,
 		       raw_event, embedding, entities, tags, source_device, created_at
 		FROM events
-		WHERE created_at > ? AND state = 'active'
-		ORDER BY created_at ASC, id ASC
-	`, cutoff)
+		WHERE id > ? AND state = 'active'
+		ORDER BY id ASC
+	`, afterEventID)
 	if err != nil {
 		return nil, err
 	}

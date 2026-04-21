@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,15 +23,19 @@ func newTestStore(t *testing.T) *sietch.Store {
 
 func mkSession(userID string) core.Session {
 	return core.Session{
-		ID:        uuid.NewString(),
+		ID:        core.NewID(),
 		UserID:    userID,
 		StartedAt: time.Now().UTC(),
 	}
 }
 
+// mkEvent uses core.NewID so event ids sort chronologically (ULID).
+// Tests that pin custom CreatedAt values rely on this — post-ULID
+// PendingEvents orders by id alone, and a non-ULID uuid would
+// randomize the pending-set membership.
 func mkEvent(sess core.Session, text string, emb []float32) core.Event {
 	return core.Event{
-		ID:        uuid.NewString(),
+		ID:        core.NewID(),
 		SessionID: sess.ID,
 		UserID:    sess.UserID,
 		Type:      "user",

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // Core is the single behavioral surface the HTTP + MCP wrappers share.
@@ -38,7 +36,7 @@ func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session,
 		return Session{}, errMissingUserID
 	}
 	s := Session{
-		ID:           uuid.NewString(),
+		ID:           NewID(),
 		UserID:       in.UserID,
 		StartedAt:    c.Now(),
 		AgentKind:    in.AgentKind,
@@ -87,7 +85,7 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 
 	ev := in.Event
 	if ev.ID == "" {
-		ev.ID = uuid.NewString()
+		ev.ID = NewID()
 	}
 	ev.SessionID = in.SessionID
 	ev.UserID = in.UserID
