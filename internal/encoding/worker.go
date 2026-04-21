@@ -1,4 +1,4 @@
-package pipeline_a
+package encoding
 
 import (
 	"context"
@@ -8,15 +8,15 @@ import (
 	"github.com/logan-broit/ghola/internal/core"
 )
 
-// SessionSource produces the set of session ids Pipeline A should
-// consider on each tick. Typically backed by sietch.Store
+// SessionSource produces the set of session ids the encoding worker
+// should consider on each tick. Typically backed by sietch.Store
 // .ActiveSessionIDs but kept as a function type so tests can inject
 // fixed slices without pulling in sietch.
 type SessionSource func(ctx context.Context) ([]string, error)
 
-// Worker is Pipeline A: a ticker goroutine that walks every active
-// sietch session and calls Core.Consolidate, which flushes pending
-// events to chapterhouse and advances the watermark.
+// Worker is the encoding loop: a ticker goroutine that walks every
+// active sietch session and calls Core.Consolidate, which flushes
+// pending events to chapterhouse and advances the watermark.
 //
 // Lossless by construction: Core.Consolidate is idempotent (chapter-
 // house upserts on event.id) and watermark-driven (pending events
@@ -92,8 +92,8 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // TerminalBranchIdleThreshold is how long a branch must be quiet
-// before Pipeline A considers it "terminal" and eligible for a
-// coherence pass. The design doc specifies "no activity for >N
+// before the encoding worker considers it "terminal" and eligible
+// for a coherence pass. The design doc specifies "no activity for >N
 // minutes"; 15 minutes is the v1a default.
 const TerminalBranchIdleThreshold = 15 * time.Minute
 

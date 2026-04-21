@@ -1,4 +1,4 @@
-package pipeline_b_test
+package replay_test
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 )
 
 // TestScheduler_FiresAtConfiguredHour advances a virtual clock and
@@ -19,7 +19,7 @@ func TestScheduler_FiresAtConfiguredHour(t *testing.T) {
 	done := make(chan struct{})
 	var fired int
 
-	s := pipeline_b.Scheduler{
+	s := replay.Scheduler{
 		Hour: 2, Min: 0,
 		Now: func() time.Time { return virtualNow },
 		Wait: func(ctx context.Context, d time.Duration) error {
@@ -60,7 +60,7 @@ func TestScheduler_NextDayIfPastHour(t *testing.T) {
 	done := make(chan struct{})
 	var waitCalls []time.Duration
 
-	s := pipeline_b.Scheduler{
+	s := replay.Scheduler{
 		Hour: 2, Min: 0,
 		Now: func() time.Time { return virtualNow },
 		Wait: func(ctx context.Context, d time.Duration) error {

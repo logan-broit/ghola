@@ -1,4 +1,4 @@
-package pipeline_b_test
+package replay_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/testutil"
 )
@@ -72,7 +72,7 @@ func TestDetectPairs_MeetsThreshold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pairs, err := pipeline_b.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
+	pairs, err := replay.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
 	require.NoError(t, err)
 	require.Len(t, pairs, 1)
 	assert.Equal(t, "CNPG", pairs[0].E1)
@@ -96,7 +96,7 @@ func TestDetectPairs_BelowThreshold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pairs, err := pipeline_b.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
+	pairs, err := replay.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
 	require.NoError(t, err)
 	assert.Empty(t, pairs)
 }
@@ -116,7 +116,7 @@ func TestDetectPairs_WindowExcludesOld(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pairs, err := pipeline_b.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
+	pairs, err := replay.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
 	require.NoError(t, err)
 	assert.Empty(t, pairs)
 }
@@ -137,7 +137,7 @@ func TestDetectPairs_CanonicalOrdering(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pairs, err := pipeline_b.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
+	pairs, err := replay.DetectPairs(ctx, pg.Pool, 24*time.Hour, 3)
 	require.NoError(t, err)
 	require.Len(t, pairs, 1)
 	assert.Equal(t, "Ant", pairs[0].E1)

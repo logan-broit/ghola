@@ -1,4 +1,4 @@
-package pipeline_b_test
+package replay_test
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 )
 
 // fakeVLLM is an httptest.Server that echoes a canned chat.completions
@@ -44,12 +44,12 @@ func fakeVLLM(t *testing.T, replyText string, status int) *httptest.Server {
 func TestMentat_Distill_ValidJSON(t *testing.T) {
 	srv := fakeVLLM(t, `{"concept":"CNPG runs Postgres","content":"Chapterhouse provisions Postgres clusters via the CloudNativePG operator.","memory_type":"factual","entities":["CNPG","Postgres"]}`, 200)
 
-	c := &pipeline_b.MentatClient{BaseURL: srv.URL, Model: "test-model"}
+	c := &replay.MentatClient{BaseURL: srv.URL, Model: "test-model"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	m, err := c.Distill(ctx, pipeline_b.DistillInput{
+	m, err := c.Distill(ctx, replay.DistillInput{
 		E1: "CNPG", E2: "Postgres",
 		Turns: []string{"we use CNPG for postgres"},
 	})
@@ -62,12 +62,12 @@ func TestMentat_Distill_ValidJSON(t *testing.T) {
 func TestMentat_Distill_StripsMarkdownFence(t *testing.T) {
 	srv := fakeVLLM(t, "```json\n{\"concept\":\"x\",\"content\":\"y\",\"memory_type\":\"factual\"}\n```", 200)
 
-	c := &pipeline_b.MentatClient{BaseURL: srv.URL, Model: "m"}
+	c := &replay.MentatClient{BaseURL: srv.URL, Model: "m"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	m, err := c.Distill(ctx, pipeline_b.DistillInput{E1: "x", E2: "y", Turns: []string{"t"}})
+	m, err := c.Distill(ctx, replay.DistillInput{E1: "x", E2: "y", Turns: []string{"t"}})
 	require.NoError(t, err)
 	assert.Equal(t, "x", m.Concept)
 }
@@ -76,12 +76,12 @@ func TestMentat_Distill_RejectsMalformed(t *testing.T) {
 	// No JSON object at all.
 	srv := fakeVLLM(t, "I refuse to answer in JSON.", 200)
 
-	c := &pipeline_b.MentatClient{BaseURL: srv.URL, Model: "m"}
+	c := &replay.MentatClient{BaseURL: srv.URL, Model: "m"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	m, err := c.Distill(ctx, pipeline_b.DistillInput{E1: "a", E2: "b", Turns: []string{"t"}})
+	m, err := c.Distill(ctx, replay.DistillInput{E1: "a", E2: "b", Turns: []string{"t"}})
 	require.Error(t, err)
 	assert.Nil(t, m)
 	assert.Contains(t, err.Error(), "no JSON object")
@@ -90,12 +90,12 @@ func TestMentat_Distill_RejectsMalformed(t *testing.T) {
 func TestMentat_Distill_RejectsInvalidMemoryType(t *testing.T) {
 	srv := fakeVLLM(t, `{"concept":"c","content":"x","memory_type":"bogus"}`, 200)
 
-	c := &pipeline_b.MentatClient{BaseURL: srv.URL, Model: "m"}
+	c := &replay.MentatClient{BaseURL: srv.URL, Model: "m"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := c.Distill(ctx, pipeline_b.DistillInput{E1: "a", E2: "b", Turns: []string{"t"}})
+	_, err := c.Distill(ctx, replay.DistillInput{E1: "a", E2: "b", Turns: []string{"t"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "memory_type")
 }
@@ -103,12 +103,12 @@ func TestMentat_Distill_RejectsInvalidMemoryType(t *testing.T) {
 func TestMentat_Distill_SurfacesHTTPError(t *testing.T) {
 	srv := fakeVLLM(t, "", 500)
 
-	c := &pipeline_b.MentatClient{BaseURL: srv.URL, Model: "m"}
+	c := &replay.MentatClient{BaseURL: srv.URL, Model: "m"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := c.Distill(ctx, pipeline_b.DistillInput{E1: "a", E2: "b", Turns: []string{"t"}})
+	_, err := c.Distill(ctx, replay.DistillInput{E1: "a", E2: "b", Turns: []string{"t"}})
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "500"))
 }

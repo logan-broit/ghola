@@ -1,11 +1,12 @@
-// Package pipeline_a implements the continuous working -> episodic
-// consolidation worker. Entity extraction is the lightweight tagging
-// step run on each event before it ships to chapterhouse, so episodic
-// queries can filter by `entities` without a second pass later.
+// Package encoding implements the continuous sietch (working) ->
+// episodic trace-creation worker. Entity extraction is the
+// lightweight tagging step run on each event before it ships to
+// chapterhouse, so episodic queries can filter by `entities` without
+// a second pass later.
 //
 // v1a is regex-only — no ML model. An LLM-assisted upgrade is
 // explicitly deferred in the design doc.
-package pipeline_a
+package encoding
 
 import (
 	"regexp"

@@ -1,4 +1,4 @@
-package pipeline_b_test
+package replay_test
 
 import (
 	"context"
@@ -9,17 +9,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/testutil"
 )
 
 type stubDistiller struct {
-	got  []pipeline_b.DistillInput
-	reply *pipeline_b.Mneme
+	got  []replay.DistillInput
+	reply *replay.Mneme
 	err  error
 }
 
-func (s *stubDistiller) Distill(ctx context.Context, in pipeline_b.DistillInput) (*pipeline_b.Mneme, error) {
+func (s *stubDistiller) Distill(ctx context.Context, in replay.DistillInput) (*replay.Mneme, error) {
 	s.got = append(s.got, in)
 	if s.err != nil {
 		return nil, s.err
@@ -56,16 +56,16 @@ func TestWorker_EndToEnd(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	w := &pipeline_b.Worker{
+	w := &replay.Worker{
 		Pool: pg.Pool,
-		Mentat: &stubDistiller{reply: &pipeline_b.Mneme{
+		Mentat: &stubDistiller{reply: &replay.Mneme{
 			Concept: "CNPG + Postgres",
 			Content: "Chapterhouse uses the CloudNativePG operator.",
 			MemoryType: "factual",
 			Entities: []string{"CNPG", "Postgres"},
 		}},
 		Embedder: stubEmbedder{vec: []float32{1, 0, 0, 0}},
-		Cfg: pipeline_b.WorkerConfig{
+		Cfg: replay.WorkerConfig{
 			Window:      24 * time.Hour,
 			MinSupport:  3,
 			WorkspaceID: uuid.New(),
@@ -101,11 +101,11 @@ func TestWorker_DistillerErrorSkipsPair(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	w := &pipeline_b.Worker{
+	w := &replay.Worker{
 		Pool:     pg.Pool,
 		Mentat:   &stubDistiller{err: assert.AnError},
 		Embedder: stubEmbedder{vec: []float32{1, 0, 0, 0}},
-		Cfg:      pipeline_b.WorkerConfig{WorkspaceID: uuid.New()},
+		Cfg:      replay.WorkerConfig{WorkspaceID: uuid.New()},
 	}
 
 	require.NoError(t, w.RunOnce(ctx), "RunOnce must swallow per-pair errors")

@@ -1,4 +1,4 @@
-package pipeline_a_test
+package encoding_test
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/logan-broit/ghola/internal/core"
-	"github.com/logan-broit/ghola/internal/pipeline_a"
+	"github.com/logan-broit/ghola/internal/encoding"
 	"github.com/logan-broit/ghola/internal/sietch"
 )
 
@@ -97,7 +97,7 @@ func TestWorker_TickShipsPendingEvents(t *testing.T) {
 
 	seedEvents(t, c, 5)
 
-	w := pipeline_a.NewWorker(c,
+	w := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			return store.ActiveSessionIDs(ctx)
 		},
@@ -113,7 +113,7 @@ func TestWorker_TickShipsPendingEvents(t *testing.T) {
 func TestWorker_EmptyPendingIsNoop(t *testing.T) {
 	c, store, ch := newCoreWithStore(t)
 
-	w := pipeline_a.NewWorker(c,
+	w := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			return store.ActiveSessionIDs(ctx)
 		},
@@ -127,7 +127,7 @@ func TestWorker_WatermarkAdvancesAcrossTicks(t *testing.T) {
 	c, store, ch := newCoreWithStore(t)
 	sid := seedEvents(t, c, 3)
 
-	w := pipeline_a.NewWorker(c,
+	w := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			return store.ActiveSessionIDs(ctx)
 		},
@@ -161,7 +161,7 @@ func TestWorker_TickScansEveryActiveSession(t *testing.T) {
 	seedEvents(t, c, 1)
 	seedEvents(t, c, 1)
 
-	w := pipeline_a.NewWorker(c,
+	w := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			return store.ActiveSessionIDs(ctx)
 		},
@@ -178,7 +178,7 @@ func TestWorker_TriggerForcesImmediateConsolidation(t *testing.T) {
 
 	// interval is an hour, so Run wouldn't normally tick during this
 	// test window. Trigger() should still drain the session.
-	w := pipeline_a.NewWorker(c,
+	w := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			return store.ActiveSessionIDs(ctx)
 		},
@@ -242,7 +242,7 @@ func TestWorker_PerSessionErrorDoesNotAbortTick(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, realIDs, 1)
 
-	w := pipeline_a.NewWorker(c,
+	w := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			// Inject a bad id first; the real one after.
 			return []string{uuid.NewString(), realIDs[0]}, nil

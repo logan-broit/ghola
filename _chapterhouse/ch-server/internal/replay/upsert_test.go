@@ -1,4 +1,4 @@
-package pipeline_b_test
+package replay_test
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/testutil"
 )
 
@@ -64,9 +64,9 @@ func TestUpsert_InsertsWhenEmpty(t *testing.T) {
 	defer cancel()
 
 	workspace := uuid.New()
-	res, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	res, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: workspace,
-		Mneme: pipeline_b.Mneme{
+		Mneme: replay.Mneme{
 			Concept: "CNPG provisions Postgres",
 			Content: "Chapterhouse uses CloudNativePG.",
 			MemoryType: "factual",
@@ -91,9 +91,9 @@ func TestUpsert_StrengthensWhenSimilar(t *testing.T) {
 	workspace := uuid.New()
 	firstUser := uuid.New()
 	firstSrc := uuid.New()
-	first, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	first, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: workspace,
-		Mneme: pipeline_b.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
+		Mneme: replay.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
 		Embedding: []float32{1, 0, 0, 0},
 		SourceEpisodicIDs: []uuid.UUID{firstSrc},
 		ContributorUserIDs: []uuid.UUID{firstUser},
@@ -104,9 +104,9 @@ func TestUpsert_StrengthensWhenSimilar(t *testing.T) {
 	// Identical embedding → similarity = 1 → must strengthen, not insert.
 	secondUser := uuid.New()
 	secondSrc := uuid.New()
-	second, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	second, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: workspace,
-		Mneme: pipeline_b.Mneme{Concept: "A duplicate", Content: "a", MemoryType: "factual"},
+		Mneme: replay.Mneme{Concept: "A duplicate", Content: "a", MemoryType: "factual"},
 		Embedding: []float32{1, 0, 0, 0},
 		SourceEpisodicIDs: []uuid.UUID{secondSrc},
 		ContributorUserIDs: []uuid.UUID{secondUser},
@@ -138,17 +138,17 @@ func TestUpsert_InsertsWhenDissimilar(t *testing.T) {
 	defer cancel()
 
 	workspace := uuid.New()
-	_, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	_, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: workspace,
-		Mneme: pipeline_b.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
+		Mneme: replay.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
 		Embedding: []float32{1, 0, 0, 0},
 	})
 	require.NoError(t, err)
 
 	// Orthogonal embedding → similarity = 0 → insert new row.
-	res, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	res, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: workspace,
-		Mneme: pipeline_b.Mneme{Concept: "B", Content: "b", MemoryType: "factual"},
+		Mneme: replay.Mneme{Concept: "B", Content: "b", MemoryType: "factual"},
 		Embedding: []float32{0, 1, 0, 0},
 	})
 	require.NoError(t, err)
@@ -167,17 +167,17 @@ func TestUpsert_DifferentWorkspaceNeverDedupes(t *testing.T) {
 	defer cancel()
 
 	ws1, ws2 := uuid.New(), uuid.New()
-	_, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	_, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: ws1,
-		Mneme: pipeline_b.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
+		Mneme: replay.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
 		Embedding: []float32{1, 0, 0, 0},
 	})
 	require.NoError(t, err)
 
 	// Same embedding, different workspace → insert.
-	res, err := pipeline_b.Upsert(ctx, pg.Pool, pipeline_b.DedupConfig{}, pipeline_b.UpsertInput{
+	res, err := replay.Upsert(ctx, pg.Pool, replay.DedupConfig{}, replay.UpsertInput{
 		WorkspaceID: ws2,
-		Mneme: pipeline_b.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
+		Mneme: replay.Mneme{Concept: "A", Content: "a", MemoryType: "factual"},
 		Embedding: []float32{1, 0, 0, 0},
 	})
 	require.NoError(t, err)

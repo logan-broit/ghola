@@ -4,7 +4,7 @@
 // distinct sessions; Stage 2 (mentat) asks vLLM to distill those
 // patterns into a mneme; Stage 3 (upsert) inserts or strengthens the
 // matching semantic.mnemes row.
-package pipeline_b
+package replay
 
 import (
 	"context"

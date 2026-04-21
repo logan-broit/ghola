@@ -13,7 +13,7 @@
 //   CHAPTERHOUSE_API_KEY      per-user Bearer key       (required in prod)
 //   MELANGE_URL               embeddings service base   (http://localhost:8082)
 //   MELANGE_MODEL             embedding model name      (qwen3-embedding)
-//   PIPELINE_A_INTERVAL       consolidation tick cadence (5m)
+//   ENCODING_INTERVAL         sietch -> episodic tick cadence (5m)
 package main
 
 import (
@@ -34,7 +34,7 @@ import (
 	"github.com/logan-broit/ghola/internal/core"
 	"github.com/logan-broit/ghola/internal/embedding"
 	ghttp "github.com/logan-broit/ghola/internal/http"
-	"github.com/logan-broit/ghola/internal/pipeline_a"
+	"github.com/logan-broit/ghola/internal/encoding"
 	"github.com/logan-broit/ghola/internal/sietch"
 )
 
@@ -70,9 +70,9 @@ func run() error {
 	melBase := envOr("MELANGE_URL", "http://localhost:8082")
 	melModel := envOr("MELANGE_MODEL", "qwen3-embedding")
 
-	pipelineInterval, err := time.ParseDuration(envOr("PIPELINE_A_INTERVAL", "5m"))
+	encodingInterval, err := time.ParseDuration(envOr("ENCODING_INTERVAL", "5m"))
 	if err != nil {
-		return fmt.Errorf("parse PIPELINE_A_INTERVAL: %w", err)
+		return fmt.Errorf("parse ENCODING_INTERVAL: %w", err)
 	}
 
 	logger.Info("starting ghola local service",
@@ -80,7 +80,7 @@ func run() error {
 		"sessions_dir", sessionsDir,
 		"chapterhouse", chBase,
 		"melange", melBase,
-		"pipeline_a_interval", pipelineInterval)
+		"encoding_interval", encodingInterval)
 
 	store, err := sietch.Open(sessionsDir)
 	if err != nil {
@@ -95,20 +95,20 @@ func run() error {
 	srv := ghttp.NewServer(c, logger)
 	srv.LoopbackOnly = loopbackOnly
 
-	// Pipeline A: continuous working -> episodic consolidation. Runs
+	// Encoding: continuous working -> episodic trace creation. Runs
 	// alongside the HTTP server in its own goroutine; cancellation
 	// flows through workerCtx on shutdown.
-	worker := pipeline_a.NewWorker(c,
+	worker := encoding.NewWorker(c,
 		func(ctx context.Context) ([]string, error) {
 			return store.ActiveSessionIDs(ctx)
 		},
-		pipelineInterval, logger)
+		encodingInterval, logger)
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	go func() {
 		if err := worker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("pipeline A exited with error", "err", err.Error())
+			logger.Error("encoding worker exited with error", "err", err.Error())
 		}
 	}()
 
@@ -138,7 +138,7 @@ func run() error {
 		logger.Info("shutdown signal received", "signal", sig.String())
 	}
 
-	// Stop Pipeline A before draining the HTTP server so any in-flight
+	// Stop encoding before draining the HTTP server so any in-flight
 	// Consolidate calls finish against a stable chapterhouse.
 	workerCancel()
 

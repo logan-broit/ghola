@@ -16,7 +16,7 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/middleware"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/pipeline_b"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 
 	"github.com/go-chi/chi/v5"
@@ -151,21 +151,21 @@ func run() error {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	// Pipeline B (nightly episodic → semantic distillation). Opt-in
-	// via PIPELINE_B_ENABLED so dev instances that don't have a
-	// mentat (vLLM) available don't spin the scheduler.
-	pbCtx, pbCancel := context.WithCancel(context.Background())
-	defer pbCancel()
-	if os.Getenv("PIPELINE_B_ENABLED") == "true" {
-		ws, err := uuid.Parse(os.Getenv("PIPELINE_B_WORKSPACE_ID"))
+	// Replay (nightly episodic → semantic distillation; hippocampal
+	// replay + systems consolidation). Opt-in via REPLAY_ENABLED so
+	// dev instances without a mentat (vLLM) stay inert.
+	replayCtx, replayCancel := context.WithCancel(context.Background())
+	defer replayCancel()
+	if os.Getenv("REPLAY_ENABLED") == "true" {
+		ws, err := uuid.Parse(os.Getenv("REPLAY_WORKSPACE_ID"))
 		if err != nil {
-			return fmt.Errorf("PIPELINE_B_WORKSPACE_ID: %w", err)
+			return fmt.Errorf("REPLAY_WORKSPACE_ID: %w", err)
 		}
-		hour := envInt("PIPELINE_B_HOUR", 2)
-		minSupport := envInt("PIPELINE_B_MIN_SUPPORT", 3)
-		windowH := envInt("PIPELINE_B_WINDOW_HOURS", 24)
+		hour := envInt("REPLAY_HOUR", 2)
+		minSupport := envInt("REPLAY_MIN_SUPPORT", 3)
+		windowH := envInt("REPLAY_WINDOW_HOURS", 24)
 
-		mentat := &pipeline_b.MentatClient{
+		mentat := &replay.MentatClient{
 			BaseURL: os.Getenv("MENTAT_URL"),
 			APIKey:  os.Getenv("MENTAT_API_KEY"),
 			Model:   os.Getenv("MENTAT_MODEL"),
@@ -175,24 +175,24 @@ func run() error {
 			Model:      cfg.Embedding.Model,
 			Dimensions: cfg.Embedding.Dimensions,
 		}, cfg.Embedding.APIKey)
-		worker := &pipeline_b.Worker{
+		worker := &replay.Worker{
 			Pool:     pool,
 			Mentat:   mentat,
 			Embedder: embedProv,
-			Cfg: pipeline_b.WorkerConfig{
+			Cfg: replay.WorkerConfig{
 				Window:      time.Duration(windowH) * time.Hour,
 				MinSupport:  minSupport,
 				WorkspaceID: ws,
 			},
 		}
-		sched := pipeline_b.Scheduler{Hour: hour, Min: 0}
-		logger.Info("pipeline B scheduler starting",
+		sched := replay.Scheduler{Hour: hour, Min: 0}
+		logger.Info("replay scheduler starting",
 			slog.Int("hour", hour),
 			slog.String("workspace", ws.String()),
 		)
 		go func() {
-			if err := sched.Run(pbCtx, worker.RunOnce); err != nil && err != context.Canceled {
-				logger.Error("pipeline B exited", slog.String("err", err.Error()))
+			if err := sched.Run(replayCtx, worker.RunOnce); err != nil && err != context.Canceled {
+				logger.Error("replay exited", slog.String("err", err.Error()))
 			}
 		}()
 	}
