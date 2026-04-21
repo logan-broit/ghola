@@ -1,24 +1,20 @@
 # Local dev stack for the ghola tiered-memory system.
 #
-#   docker compose up -d                   # episodic + semantic-stub path
+#   docker compose up -d                   # full stack (postgres, embedder,
+#                                            ch-init, chapterhouse)
 #   docker compose --profile all up -d     # also start the ghola daemon
-#                                           # on the host network (MCP)
-#   docker compose --profile stub up -d    # also start the pseudo-embedder
-#                                            on :8082 (fallback if you don't
-#                                            have llama-embed / a real model
-#                                            running on the host)
-#
-# Embedding: by default chapterhouse + ghola point at a real embedder
-# on the host (http://host.docker.internal:8082 — typically the
-# `llama-embed` systemd user service serving Qwen3-Embedding-0.6B).
-# Override EMBEDDING_URL / MELANGE_URL if you're running elsewhere.
+#   docker compose --profile stub up -d    # swap real embedder for the
+#                                            Python hash-stub (fast but
+#                                            noisy; for deterministic
+#                                            unit-style runs)
 #
 # Services:
 #   postgres        pgvector/pgvector:pg17, bootstrapped by seed.sql
+#   melange         vLLM serving Qwen3-Embedding-0.6B (1024-dim)
+#   melange-stub    hash-seeded python stub — profile "stub" only
 #   ch-init         one-shot; applies episodic migrations then exits
 #   chapterhouse    ch-server HTTP API (:8080)
 #   ghola           ghola local daemon (:7421) — profile "all"
-#   melange         hash-seeded python stub — profile "stub"
 #
 # NOT included in v1a dev stack:
 #   mentat          vLLM for replay; enable via REPLAY_ENABLED=true +
@@ -26,6 +22,43 @@
 
 services:
   melange:
+    image: vllm/vllm-openai:latest
+    # vLLM serving Qwen3-Embedding-0.6B on Blackwell.
+    # (TEI's Candle backend was compiled for sm_80 and refuses to
+    # start on sm_120; vLLM already works on this GPU from the
+    # host-side vllm-qwen36 experiments.)
+    ipc: host
+    command:
+      - Qwen/Qwen3-Embedding-0.6B
+      - --runner=pooling
+      - --served-model-name=qwen3-embedding
+      - --port=8082
+      - --host=0.0.0.0
+      - --gpu-memory-utilization=0.08
+      - --max-model-len=8192
+      - --dtype=float16
+      - --trust-remote-code
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - /home/loganb/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "${MELANGE_PORT:-8082}:8082"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 180s
+
+  melange-stub:
     profiles: ["stub"]
     image: python:3.12-alpine
     command: ["python", "/stub.py"]
@@ -84,8 +117,8 @@ services:
     depends_on:
       ch-init:
         condition: service_completed_successfully
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      melange:
+        condition: service_healthy
     environment:
       ENVIRONMENT: local
       SERVER_HOST: 0.0.0.0
@@ -99,7 +132,7 @@ services:
       AUTH_PROVIDER: default
       AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
-      EMBEDDING_URL: ${EMBEDDING_URL:-http://host.docker.internal:8082}
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://melange:8082}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       REPLAY_ENABLED: ${REPLAY_ENABLED:-false}
@@ -124,15 +157,15 @@ services:
     depends_on:
       chapterhouse:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      melange:
+        condition: service_healthy
     environment:
       GHOLA_ADDR: 0.0.0.0:7421
       GHOLA_LOOPBACK_ONLY: "false"
       CHAPTERHOUSE_URL: http://chapterhouse:8080
       CHAPTERHOUSE_API_KEY: ${CHAPTERHOUSE_API_KEY:-}
       CHAPTERHOUSE_REQUIRE_KEY: "false"
-      MELANGE_URL: ${MELANGE_URL:-http://host.docker.internal:8082}
+      MELANGE_URL: ${MELANGE_URL:-http://melange:8082}
       MELANGE_MODEL: ${MELANGE_MODEL:-qwen3-embedding}
       ENCODING_INTERVAL: ${ENCODING_INTERVAL:-5m}
     ports:
