@@ -179,6 +179,39 @@ func (c *client) consolidate(sessionID string) {
 	c.post("/v1/consolidate", map[string]any{"session_id": sessionID}, nil)
 }
 
+// forget fans out a soft-delete across sietch + chapterhouse for the
+// given event ids. session_id is passed so sietch.SoftForget fires.
+func (c *client) forget(sessionID, userID string, eventIDs []string) {
+	c.t.Helper()
+	c.post("/v1/forget", map[string]any{
+		"session_id": sessionID,
+		"user_id":    userID,
+		"event_ids":  eventIDs,
+	}, nil)
+}
+
+// recallWithText runs one recall and returns whatever it got — unlike
+// recallAwait it does not retry waiting for an expected event to
+// appear. Useful when you want to assert absence. A short sleep
+// before the call lets any lagging write settle, but the assertion
+// is still single-shot.
+func (c *client) recallWithText(userID, query string, settle time.Duration) recallResp {
+	c.t.Helper()
+	if settle > 0 {
+		time.Sleep(settle)
+	}
+	var out recallResp
+	c.post("/v1/recall", recallReq{
+		UserID:         userID,
+		QueryText:      query,
+		Limit:          10,
+		IncludeSietch:  true,
+		IncludeEpisode: true,
+		IncludeSemant:  false,
+	}, &out)
+	return out
+}
+
 // recall runs a query with a budget — Pipeline A flushes are
 // asynchronous, so episodic hits can lag momentarily even after
 // consolidate returns. The helper retries until an expected event id
