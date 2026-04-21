@@ -123,6 +123,7 @@ type recordResp struct {
 type recallReq struct {
 	SessionID      string `json:"session_id,omitempty"`
 	UserID         string `json:"user_id"`
+	Workspace      string `json:"workspace,omitempty"`
 	QueryText      string `json:"query_text"`
 	Limit          int    `json:"limit,omitempty"`
 	IncludeSietch  bool   `json:"include_sietch"`
@@ -188,6 +189,58 @@ func (c *client) forget(sessionID, userID string, eventIDs []string) {
 		"user_id":    userID,
 		"event_ids":  eventIDs,
 	}, nil)
+}
+
+// recallSessionScoped runs recall with session_id set so sietch (the
+// working tier) actually participates — without a session_id Core
+// skips the sietch path entirely. Polls until wantID appears or the
+// budget expires. Used by tier-attribution tests that need to
+// observe working+episodic for the same event.
+func (c *client) recallSessionScoped(userID, sessionID, query, wantID string, budget time.Duration) recallResp {
+	c.t.Helper()
+	deadline := time.Now().Add(budget)
+	var last recallResp
+	for time.Now().Before(deadline) {
+		var out recallResp
+		c.post("/v1/recall", recallReq{
+			SessionID:      sessionID,
+			UserID:         userID,
+			QueryText:      query,
+			Limit:          10,
+			IncludeSietch:  true,
+			IncludeEpisode: true,
+			IncludeSemant:  false,
+		}, &out)
+		last = out
+		if containsHit(out.Hits, wantID) {
+			return out
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	c.t.Fatalf("session-scoped recall for %q never surfaced event %s in %s; last hits=%s",
+		query, wantID, budget, formatHits(last.Hits))
+	return last
+}
+
+// recallSemantic runs recall targeting only the semantic tier with
+// the given workspace. Single-shot with a short settle so tests can
+// assert either presence or absence.
+func (c *client) recallSemantic(userID, workspace, query string, settle time.Duration) recallResp {
+	c.t.Helper()
+	if settle > 0 {
+		time.Sleep(settle)
+	}
+	var out recallResp
+	c.post("/v1/recall", recallReq{
+		UserID:         userID,
+		Workspace:      workspace,
+		QueryText:      query,
+		Limit:          10,
+		IncludeSietch:  false,
+		IncludeEpisode: false,
+		IncludeSemant:  true,
+	}, &out)
+	return out
 }
 
 // recallWithText runs one recall and returns whatever it got — unlike
