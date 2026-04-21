@@ -13,6 +13,7 @@
 //   CHAPTERHOUSE_API_KEY      per-user Bearer key       (required in prod)
 //   MELANGE_URL               embeddings service base   (http://localhost:8082)
 //   MELANGE_MODEL             embedding model name      (qwen3-embedding)
+//   PIPELINE_A_INTERVAL       consolidation tick cadence (5m)
 package main
 
 import (
@@ -33,6 +34,7 @@ import (
 	"github.com/logan-broit/ghola/internal/core"
 	"github.com/logan-broit/ghola/internal/embedding"
 	ghttp "github.com/logan-broit/ghola/internal/http"
+	"github.com/logan-broit/ghola/internal/pipeline_a"
 	"github.com/logan-broit/ghola/internal/sietch"
 )
 
@@ -68,11 +70,17 @@ func run() error {
 	melBase := envOr("MELANGE_URL", "http://localhost:8082")
 	melModel := envOr("MELANGE_MODEL", "qwen3-embedding")
 
+	pipelineInterval, err := time.ParseDuration(envOr("PIPELINE_A_INTERVAL", "5m"))
+	if err != nil {
+		return fmt.Errorf("parse PIPELINE_A_INTERVAL: %w", err)
+	}
+
 	logger.Info("starting ghola local service",
 		"addr", addr,
 		"sessions_dir", sessionsDir,
 		"chapterhouse", chBase,
-		"melange", melBase)
+		"melange", melBase,
+		"pipeline_a_interval", pipelineInterval)
 
 	store, err := sietch.Open(sessionsDir)
 	if err != nil {
@@ -86,6 +94,23 @@ func run() error {
 	c := core.New(store, chClient, embedder)
 	srv := ghttp.NewServer(c, logger)
 	srv.LoopbackOnly = loopbackOnly
+
+	// Pipeline A: continuous working -> episodic consolidation. Runs
+	// alongside the HTTP server in its own goroutine; cancellation
+	// flows through workerCtx on shutdown.
+	worker := pipeline_a.NewWorker(c,
+		func(ctx context.Context) ([]string, error) {
+			return store.ActiveSessionIDs(ctx)
+		},
+		pipelineInterval, logger)
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	go func() {
+		if err := worker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("pipeline A exited with error", "err", err.Error())
+		}
+	}()
 
 	httpSrv := &stdhttp.Server{
 		Addr:              addr,
@@ -112,6 +137,10 @@ func run() error {
 	case sig := <-shutdown:
 		logger.Info("shutdown signal received", "signal", sig.String())
 	}
+
+	// Stop Pipeline A before draining the HTTP server so any in-flight
+	// Consolidate calls finish against a stable chapterhouse.
+	workerCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

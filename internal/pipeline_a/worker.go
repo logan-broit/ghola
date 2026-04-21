@@ -91,6 +91,30 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+// TerminalBranchIdleThreshold is how long a branch must be quiet
+// before Pipeline A considers it "terminal" and eligible for a
+// coherence pass. The design doc specifies "no activity for >N
+// minutes"; 15 minutes is the v1a default.
+const TerminalBranchIdleThreshold = 15 * time.Minute
+
+// coherencePass is the "C" half of the Hybrid C+D consolidation
+// strategy from the design doc. On each tick we look for branches
+// that have gone silent beyond the idle threshold and emit a
+// coherence record.
+//
+// v1a IS INTENTIONALLY a no-op: the design reserves the LLM-assisted
+// rewrite for later, and the "concat + metadata" fallback the plan
+// describes overlaps with what the continuous-delta path (Tick) has
+// already shipped. Once Pipeline B (Phase 8) is online we can have
+// it read the branch structure straight out of episodic.events via
+// the parent_id tree — no separate coherence artifact needed.
+//
+// Keeping the hook here so a future revision has a single place to
+// plug in without having to re-thread the worker's ticker plumbing.
+func (w *Worker) coherencePass(_ context.Context) {
+	// Deliberate no-op for v1a. See comment above.
+}
+
 // Tick runs one consolidation pass across every active session. Any
 // per-session failure is logged but does not abort the pass — other
 // sessions still get their flush attempt.
@@ -125,5 +149,11 @@ func (w *Worker) Tick(ctx context.Context) error {
 	if total > 0 {
 		w.logger.Info("pipeline A tick complete", "flushed_total", total)
 	}
+
+	// Coherence pass runs after the incremental-delta flush so the
+	// terminal-branch detector sees the full session state in sietch
+	// before deciding which branches are quiet.
+	w.coherencePass(ctx)
+
 	return nil
 }
