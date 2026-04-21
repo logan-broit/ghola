@@ -3,21 +3,30 @@
 #   docker compose up -d                   # episodic + semantic-stub path
 #   docker compose --profile all up -d     # also start the ghola daemon
 #                                           # on the host network (MCP)
+#   docker compose --profile stub up -d    # also start the pseudo-embedder
+#                                            on :8082 (fallback if you don't
+#                                            have llama-embed / a real model
+#                                            running on the host)
+#
+# Embedding: by default chapterhouse + ghola point at a real embedder
+# on the host (http://host.docker.internal:8082 — typically the
+# `llama-embed` systemd user service serving Qwen3-Embedding-0.6B).
+# Override EMBEDDING_URL / MELANGE_URL if you're running elsewhere.
 #
 # Services:
 #   postgres        pgvector/pgvector:pg17, bootstrapped by seed.sql
 #   ch-init         one-shot; applies episodic migrations then exits
 #   chapterhouse    ch-server HTTP API (:8080)
 #   ghola           ghola local daemon (:7421) — profile "all"
+#   melange         hash-seeded python stub — profile "stub"
 #
-# NOT included in v1a dev stack (bring your own):
-#   melange         embedding service; point MELANGE_URL at an external
-#                   service (e.g. Together.ai OpenAI-compatible endpoint)
+# NOT included in v1a dev stack:
 #   mentat          vLLM for replay; enable via REPLAY_ENABLED=true +
 #                   MENTAT_URL pointing at your local model
 
 services:
   melange:
+    profiles: ["stub"]
     image: python:3.12-alpine
     command: ["python", "/stub.py"]
     environment:
@@ -75,8 +84,8 @@ services:
     depends_on:
       ch-init:
         condition: service_completed_successfully
-      melange:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       ENVIRONMENT: local
       SERVER_HOST: 0.0.0.0
@@ -90,7 +99,7 @@ services:
       AUTH_PROVIDER: default
       AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
-      EMBEDDING_URL: ${EMBEDDING_URL:-http://melange:8082}
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://host.docker.internal:8082}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       REPLAY_ENABLED: ${REPLAY_ENABLED:-false}
@@ -115,15 +124,15 @@ services:
     depends_on:
       chapterhouse:
         condition: service_healthy
-      melange:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       GHOLA_ADDR: 0.0.0.0:7421
       GHOLA_LOOPBACK_ONLY: "false"
       CHAPTERHOUSE_URL: http://chapterhouse:8080
       CHAPTERHOUSE_API_KEY: ${CHAPTERHOUSE_API_KEY:-}
       CHAPTERHOUSE_REQUIRE_KEY: "false"
-      MELANGE_URL: ${MELANGE_URL:-http://melange:8082}
+      MELANGE_URL: ${MELANGE_URL:-http://host.docker.internal:8082}
       MELANGE_MODEL: ${MELANGE_MODEL:-qwen3-embedding}
       ENCODING_INTERVAL: ${ENCODING_INTERVAL:-5m}
     ports:
