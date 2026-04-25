@@ -515,19 +515,6 @@ func buildFilterSQL(f QueryFilters, baseIdx int) (string, []any) {
 	return b.String(), args
 }
 
-// vectorLiteralOrNil returns a pgvector text literal like "[1,2,3]"
-// or nil (maps to SQL NULL) when the slice is empty.
-func vectorLiteralOrNil(v []float64) any {
-	if len(v) == 0 {
-		return nil
-	}
-	parts := make([]string, len(v))
-	for i, x := range v {
-		parts[i] = strconv.FormatFloat(x, 'f', -1, 64)
-	}
-	return "[" + strings.Join(parts, ",") + "]"
-}
-
 // nullableJSONB returns the raw bytes unchanged when non-empty, and
 // nil otherwise so SQL sees NULL.
 func nullableJSONB(r json.RawMessage) any {

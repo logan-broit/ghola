@@ -32,27 +32,22 @@ func NewSemanticHandler(q *semantic.Querier) *SemanticHandler {
 // /v1/semantic/query
 // ---------------------------------------------------------------------
 
-// recentContextEvent is the wire shape for one entry in the optional
-// `recent_context` array. The handler maps it 1:1 onto mentat.Event;
-// the field names match mentat's own JSON tags so a future passthrough
-// (or shared schema) is friction-free.
-type recentContextEvent struct {
-	Type      string    `json:"type"`
-	Embedding []float32 `json:"embedding"`
-}
-
 // semanticQueryRequest is the wire shape for POST /v1/semantic/query.
 //
 // Field-name compatibility with v0.2: workspace_id, query_embedding,
 // and limit are unchanged. query_text is accepted but unused (the
 // embedding now drives recall end-to-end). recent_context is new and
 // optional — callers without it just get a single-event pool.
+//
+// RecentContext piggybacks mentat.Event directly — the JSON tags
+// (`type`, `embedding`) match what mentat's pool API consumes, so the
+// handler hands the slice through to Querier.Recall verbatim.
 type semanticQueryRequest struct {
-	WorkspaceID    uuid.UUID            `json:"workspace_id"`
-	QueryText      string               `json:"query_text,omitempty"`
-	QueryEmbedding []float32            `json:"query_embedding"`
-	RecentContext  []recentContextEvent `json:"recent_context,omitempty"`
-	Limit          int                  `json:"limit"`
+	WorkspaceID    uuid.UUID      `json:"workspace_id"`
+	QueryText      string         `json:"query_text,omitempty"`
+	QueryEmbedding []float32      `json:"query_embedding"`
+	RecentContext  []mentat.Event `json:"recent_context,omitempty"`
+	Limit          int            `json:"limit"`
 }
 
 // semanticQueryResponse mirrors the v0.2 envelope (`hits: [...]`) so
@@ -95,15 +90,10 @@ func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
 		limit = 10
 	}
 
-	ctxEvents := make([]mentat.Event, len(req.RecentContext))
-	for i, e := range req.RecentContext {
-		ctxEvents[i] = mentat.Event{Type: e.Type, Embedding: e.Embedding}
-	}
-
 	hits, err := h.q.Recall(r.Context(), semantic.RecallRequest{
 		WorkspaceID:    req.WorkspaceID,
 		QueryEmbedding: req.QueryEmbedding,
-		RecentContext:  ctxEvents,
+		RecentContext:  req.RecentContext,
 		Limit:          limit,
 	})
 	if err != nil {
