@@ -16,3 +16,6 @@
 # Rust extension build artifacts
 /extension/target/
 bootstrap-data/
+
+# Git worktrees for feature branches
+/.worktrees/
