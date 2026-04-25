@@ -155,8 +155,6 @@ func run() error {
 
 	adminHandler := handler.NewAdminHandler(queries, sessionProvider)
 
-	systemStatsHandler := handler.NewSystemStatsHandler(pool)
-
 	apiKeyProvider := auth.NewAPIKeyProviderWithAdapter(queries)
 	apiAuthProvider := auth.NewCompositeProvider(apiKeyProvider, authProvider)
 
@@ -178,7 +176,7 @@ func run() error {
 	router := buildRouter(
 		cfg, logger,
 		sessionProvider, apiAuthProvider,
-		healthHandler, adminHandler, systemStatsHandler,
+		healthHandler, adminHandler,
 		episodicHandler, semanticHandler,
 		loginLimiter,
 	)
@@ -237,7 +235,6 @@ func buildRouter(
 	apiAuthProvider auth.Provider,
 	healthHandler *handler.HealthHandler,
 	adminHandler *handler.AdminHandler,
-	systemStatsHandler *handler.SystemStatsHandler,
 	episodicHandler *handler.EpisodicHandler,
 	semanticHandler *handler.SemanticHandler,
 	loginLimiter *middleware.RateLimiter,
@@ -317,10 +314,6 @@ func buildRouter(
 				r.Use(middleware.RequireAdmin)
 
 				r.Get("/stats", adminHandler.GetStats)
-				r.Get("/system-stats", systemStatsHandler.GetSystemStats)
-				r.Get("/memory-type-distribution", systemStatsHandler.GetMemoryTypeDistribution)
-				r.Get("/memory-scope-distribution", systemStatsHandler.GetMemoryScopeDistribution)
-				r.Get("/top-tags", systemStatsHandler.GetTopTags)
 				r.Get("/audit", adminHandler.ListAuditLogs)
 
 				r.Route("/users", func(r chi.Router) {
