@@ -59,7 +59,6 @@ type ChapterhouseClient interface {
 	ForgetEpisodic(ctx context.Context, userID string, eventIDs []string) (forgotten int, err error)
 
 	QuerySemantic(ctx context.Context, q SemanticQuery) ([]RecallHit, error)
-	FeedbackSemantic(ctx context.Context, mnemeID string, evidence float64) (newConfidence float64, err error)
 }
 
 // EpisodicQuery is the request shape for /v1/episodic/query. Mirrors

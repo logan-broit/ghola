@@ -239,9 +239,8 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 }
 
 // Forget soft-deletes events in sietch + asks chapterhouse to do the
-// same in episodic. Semantic is never forgotten by event id — if an
-// agent wants to forget a distilled mneme it uses feedback with low
-// evidence instead.
+// same in episodic. Semantic is never forgotten by event id — distilled
+// mnemes flow out through replay decay, not direct deletion.
 func (c *Core) Forget(ctx context.Context, in ForgetInput) (int, error) {
 	if in.UserID == "" {
 		return 0, errMissingUserID
@@ -328,15 +327,4 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, fmt.Errorf("advance watermark: %w", err)
 	}
 	return len(pending), nil
-}
-
-// Feedback applies Bayesian evidence to a semantic mneme.
-func (c *Core) Feedback(ctx context.Context, mnemeID string, evidence float64) (float64, error) {
-	if mnemeID == "" {
-		return 0, errors.New("mneme_id required")
-	}
-	if evidence < 0 || evidence > 1 {
-		return 0, errors.New("evidence must be in [0,1]")
-	}
-	return c.Chapterhouse.FeedbackSemantic(ctx, mnemeID, evidence)
 }

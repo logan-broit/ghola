@@ -55,7 +55,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/forget", s.forget)
 	s.mux.HandleFunc("POST /v1/share", s.share)
 	s.mux.HandleFunc("POST /v1/consolidate", s.consolidate)
-	s.mux.HandleFunc("POST /v1/feedback", s.feedback)
 	s.mux.HandleFunc("GET /health", s.health)
 }
 
@@ -306,26 +305,6 @@ func (s *Server) consolidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"flushed": n})
-}
-
-func (s *Server) feedback(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		MnemeID  string  `json:"mneme_id"`
-		Evidence float64 `json:"evidence"`
-	}
-	if err := decode(r, &req); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	conf, err := s.core.Feedback(r.Context(), req.MnemeID, req.Evidence)
-	if err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"mneme_id":   req.MnemeID,
-		"confidence": conf,
-	})
 }
 
 // Errors is exported for tests that want to assert canonical error

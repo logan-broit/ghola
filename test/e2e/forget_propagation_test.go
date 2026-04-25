@@ -13,8 +13,8 @@ import (
 // tiers. Matches the Core.Forget fan-out: sietch.SoftForget flips
 // text/nulls embedding for active-session ids; chapterhouse.
 // ForgetEpisodic does the same in postgres. Semantic is
-// intentionally out of scope — the plan notes it's managed via
-// feedback, not forget.
+// intentionally out of scope — distilled mnemes flow out through
+// replay decay, not direct deletion.
 //
 // Claim tested end-to-end:
 //   1. record + consolidate an event with a distinctive marker

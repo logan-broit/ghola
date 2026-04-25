@@ -122,14 +122,12 @@ type fakeChapterhouse struct {
 	semQueries []core.SemanticQuery
 	shares     []core.ShareInput
 	forgets    []struct{ UserID string; IDs []string }
-	feedbacks  []struct{ MnemeID string; Evidence float64 }
 
 	inserted, updated int
 	episResp          []core.RecallHit
 	semResp           []core.RecallHit
 	shareID           string
 	forgetCount       int
-	feedbackNewConf   float64
 	err               error
 }
 
@@ -156,10 +154,6 @@ func (f *fakeChapterhouse) ForgetEpisodic(_ context.Context, uid string, ids []s
 func (f *fakeChapterhouse) QuerySemantic(_ context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	f.semQueries = append(f.semQueries, q)
 	return f.semResp, f.err
-}
-func (f *fakeChapterhouse) FeedbackSemantic(_ context.Context, id string, ev float64) (float64, error) {
-	f.feedbacks = append(f.feedbacks, struct{ MnemeID string; Evidence float64 }{id, ev})
-	return f.feedbackNewConf, f.err
 }
 
 type fakeEmbedder struct {
@@ -367,20 +361,6 @@ func TestConsolidate_NoopWhenEmpty(t *testing.T) {
 	assert.Empty(t, ch.ingests)
 }
 
-func TestFeedback_DelegatesAndReturnsNewConfidence(t *testing.T) {
-	c, _, ch, _ := newCore()
-	ch.feedbackNewConf = 0.82
-	conf, err := c.Feedback(context.Background(), "mneme-1", 0.95)
-	require.NoError(t, err)
-	assert.InDelta(t, 0.82, conf, 1e-9)
-	require.Len(t, ch.feedbacks, 1)
-}
-
-func TestFeedback_RejectsOutOfRangeEvidence(t *testing.T) {
-	c, _, _, _ := newCore()
-	_, err := c.Feedback(context.Background(), "m1", 1.5)
-	require.Error(t, err)
-}
 
 // A minimal validation sweep so the input-guard branches are covered
 // without a bespoke test per operation.
@@ -412,9 +392,6 @@ func TestInputValidation_MissingIDs(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = c.Consolidate(ctx, "")
-	require.Error(t, err)
-
-	_, err = c.Feedback(ctx, "", 0.5)
 	require.Error(t, err)
 }
 

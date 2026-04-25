@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -184,10 +183,6 @@ type semanticHitRow struct {
 	Tier    string  `json:"tier"`
 }
 
-// feedbackReq / feedbackResp existed for /v1/semantic/feedback in v0.2.
-// Removed alongside FeedbackSemantic's HTTP path; PR7 will introduce
-// new wire types for the dogfooding-tags flow.
-
 // ---------------------------------------------------------------------
 // core.ChapterhouseClient implementation
 // ---------------------------------------------------------------------
@@ -283,18 +278,3 @@ func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]cor
 	return out, nil
 }
 
-func (c *Client) FeedbackSemantic(ctx context.Context, mnemeID string, evidence float64) (float64, error) {
-	// /v1/semantic/feedback was removed in chapterhouse v0.3 (the
-	// predictive-replay pivot — see ch-server/cmd/api/main.go's /v1
-	// router and PR1.8). PR7 will replace it with a dogfooding-tags
-	// flow. Until then, short-circuit so callers see a clean no-op
-	// instead of a 500 from a missing route. Suppress the response
-	// body too — the server wouldn't have produced anything useful.
-	_ = ctx
-	_ = evidence
-	slog.Default().Warn("chapterhouse: semantic feedback is unimplemented post-v0.3; ignoring",
-		slog.String("mneme_id", mnemeID),
-		slog.String("reason", "/v1/semantic/feedback removed in v0.3; PR7 reintroduces via dogfooding-tags"),
-	)
-	return 0, nil
-}

@@ -116,7 +116,7 @@ func TestTools_AllRegistered(t *testing.T) {
 	expected := []string{
 		"session_start", "session_end", "list_sessions",
 		"record", "branch", "bookmark", "navigate",
-		"recall", "forget", "share", "consolidate", "feedback",
+		"recall", "forget", "share", "consolidate",
 	}
 	assert.Len(t, list.Tools, len(expected))
 	for _, want := range expected {

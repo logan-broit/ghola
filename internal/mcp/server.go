@@ -194,16 +194,6 @@ func tools() []toolSpec {
 			),
 			Path: "/v1/consolidate",
 		},
-		{
-			Tool: mcppkg.NewTool("feedback",
-				mcppkg.WithDescription(
-					"Apply Bayesian evidence in [0,1] to a semantic mneme's "+
-						"confidence."),
-				mcppkg.WithString("mneme_id", mcppkg.Required()),
-				mcppkg.WithNumber("evidence", mcppkg.Required()),
-			),
-			Path: "/v1/feedback",
-		},
 	}
 }
 

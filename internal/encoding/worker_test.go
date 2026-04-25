@@ -42,9 +42,6 @@ func (*recordingChapterhouse) ForgetEpisodic(context.Context, string, []string) 
 func (*recordingChapterhouse) QuerySemantic(context.Context, core.SemanticQuery) ([]core.RecallHit, error) {
 	return nil, nil
 }
-func (*recordingChapterhouse) FeedbackSemantic(context.Context, string, float64) (float64, error) {
-	return 0, nil
-}
 
 type nullEmbedder struct{}
 

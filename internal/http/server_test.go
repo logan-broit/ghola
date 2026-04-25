@@ -38,9 +38,6 @@ func (noopChapterhouse) ForgetEpisodic(context.Context, string, []string) (int, 
 func (noopChapterhouse) QuerySemantic(context.Context, core.SemanticQuery) ([]core.RecallHit, error) {
 	return nil, nil
 }
-func (noopChapterhouse) FeedbackSemantic(context.Context, string, float64) (float64, error) {
-	return 0.88, nil
-}
 
 type fixedEmbedder struct{}
 
@@ -142,11 +139,6 @@ func TestServer_InputValidation_400(t *testing.T) {
 
 	// /v1/record without session_id -> 400
 	resp, _ := post(t, srv, "/v1/record", core.RecordInput{UserID: "u1"})
-	assert.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode)
-
-	// /v1/feedback with out-of-range evidence -> 400
-	resp, _ = post(t, srv, "/v1/feedback",
-		map[string]any{"mneme_id": "m1", "evidence": 1.5})
 	assert.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode)
 }
 

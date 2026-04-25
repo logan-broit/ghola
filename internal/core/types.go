@@ -17,7 +17,6 @@
 //   session_start   provision a new sietch file for a fresh session
 //   session_end     final Pipeline A flush + branch-coherence pass
 //   list_sessions   enumerate a user's episodic sessions
-//   feedback        apply Bayesian evidence to a semantic mneme
 //
 // The same Core type backs both protocol wrappings (HTTP/JSON in
 // cmd/ghola, MCP in cmd/ghola-mcp) — one behavioral surface, two
