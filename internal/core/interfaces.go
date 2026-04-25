@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // SietchStore is the per-session, on-device working-memory layer.
 // Implementations keep one SQLite file per session (see
@@ -9,6 +12,17 @@ import "context"
 type SietchStore interface {
 	OpenSession(ctx context.Context, s Session) error
 	CloseSession(ctx context.Context, sessionID string) error
+	// MarkEnded stamps ended_at on the session row without closing the
+	// SQLite handle. SessionEnd calls this before Consolidate so the
+	// chapterhouse upsert lands with ended_at populated — the
+	// reconciler eligibility predicate is `ended_at IS NOT NULL AND
+	// l1_embedding IS NULL`, and Pipeline A's incremental tick must
+	// not flip it.
+	MarkEnded(ctx context.Context, sessionID string, t time.Time) error
+	// GetSession returns the session row's metadata. Consolidate uses
+	// this to source ended_at + cwd + git_branch + agent_kind for the
+	// chapterhouse session payload.
+	GetSession(ctx context.Context, sessionID string) (Session, error)
 
 	RecordEvent(ctx context.Context, ev Event) (Event, error)
 	SetBookmark(ctx context.Context, sessionID, eventID, label string) error

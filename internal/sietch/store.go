@@ -134,6 +134,39 @@ func (s *Store) OpenSession(ctx context.Context, sess core.Session) error {
 	return err
 }
 
+// MarkEnded stamps the session row's ended_at without closing the
+// SQLite handle. Split out from CloseSession so SessionEnd can record
+// the end timestamp before Consolidate runs — Consolidate ships the
+// session row to chapterhouse and needs the ended_at to make the
+// reconciler's `ended_at IS NOT NULL AND l1_embedding IS NULL`
+// predicate fire. Idempotent: calling twice just overwrites with the
+// later timestamp.
+func (s *Store) MarkEnded(ctx context.Context, sessionID string, t time.Time) error {
+	if sessionID == "" {
+		return errors.New("session id required")
+	}
+	db, err := s.sessionConn(sessionID)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE session SET ended_at = ? WHERE id = ?`, t.UnixMilli(), sessionID,
+	); err != nil {
+		return fmt.Errorf("mark ended: %w", err)
+	}
+	return nil
+}
+
+// GetSession returns the session metadata row, including ended_at if
+// MarkEnded has fired. Used by Consolidate so the chapterhouse upsert
+// carries the same ended_at sietch already knows.
+func (s *Store) GetSession(ctx context.Context, sessionID string) (core.Session, error) {
+	if sessionID == "" {
+		return core.Session{}, errors.New("session id required")
+	}
+	return s.readSessionRow(ctx, sessionID)
+}
+
 func (s *Store) CloseSession(ctx context.Context, sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,9 +177,13 @@ func (s *Store) CloseSession(ctx context.Context, sessionID string) error {
 		// process or was already closed.
 		return nil
 	}
-	now := time.Now().UnixMilli()
+	// Belt-and-suspenders: ensure ended_at is populated even when the
+	// caller skipped MarkEnded. Real call sites (SessionEnd) stamp via
+	// MarkEnded first; this preserves the invariant for any other path
+	// that closes a session directly.
 	if _, err := db.ExecContext(ctx,
-		`UPDATE session SET ended_at = ? WHERE id = ?`, now, sessionID,
+		`UPDATE session SET ended_at = COALESCE(ended_at, ?) WHERE id = ?`,
+		time.Now().UnixMilli(), sessionID,
 	); err != nil {
 		return fmt.Errorf("mark ended: %w", err)
 	}

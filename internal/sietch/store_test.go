@@ -223,6 +223,44 @@ func TestCloseSession_MarksEnded(t *testing.T) {
 	require.NotNil(t, sessions[0].EndedAt)
 }
 
+func TestMarkEnded_StampsEndedAtBeforeClose(t *testing.T) {
+	s := newTestStore(t)
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(context.Background(), sess))
+
+	stamp := time.Unix(1_700_000_500, 0).UTC()
+	require.NoError(t, s.MarkEnded(context.Background(), sess.ID, stamp))
+
+	// GetSession must return the timestamp we just stamped, even though
+	// CloseSession hasn't been called.
+	got, err := s.GetSession(context.Background(), sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.EndedAt)
+	assert.Equal(t, stamp.UnixMilli(), got.EndedAt.UnixMilli())
+
+	// CloseSession after MarkEnded must NOT clobber the earlier
+	// timestamp (COALESCE preserves it).
+	require.NoError(t, s.CloseSession(context.Background(), sess.ID))
+	sessions, err := s.ListSessions(context.Background(), "u1")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.NotNil(t, sessions[0].EndedAt)
+	assert.Equal(t, stamp.UnixMilli(), sessions[0].EndedAt.UnixMilli(),
+		"CloseSession must not overwrite an explicit MarkEnded")
+}
+
+func TestGetSession_ReturnsRow(t *testing.T) {
+	s := newTestStore(t)
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(context.Background(), sess))
+
+	got, err := s.GetSession(context.Background(), sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sess.ID, got.ID)
+	assert.Equal(t, "u1", got.UserID)
+	assert.Nil(t, got.EndedAt, "fresh session must have ended_at = nil")
+}
+
 func TestListSessions_UserScoping(t *testing.T) {
 	s := newTestStore(t)
 	alice := mkSession("alice")

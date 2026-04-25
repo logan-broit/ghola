@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -169,27 +170,23 @@ type semanticHitsResp struct {
 	Hits []semanticHitRow `json:"hits"`
 }
 
+// semanticHitRow mirrors the v0.3 chapterhouse mnemeHit shape (see
+// _chapterhouse/ch-server/internal/handler/semantic.go: mnemeHit). The
+// v0.2 fields content_match, activation, hebbian_boost, confidence,
+// concept, and content were dropped along with the schema columns
+// they projected; PR7's dogfooding-tags work will reintroduce a
+// content-bearing surface. Keep the struct narrow so the JSON decoder
+// can't silently zero-fill fields the server no longer emits.
 type semanticHitRow struct {
-	MnemeID      string  `json:"mneme_id"`
-	Score        float64 `json:"score"`
-	ContentMatch float64 `json:"content_match"`
-	Activation   float64 `json:"activation"`
-	HebbianBoost float64 `json:"hebbian_boost"`
-	Confidence   float64 `json:"confidence"`
-	Concept      string  `json:"concept"`
-	Content      string  `json:"content"`
-	Tier         string  `json:"tier"`
+	MnemeID string  `json:"mneme_id"`
+	Score   float64 `json:"score"`
+	Level   int     `json:"level"`
+	Tier    string  `json:"tier"`
 }
 
-type feedbackReq struct {
-	MnemeID  string  `json:"mneme_id"`
-	Evidence float64 `json:"evidence"`
-}
-
-type feedbackResp struct {
-	MnemeID    string  `json:"mneme_id"`
-	Confidence float64 `json:"confidence"`
-}
+// feedbackReq / feedbackResp existed for /v1/semantic/feedback in v0.2.
+// Removed alongside FeedbackSemantic's HTTP path; PR7 will introduce
+// new wire types for the dogfooding-tags flow.
 
 // ---------------------------------------------------------------------
 // core.ChapterhouseClient implementation
@@ -272,25 +269,32 @@ func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]cor
 	}
 	out := make([]core.RecallHit, 0, len(r.Hits))
 	for _, h := range r.Hits {
-		concept := h.Concept
-		conf := h.Confidence
+		// v0.3 semantic hits no longer carry content/concept/confidence
+		// (the underlying columns were dropped in PR1.1). Leave Content
+		// at "" and Concept/Confidence as nil so callers can distinguish
+		// "absent" from a real zero. PR7 will reintroduce a
+		// content-bearing field via the dogfooding-tags mechanism.
 		out = append(out, core.RecallHit{
-			Tier:       h.Tier,
-			ID:         h.MnemeID,
-			Score:      h.Score,
-			Content:    h.Content,
-			Concept:    &concept,
-			Confidence: &conf,
+			Tier:  h.Tier,
+			ID:    h.MnemeID,
+			Score: h.Score,
 		})
 	}
 	return out, nil
 }
 
 func (c *Client) FeedbackSemantic(ctx context.Context, mnemeID string, evidence float64) (float64, error) {
-	var r feedbackResp
-	body := feedbackReq{MnemeID: mnemeID, Evidence: evidence}
-	if err := c.do(ctx, "/v1/semantic/feedback", body, &r); err != nil {
-		return 0, err
-	}
-	return r.Confidence, nil
+	// /v1/semantic/feedback was removed in chapterhouse v0.3 (the
+	// predictive-replay pivot — see ch-server/cmd/api/main.go's /v1
+	// router and PR1.8). PR7 will replace it with a dogfooding-tags
+	// flow. Until then, short-circuit so callers see a clean no-op
+	// instead of a 500 from a missing route. Suppress the response
+	// body too — the server wouldn't have produced anything useful.
+	_ = ctx
+	_ = evidence
+	slog.Default().Warn("chapterhouse: semantic feedback is unimplemented post-v0.3; ignoring",
+		slog.String("mneme_id", mnemeID),
+		slog.String("reason", "/v1/semantic/feedback removed in v0.3; PR7 reintroduces via dogfooding-tags"),
+	)
+	return 0, nil
 }
