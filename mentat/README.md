@@ -34,5 +34,3 @@ uvicorn mentat.app:app --host 0.0.0.0 --port 8084
 
 - `EMBEDDING_DIM` (default 1024)
 - `MENTAT_WEIGHTS_ROOT` (default `/weights`)
-- `MENTAT_DATABASE_DSN` (unused in PR1)
-- `MELANGE_URL` (unused in PR1; default `http://melange:8082`)

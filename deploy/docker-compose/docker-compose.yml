@@ -85,8 +85,6 @@ services:
     environment:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
       MENTAT_WEIGHTS_ROOT: /weights
-      MENTAT_DATABASE_DSN: postgresql://${POSTGRES_USER:-memory_api}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-memories}
-      MELANGE_URL: http://melange:8082
     volumes:
       - mentat-weights:/weights
     ports:
