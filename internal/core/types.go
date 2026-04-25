@@ -99,13 +99,11 @@ type RecallInput struct {
 
 // RecallHit is one merged result across all tiers with attribution.
 type RecallHit struct {
-	Tier         string  `json:"tier"` // "working" | "episodic" | "semantic"
-	ID           string  `json:"id"`
-	Score        float64 `json:"score"`
-	Content      string  `json:"content"`
-	SessionID    *string `json:"session_id,omitempty"`
-	Concept      *string `json:"concept,omitempty"` // semantic tier
-	Confidence   *float64 `json:"confidence,omitempty"`
+	Tier      string  `json:"tier"` // "working" | "episodic" | "semantic"
+	ID        string  `json:"id"`
+	Score     float64 `json:"score"`
+	Content   string  `json:"content"`
+	SessionID *string `json:"session_id,omitempty"`
 }
 
 // RecallResult is the full response: merged list + per-tier counts

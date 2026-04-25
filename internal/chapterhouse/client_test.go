@@ -138,8 +138,7 @@ func TestClient_ForgetEpisodic(t *testing.T) {
 
 func TestClient_QuerySemantic(t *testing.T) {
 	// v0.3 mnemeHit shape: only mneme_id/score/level/tier. The dropped
-	// content/concept/confidence fields must NOT appear on the resulting
-	// RecallHit (Concept/Confidence stay nil, Content stays "").
+	// content column means Content stays "" on the resulting RecallHit.
 	srv := newServer(t, map[string]http.HandlerFunc{
 		"/v1/semantic/query": func(w http.ResponseWriter, r *http.Request) {
 			assertAuthHeader(t, r)
@@ -160,8 +159,6 @@ func TestClient_QuerySemantic(t *testing.T) {
 	assert.Equal(t, "m1", hits[0].ID)
 	assert.Equal(t, "semantic", hits[0].Tier)
 	assert.InDelta(t, 0.92, hits[0].Score, 1e-9)
-	assert.Nil(t, hits[0].Concept, "Concept must be nil post-v0.3 (field dropped)")
-	assert.Nil(t, hits[0].Confidence, "Confidence must be nil post-v0.3 (field dropped)")
 	assert.Equal(t, "", hits[0].Content, "Content must be empty post-v0.3 (field dropped)")
 }
 

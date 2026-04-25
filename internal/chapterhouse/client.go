@@ -109,32 +109,20 @@ type hitsResp struct {
 	Hits []hitRow `json:"hits"`
 }
 
-// hitRow is a superset matching both episodic and semantic responses:
-// - episodic hits flatten the Event fields + a score{} object + tier
-// - semantic hits are flat fields + tier
-// Optional pointer fields let the shape absorb both.
+// hitRow matches the episodic /v1/episodic/query response shape:
+// flattened Event fields + a score{} object + tier.
 type hitRow struct {
-	ID         string  `json:"id"`
-	SessionID  *string `json:"session_id,omitempty"`
-	Text       *string `json:"text,omitempty"`
-	Content    string  `json:"content"`
-	Concept    *string `json:"concept,omitempty"`
-	Confidence *float64 `json:"confidence,omitempty"`
-	Tier       string  `json:"tier"`
+	ID        string  `json:"id"`
+	SessionID *string `json:"session_id,omitempty"`
+	Text      *string `json:"text,omitempty"`
+	Content   string  `json:"content"`
+	Tier      string  `json:"tier"`
 
-	// Episodic only
 	Score *struct {
 		Semantic float64 `json:"semantic"`
 		FTS      float64 `json:"fts"`
 		Merged   float64 `json:"merged"`
 	} `json:"score,omitempty"`
-
-	// Semantic only — flat score field.
-	SemanticScore *float64 `json:"score_semantic,omitempty"`
-	MergedScore   *float64 `json:"merged,omitempty"`
-
-	// Whichever field the server used for the ranking number:
-	ScoreFlat *float64 `json:"score_flat,omitempty"`
 }
 
 type shareReq struct {
@@ -264,11 +252,10 @@ func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]cor
 	}
 	out := make([]core.RecallHit, 0, len(r.Hits))
 	for _, h := range r.Hits {
-		// v0.3 semantic hits no longer carry content/concept/confidence
-		// (the underlying columns were dropped in PR1.1). Leave Content
-		// at "" and Concept/Confidence as nil so callers can distinguish
-		// "absent" from a real zero. PR7 will reintroduce a
-		// content-bearing field via the dogfooding-tags mechanism.
+		// v0.3 semantic hits carry only id/score/tier — the underlying
+		// content column was dropped in PR1.1, leaving Content at "".
+		// PR7 will reintroduce a content-bearing field via the
+		// dogfooding-tags mechanism.
 		out = append(out, core.RecallHit{
 			Tier:  h.Tier,
 			ID:    h.MnemeID,
