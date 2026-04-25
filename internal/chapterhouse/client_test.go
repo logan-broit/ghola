@@ -137,14 +137,15 @@ func TestClient_ForgetEpisodic(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestClient_QuerySemantic(t *testing.T) {
+	// v0.3 mnemeHit shape: only mneme_id/score/level/tier. The dropped
+	// content/concept/confidence fields must NOT appear on the resulting
+	// RecallHit (Concept/Confidence stay nil, Content stays "").
 	srv := newServer(t, map[string]http.HandlerFunc{
 		"/v1/semantic/query": func(w http.ResponseWriter, r *http.Request) {
 			assertAuthHeader(t, r)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"hits":[
-				{"mneme_id":"m1","score":0.92,"content_match":0.8,"activation":1.1,
-				 "hebbian_boost":0.2,"confidence":0.7,"concept":"k8s",
-				 "content":"pod scheduling","tier":"semantic"}
+				{"mneme_id":"m1","score":0.92,"level":1,"tier":"semantic"}
 			]}`))
 		},
 	})
@@ -159,23 +160,23 @@ func TestClient_QuerySemantic(t *testing.T) {
 	assert.Equal(t, "m1", hits[0].ID)
 	assert.Equal(t, "semantic", hits[0].Tier)
 	assert.InDelta(t, 0.92, hits[0].Score, 1e-9)
-	require.NotNil(t, hits[0].Concept)
-	assert.Equal(t, "k8s", *hits[0].Concept)
+	assert.Nil(t, hits[0].Concept, "Concept must be nil post-v0.3 (field dropped)")
+	assert.Nil(t, hits[0].Confidence, "Confidence must be nil post-v0.3 (field dropped)")
+	assert.Equal(t, "", hits[0].Content, "Content must be empty post-v0.3 (field dropped)")
 }
 
-func TestClient_FeedbackSemantic(t *testing.T) {
-	srv := newServer(t, map[string]http.HandlerFunc{
-		"/v1/semantic/feedback": func(w http.ResponseWriter, r *http.Request) {
-			assertAuthHeader(t, r)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"mneme_id":"m1","confidence":0.88}`))
-		},
-	})
+func TestClient_FeedbackSemantic_NoOpPostV03(t *testing.T) {
+	// /v1/semantic/feedback was removed in chapterhouse v0.3; the client
+	// short-circuits to a warn-log no-op until PR7 reintroduces feedback
+	// via dogfooding-tags. The test asserts no HTTP call is made (the
+	// catch-all "/" handler in newServer fails on any request) and that
+	// the call returns (0, nil) cleanly.
+	srv := newServer(t, map[string]http.HandlerFunc{})
 	c := newClient(t, srv)
 
 	conf, err := c.FeedbackSemantic(context.Background(), "m1", 0.95)
 	require.NoError(t, err)
-	assert.InDelta(t, 0.88, conf, 1e-9)
+	assert.Equal(t, 0.0, conf)
 }
 
 // ---------------------------------------------------------------------

@@ -2,25 +2,24 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/config"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/mentat"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/middleware"
-	"github.com/thinkwright/chapterhouse/ch-server/internal/replay"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/semantic"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -84,6 +83,45 @@ func run() error {
 	repo := repository.New(pool)
 	queries := repo.Queries()
 
+	// Semantic L1 write path (PR1.7): when mentat is configured, run a
+	// background reconciler that pools closed sessions' events into the
+	// episodic.sessions.l1_embedding column. With MENTAT_URL unset we
+	// skip the goroutine entirely — chapterhouse remains useful as a
+	// pure REST surface even without the cold-start service running.
+	//
+	// The same `mentatClient` (nil-tolerant when MENTAT_URL is empty)
+	// is also handed to the read-path Querier (PR1.8) below. A nil
+	// client makes Querier.Recall return zero hits, preserving the
+	// design invariant that semantic-tier failure never breaks recall.
+	var mentatClient *mentat.Client
+	cancelReconciler := func() {}
+	if cfg.MentatURL != "" {
+		mentatClient = mentat.NewClient(cfg.MentatURL, nil)
+		writer := semantic.NewWriter(repo, mentatClient)
+		reconciler := semantic.NewReconciler(writer, 30*time.Second, logger)
+
+		var reconcilerCtx context.Context
+		reconcilerCtx, cancelReconciler = context.WithCancel(context.Background())
+		defer cancelReconciler()
+
+		go func() {
+			logger.Info("starting semantic L1 reconciler",
+				slog.String("mentat_url", cfg.MentatURL),
+			)
+			if err := reconciler.Run(reconcilerCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("semantic reconciler exited",
+					slog.String("error", err.Error()),
+				)
+			}
+		}()
+	} else {
+		// Single-line operator hint: with MENTAT_URL unset the read path
+		// (semantic.Querier) accepts a nil client and short-circuits to
+		// zero hits. Log it once at boot so "why does recall return 0?"
+		// has an obvious answer in the boot log instead of in trace logs.
+		logger.Info("semantic recall disabled — MENTAT_URL unset; queries return 0 hits")
+	}
+
 	var authProvider auth.Provider
 	switch cfg.Auth.Provider {
 	case "jwt":
@@ -124,7 +162,8 @@ func run() error {
 
 	// v2 /v1 surface — consumed only by the ghola local service.
 	episodicHandler := handler.NewEpisodicHandler(repo)
-	semanticHandler := handler.NewSemanticHandler(repo)
+	querier := semantic.NewQuerier(repo, mentatClient, logger)
+	semanticHandler := handler.NewSemanticHandler(querier)
 
 	// Legacy MCP transport removed in v2: agents now talk to the
 	// ghola local service, which in turn calls chapterhouse's
@@ -151,52 +190,6 @@ func run() error {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	// Replay (nightly episodic → semantic distillation; hippocampal
-	// replay + systems consolidation). Opt-in via REPLAY_ENABLED so
-	// dev instances without a mentat (vLLM) stay inert.
-	replayCtx, replayCancel := context.WithCancel(context.Background())
-	defer replayCancel()
-	if os.Getenv("REPLAY_ENABLED") == "true" {
-		ws, err := uuid.Parse(os.Getenv("REPLAY_WORKSPACE_ID"))
-		if err != nil {
-			return fmt.Errorf("REPLAY_WORKSPACE_ID: %w", err)
-		}
-		hour := envInt("REPLAY_HOUR", 2)
-		minSupport := envInt("REPLAY_MIN_SUPPORT", 3)
-		windowH := envInt("REPLAY_WINDOW_HOURS", 24)
-
-		mentat := &replay.MentatClient{
-			BaseURL: os.Getenv("MENTAT_URL"),
-			APIKey:  os.Getenv("MENTAT_API_KEY"),
-			Model:   os.Getenv("MENTAT_MODEL"),
-		}
-		embedProv := embedding.NewOpenAIProvider(embedding.Config{
-			URL:        cfg.Embedding.URL,
-			Model:      cfg.Embedding.Model,
-			Dimensions: cfg.Embedding.Dimensions,
-		}, cfg.Embedding.APIKey)
-		worker := &replay.Worker{
-			Pool:     pool,
-			Mentat:   mentat,
-			Embedder: embedProv,
-			Cfg: replay.WorkerConfig{
-				Window:      time.Duration(windowH) * time.Hour,
-				MinSupport:  minSupport,
-				WorkspaceID: ws,
-			},
-		}
-		sched := replay.Scheduler{Hour: hour, Min: 0}
-		logger.Info("replay scheduler starting",
-			slog.Int("hour", hour),
-			slog.String("workspace", ws.String()),
-		)
-		go func() {
-			if err := sched.Run(replayCtx, worker.RunOnce); err != nil && err != context.Canceled {
-				logger.Error("replay exited", slog.String("err", err.Error()))
-			}
-		}()
-	}
-
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("HTTP server listening",
@@ -218,6 +211,11 @@ func run() error {
 		logger.Info("shutdown signal received", slog.String("signal", sig.String()))
 	}
 
+	// Stop the semantic reconciler eagerly so it isn't still ticking
+	// while the HTTP server drains in-flight requests below. The
+	// deferred cancelReconciler() above remains as a safety net.
+	cancelReconciler()
+
 	healthHandler.SetReady(false)
 
 	ctx, cancel = context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
@@ -230,15 +228,6 @@ func run() error {
 
 	logger.Info("server shutdown complete")
 	return nil
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
 }
 
 func buildRouter(
@@ -282,9 +271,12 @@ func buildRouter(
 		})
 
 		r.Route("/semantic", func(r chi.Router) {
+			// v0.3 narrows the surface to /query only. The v0.2
+			// /feedback and /list paths are dropped: feedback is
+			// replaced by the dogfooding-tags mechanism in PR7, and
+			// /list returned mnemes with concept/content fields that
+			// no longer exist on the v0.3 schema.
 			r.Post("/query", semanticHandler.Query)
-			r.Post("/feedback", semanticHandler.Feedback)
-			r.Post("/list", semanticHandler.List)
 		})
 	})
 

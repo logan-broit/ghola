@@ -16,10 +16,6 @@
 #   chapterhouse    ch-server HTTP API (:8080)
 #   ghola           ghola local daemon (:7421) — profile "all"
 #
-# NOT included in v1a dev stack:
-#   mentat          vLLM for replay; enable via REPLAY_ENABLED=true +
-#                   MENTAT_URL pointing at your local model
-
 services:
   melange:
     image: vllm/vllm-openai:latest
@@ -74,6 +70,32 @@ services:
       interval: 2s
       timeout: 3s
       retries: 10
+
+  mentat:
+    build:
+      context: ../../mentat
+      dockerfile: Dockerfile
+    image: ghola/mentat:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      melange:
+        condition: service_healthy
+    environment:
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      MENTAT_WEIGHTS_ROOT: /weights
+      MENTAT_DATABASE_DSN: postgresql://${POSTGRES_USER:-memory_api}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-memories}
+      MELANGE_URL: http://melange:8082
+    volumes:
+      - mentat-weights:/weights
+    ports:
+      - "${MENTAT_PORT:-8084}:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   postgres:
     image: pgvector/pgvector:pg17
@@ -135,11 +157,7 @@ services:
       EMBEDDING_URL: ${EMBEDDING_URL:-http://melange:8082}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-      REPLAY_ENABLED: ${REPLAY_ENABLED:-false}
-      REPLAY_WORKSPACE_ID: ${REPLAY_WORKSPACE_ID:-00000000-0000-0000-0000-000000000010}
-      MENTAT_URL: ${MENTAT_URL:-}
-      MENTAT_MODEL: ${MENTAT_MODEL:-}
-      MENTAT_API_KEY: ${MENTAT_API_KEY:-}
+      MENTAT_URL: ${MENTAT_URL:-http://mentat:8084}
     ports:
       - "${CHAPTERHOUSE_PORT:-8080}:8080"
     healthcheck:
@@ -173,3 +191,4 @@ services:
 
 volumes:
   postgres-data:
+  mentat-weights:

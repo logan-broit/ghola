@@ -54,9 +54,18 @@ func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session,
 // chapterhouse and closes the sietch handle. Pipeline A's continuous
 // tick (Phase 5) supersedes most of this; SessionEnd is the explicit
 // fallback for agents that quit before the tick.
+//
+// Order matters: MarkEnded must precede Consolidate so the
+// chapterhouse upsert carries ended_at. The chapterhouse reconciler
+// pools sessions where `ended_at IS NOT NULL AND l1_embedding IS
+// NULL` — leaving ended_at NULL silently disables predictive replay
+// for the entire session.
 func (c *Core) SessionEnd(ctx context.Context, sessionID string) error {
 	if sessionID == "" {
 		return errMissingSessionID
+	}
+	if err := c.Sietch.MarkEnded(ctx, sessionID, c.Now()); err != nil {
+		return fmt.Errorf("mark ended: %w", err)
 	}
 	if _, err := c.Consolidate(ctx, sessionID); err != nil {
 		return fmt.Errorf("consolidate before end: %w", err)
@@ -279,14 +288,38 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, nil
 	}
 
-	// The session row is reconstructed from the first pending event's
-	// fields — lightweight; chapterhouse UPSERTs on id so it's safe.
-	sess := Session{
-		ID:         sessionID,
-		UserID:     pending[0].UserID,
-		StartedAt:  pending[0].CreatedAt,
-		EventCount: len(pending),
+	// Source the session row from sietch so ended_at, cwd, agent_kind,
+	// etc. all flow through to chapterhouse on every consolidation
+	// pass. Chapterhouse UPSERTs on id, so the same session metadata
+	// can land repeatedly — but ended_at MUST propagate or the
+	// predictive-replay reconciler (eligibility predicate
+	// `ended_at IS NOT NULL AND l1_embedding IS NULL`) will skip the
+	// session forever.
+	//
+	// Pipeline A's encoding worker tick reaches here with the session
+	// still active: GetSession returns ended_at = nil, the upsert
+	// keeps ended_at NULL, and the next tick (or eventual SessionEnd)
+	// will refresh it. SessionEnd reaches here with ended_at already
+	// stamped via Sietch.MarkEnded, so the row carries the timestamp.
+	sess, err := c.Sietch.GetSession(ctx, sessionID)
+	if err != nil {
+		return 0, fmt.Errorf("get session: %w", err)
 	}
+	// Defensive defaults: if sietch ever hands back a partially-zero
+	// row (e.g. a session with no events), still emit something the
+	// chapterhouse session-row schema accepts. UserID + StartedAt are
+	// the only NOT NULL fields; pull them from the first pending event
+	// when sietch left them zero.
+	if sess.ID == "" {
+		sess.ID = sessionID
+	}
+	if sess.UserID == "" {
+		sess.UserID = pending[0].UserID
+	}
+	if sess.StartedAt.IsZero() {
+		sess.StartedAt = pending[0].CreatedAt
+	}
+	sess.EventCount = len(pending)
 	if _, _, err := c.Chapterhouse.IngestEpisodic(ctx, sess, pending); err != nil {
 		return 0, fmt.Errorf("ingest: %w", err)
 	}

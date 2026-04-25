@@ -19,3 +19,9 @@ bootstrap-data/
 
 # Git worktrees for feature branches
 /.worktrees/
+
+# Python virtualenvs and caches (mentat service)
+/mentat/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -17,6 +17,11 @@ type Config struct {
 	Embedding   EmbeddingConfig
 	Auth        AuthConfig
 	CORSOrigins []string
+	// MentatURL is the base URL of the mentat service (cold-start cluster
+	// embeddings, predictive replay). Empty string disables mentat-backed
+	// paths; PR1.7/PR1.8 wiring checks for this before constructing a
+	// client.
+	MentatURL string
 }
 
 // ServerConfig holds HTTP server configuration.
@@ -112,6 +117,7 @@ func Load() (*Config, error) {
 			JWKSCacheTTL: getEnvDuration("JWKS_CACHE_TTL", 15*time.Minute),
 		},
 		CORSOrigins: parseCORSOrigins(getEnv("CORS_ORIGINS", "")),
+		MentatURL:   getEnv("MENTAT_URL", ""),
 	}
 
 	if err := cfg.validate(); err != nil {

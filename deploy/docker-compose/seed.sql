@@ -11,29 +11,34 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE SCHEMA IF NOT EXISTS semantic;
 
--- ${EMBEDDING_DIM} is substituted by docker-compose via envsubst-style
--- init hooks? No — the Postgres entrypoint doesn't run envsubst. We
--- bake a fixed dim for dev; override via compose build-arg if needed.
+-- The Postgres entrypoint does not run envsubst, so we bake a fixed
+-- dim for dev. Production substitutes ${EMBEDDING_DIM} via the
+-- migration runner; the seed file mirrors the v0.3 column set with a
+-- literal vector(1024).
 CREATE TABLE IF NOT EXISTS semantic.mnemes (
     id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id          uuid NOT NULL,
-    concept               text NOT NULL,
-    content               text NOT NULL,
-    embedding             vector(1024),
+    level                 integer NOT NULL DEFAULT 1,
+    embedding             vector(1024) NOT NULL,
     confidence            double precision NOT NULL DEFAULT 0.5,
     access_count          integer NOT NULL DEFAULT 0,
-    last_access           timestamptz NOT NULL DEFAULT now(),
+    member_ids            uuid[] NOT NULL DEFAULT '{}',
+    contributor_user_ids  uuid[] NOT NULL DEFAULT '{}',
     created_at            timestamptz NOT NULL DEFAULT now(),
-    state                 text NOT NULL DEFAULT 'active',
-    memory_type           text NOT NULL DEFAULT 'factual',
-    tags                  text[] NOT NULL DEFAULT '{}',
-    entities              text[] NOT NULL DEFAULT '{}',
-    source_episodic_ids   uuid[] NOT NULL DEFAULT '{}',
-    contributor_user_ids  uuid[] NOT NULL DEFAULT '{}'
+    last_reinforced_at    timestamptz NOT NULL DEFAULT now(),
+    last_access           timestamptz NOT NULL DEFAULT now(),
+    state                 text NOT NULL DEFAULT 'active'
+        CHECK (state IN ('active','archived'))
 );
 
-CREATE INDEX IF NOT EXISTS mnemes_workspace      ON semantic.mnemes (workspace_id);
-CREATE INDEX IF NOT EXISTS mnemes_embedding_hnsw ON semantic.mnemes USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS mnemes_by_level
+    ON semantic.mnemes (workspace_id, level);
+CREATE INDEX IF NOT EXISTS mnemes_embedding_hnsw
+    ON semantic.mnemes USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS mnemes_member_ids_gin
+    ON semantic.mnemes USING gin (member_ids);
+CREATE INDEX IF NOT EXISTS mnemes_last_reinforced
+    ON semantic.mnemes (last_reinforced_at DESC) WHERE state = 'active';
 
 CREATE OR REPLACE FUNCTION semantic.bayesian_update(prior double precision, evidence double precision)
 RETURNS double precision
@@ -41,43 +46,6 @@ LANGUAGE SQL IMMUTABLE AS $$
     SELECT 0.95 * (prior * evidence /
              GREATEST(prior * evidence + (1-prior)*(1-evidence), 1e-9))
            + 0.025;
-$$;
-
--- A stub recall function matching the pg_ghola signature so the
--- /v1/semantic/query endpoint returns something sensible in dev.
--- Postgres has no "CREATE TYPE IF NOT EXISTS"; guard with DO block.
-DO $$
-BEGIN
-    CREATE TYPE semantic.recall_result AS (
-        mneme_id       uuid,
-        score          double precision,
-        content_match  double precision,
-        activation     double precision,
-        hebbian_boost  double precision,
-        confidence     double precision,
-        concept        text,
-        content        text
-    );
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END$$;
-
-CREATE OR REPLACE FUNCTION semantic.recall(
-    ws        uuid,
-    qtext     text,
-    qembed    vector,
-    limit_n   int,
-    min_conf  double precision
-) RETURNS SETOF semantic.recall_result
-LANGUAGE SQL AS $$
-    SELECT id, 0.5::double precision, 0.5::double precision,
-           0.0::double precision, 0.0::double precision,
-           confidence, concept, content
-      FROM semantic.mnemes
-     WHERE workspace_id = ws
-       AND confidence >= min_conf
-     ORDER BY 1 - (embedding <=> qembed) DESC
-     LIMIT limit_n;
 $$;
 
 CREATE OR REPLACE FUNCTION semantic.update_confidence(

@@ -23,6 +23,7 @@ import (
 type fakeSietch struct {
 	opened   []core.Session
 	closed   []string
+	ended    map[string]time.Time
 	events   []core.Event
 	current  map[string]string
 	bookmarks []struct{ SessionID, EventID, Label string }
@@ -34,25 +35,47 @@ type fakeSietch struct {
 	vectorHits map[string][]core.RecallHit
 	ftsHits    map[string][]core.RecallHit
 	sessions   []core.Session
+
+	// metadata returned by GetSession, keyed by session id. Tests that
+	// care about ended_at / cwd / etc. populate this directly.
+	sessionRows map[string]core.Session
 }
 
 func newFakeSietch() *fakeSietch {
 	return &fakeSietch{
-		current:    map[string]string{},
-		watermarks: map[string]string{},
-		pending:    map[string][]core.Event{},
-		vectorHits: map[string][]core.RecallHit{},
-		ftsHits:    map[string][]core.RecallHit{},
+		current:     map[string]string{},
+		watermarks:  map[string]string{},
+		pending:     map[string][]core.Event{},
+		vectorHits:  map[string][]core.RecallHit{},
+		ftsHits:     map[string][]core.RecallHit{},
+		ended:       map[string]time.Time{},
+		sessionRows: map[string]core.Session{},
 	}
 }
 
 func (f *fakeSietch) OpenSession(_ context.Context, s core.Session) error {
 	f.opened = append(f.opened, s)
+	f.sessionRows[s.ID] = s
 	return nil
 }
 func (f *fakeSietch) CloseSession(_ context.Context, id string) error {
 	f.closed = append(f.closed, id)
 	return nil
+}
+func (f *fakeSietch) MarkEnded(_ context.Context, id string, t time.Time) error {
+	f.ended[id] = t
+	row := f.sessionRows[id]
+	row.ID = id
+	tt := t
+	row.EndedAt = &tt
+	f.sessionRows[id] = row
+	return nil
+}
+func (f *fakeSietch) GetSession(_ context.Context, id string) (core.Session, error) {
+	if row, ok := f.sessionRows[id]; ok {
+		return row, nil
+	}
+	return core.Session{ID: id}, nil
 }
 func (f *fakeSietch) RecordEvent(_ context.Context, ev core.Event) (core.Event, error) {
 	f.events = append(f.events, ev)
@@ -184,6 +207,40 @@ func TestSessionEnd_ConsolidatesAndCloses(t *testing.T) {
 	require.NoError(t, c.SessionEnd(context.Background(), "sess"))
 	assert.Len(t, ch.ingests, 1, "consolidation must fire before close")
 	assert.Contains(t, s.closed, "sess")
+}
+
+// SessionEnd must stamp ended_at on sietch BEFORE Consolidate runs so
+// the chapterhouse session upsert lands with ended_at populated. Without
+// this, the predictive-replay reconciler (`ended_at IS NOT NULL AND
+// l1_embedding IS NULL`) silently skips every session that ended via
+// SessionEnd — i.e. every real ghola session.
+func TestSessionEnd_PropagatesEndedAtToChapterhouse(t *testing.T) {
+	c, s, ch, _ := newCore()
+	s.pending["sess"] = []core.Event{{ID: "e1", UserID: "u1", SessionID: "sess", Type: "user"}}
+
+	require.NoError(t, c.SessionEnd(context.Background(), "sess"))
+	require.Len(t, ch.ingests, 1)
+	require.NotNil(t, ch.ingests[0].Sess.EndedAt,
+		"chapterhouse must receive ended_at — bug: Consolidate built Session{} from event fields and never read sietch's ended_at")
+	assert.Equal(t, c.Now(), *ch.ingests[0].Sess.EndedAt)
+}
+
+// Pipeline A's encoding worker calls Consolidate on a tick while the
+// session is still live. Sietch hasn't seen MarkEnded for these
+// sessions, so GetSession returns ended_at = nil — which must propagate
+// as nil to chapterhouse. The reconciler is supposed to skip these
+// rows; flipping ended_at non-nil mid-session would let half-written
+// sessions get pooled into l1_embedding prematurely.
+func TestConsolidate_LeavesEndedAtNilForActiveSessions(t *testing.T) {
+	c, s, ch, _ := newCore()
+	s.pending["sess"] = []core.Event{{ID: "e1", UserID: "u1", SessionID: "sess", Type: "user"}}
+	// no MarkEnded call — session is still active
+
+	_, err := c.Consolidate(context.Background(), "sess")
+	require.NoError(t, err)
+	require.Len(t, ch.ingests, 1)
+	assert.Nil(t, ch.ingests[0].Sess.EndedAt,
+		"active session must not carry ended_at; reconciler eligibility flips on this column")
 }
 
 func TestListSessions_DelegatesToSietch(t *testing.T) {

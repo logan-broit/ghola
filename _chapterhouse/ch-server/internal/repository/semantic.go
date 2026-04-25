@@ -2,227 +2,204 @@ package repository
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
 
-// Mneme mirrors semantic.mnemes + the OpenAPI Mneme DTO.
-type Mneme struct {
-	ID                  uuid.UUID   `json:"id"`
-	WorkspaceID         uuid.UUID   `json:"workspace_id"`
-	Concept             string      `json:"concept"`
-	Content             string      `json:"content"`
-	Confidence          float64     `json:"confidence"`
-	AccessCount         int         `json:"access_count"`
-	LastAccess          time.Time   `json:"last_access"`
-	CreatedAt           time.Time   `json:"created_at"`
-	State               string      `json:"state"`
-	MemoryType          string      `json:"memory_type"`
-	Tags                []string    `json:"tags"`
-	Entities            []string    `json:"entities"`
-	SourceEpisodicIDs   []uuid.UUID `json:"source_episodic_ids"`
-	ContributorUserIDs  []uuid.UUID `json:"contributor_user_ids"`
+// MnemeHit is one row returned by the v0.3 cosine read path. The
+// pre-v0.3 columns (concept/content/memory_type/...) are gone, so the
+// hit shape is just enough metadata for the caller to fetch member
+// events from episodic if it wants the underlying text.
+type MnemeHit struct {
+	ID    uuid.UUID
+	Score float64
+	Level int
 }
 
-// SemanticMnemeHit is one row returned by semantic.recall(...).
-type SemanticMnemeHit struct {
-	MnemeID      uuid.UUID
-	Score        float64
-	ContentMatch float64
-	Activation   float64
-	HebbianBoost float64
-	Confidence   float64
-	Concept      string
-	Content      string
-}
-
-// SemanticQueryParams controls a /v1/semantic/query call.
-type SemanticQueryParams struct {
-	WorkspaceID    uuid.UUID
-	QueryText      string
-	QueryEmbedding []float64
-	Limit          int
-	MinConfidence  float64
-}
-
-// SemanticRecall calls the ghola extension's semantic.recall(...) and
-// projects the returned composite rows onto []SemanticMnemeHit.
-func (r *Repository) SemanticRecall(ctx context.Context, p SemanticQueryParams) ([]SemanticMnemeHit, error) {
-	if p.Limit <= 0 {
-		p.Limit = 10
+// QueryMnemesByEmbedding runs HNSW cosine over semantic.mnemes and
+// returns the top `limit` active hits for the given workspace.
+//
+// Cosine similarity is computed as `1 - (embedding <=> $2)` because
+// pgvector's `<=>` operator is cosine distance, not similarity. The
+// HNSW index `mnemes_embedding_hnsw` (cosine_ops) drives the ORDER BY
+// directly.
+func (r *Repository) QueryMnemesByEmbedding(
+	ctx context.Context, workspaceID uuid.UUID, emb []float32, limit int,
+) ([]MnemeHit, error) {
+	if limit <= 0 {
+		limit = 10
 	}
-
-	var embLit string
-	if len(p.QueryEmbedding) > 0 {
-		parts := make([]string, len(p.QueryEmbedding))
-		for i, x := range p.QueryEmbedding {
-			parts[i] = strconv.FormatFloat(x, 'f', -1, 64)
-		}
-		embLit = "[" + strings.Join(parts, ",") + "]"
+	if len(emb) == 0 {
+		return nil, fmt.Errorf("query mnemes: empty embedding")
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT mneme_id, score, content_match, activation, hebbian_boost,
-		       confidence, concept, content
-		FROM semantic.recall($1, $2, ($3::text)::vector, $4, $5)
-	`, p.WorkspaceID, p.QueryText, embLit, p.Limit, p.MinConfidence)
+		SELECT id,
+		       1 - (embedding <=> ($2::text)::vector) AS score,
+		       level
+		FROM semantic.mnemes
+		WHERE workspace_id = $1 AND state = 'active'
+		ORDER BY embedding <=> ($2::text)::vector
+		LIMIT $3`, workspaceID, vectorLiteralFloat32(emb), limit)
 	if err != nil {
-		return nil, fmt.Errorf("semantic.recall: %w", err)
+		return nil, fmt.Errorf("query mnemes: %w", err)
 	}
 	defer rows.Close()
 
-	var hits []SemanticMnemeHit
+	var out []MnemeHit
 	for rows.Next() {
-		var h SemanticMnemeHit
-		if err := rows.Scan(&h.MnemeID, &h.Score, &h.ContentMatch, &h.Activation,
-			&h.HebbianBoost, &h.Confidence, &h.Concept, &h.Content); err != nil {
+		var h MnemeHit
+		if err := rows.Scan(&h.ID, &h.Score, &h.Level); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
-		hits = append(hits, h)
+		out = append(out, h)
 	}
-	return hits, rows.Err()
+	return out, rows.Err()
 }
 
-// SemanticUpdateConfidence wraps semantic.update_confidence(...).
-func (r *Repository) SemanticUpdateConfidence(
-	ctx context.Context, mnemeID uuid.UUID, evidence float64,
-) (float64, error) {
-	var newConf float64
-	err := r.pool.QueryRow(ctx,
-		`SELECT semantic.update_confidence($1, $2)`,
-		mnemeID, evidence,
-	).Scan(&newConf)
-	if err != nil {
-		return 0, fmt.Errorf("update_confidence: %w", err)
+// vectorLiteralFloat32 mirrors vectorLiteralOrNil but for []float32.
+// Returns the pgvector text literal "[1,2,3]"; the caller is
+// responsible for not passing an empty slice (see QueryMnemesByEmbedding).
+func vectorLiteralFloat32(v []float32) string {
+	parts := make([]string, len(v))
+	for i, x := range v {
+		parts[i] = strconv.FormatFloat(float64(x), 'f', -1, 32)
 	}
-	return newConf, nil
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // ---------------------------------------------------------------------
-// List (paginated)
+// L1 write path (PR1.7) — feeds the semantic.Writer + Reconciler.
 // ---------------------------------------------------------------------
 
-// MnemeFilters narrows a /v1/semantic/list query.
-type MnemeFilters struct {
-	MemoryType *string  `json:"memory_type,omitempty"`
-	State      *string  `json:"state,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Entities   []string `json:"entities,omitempty"`
-}
-
-// SemanticListParams is the full input to SemanticList.
-type SemanticListParams struct {
+// ClosedSession identifies a closed session that the reconciler still
+// needs to pool into an L1 vector. WorkspaceID is the chapterhouse
+// workspace identifier; since episodic.sessions stores user_id (and
+// chapterhouse maps user_id == personal workspace), we surface it
+// under the workspace name to match mentat's PoolRequest contract.
+type ClosedSession struct {
+	ID          uuid.UUID
 	WorkspaceID uuid.UUID
-	Limit       int
-	Cursor      *string
-	Filters     MnemeFilters
 }
 
-type listCursor struct {
-	CreatedAt time.Time `json:"t"`
-	ID        uuid.UUID `json:"i"`
-}
-
-func encodeCursor(c listCursor) string {
-	b, _ := json.Marshal(c)
-	return base64.URLEncoding.EncodeToString(b)
-}
-
-func decodeCursor(s string) (*listCursor, error) {
-	b, err := base64.URLEncoding.DecodeString(s)
+// ClosedSessionsMissingL1 returns up to `limit` closed sessions whose
+// l1_embedding column is still NULL, oldest-first by ended_at. The
+// reconciler walks this set on every tick.
+func (r *Repository) ClosedSessionsMissingL1(ctx context.Context, limit int) ([]ClosedSession, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, user_id
+		FROM episodic.sessions
+		WHERE ended_at IS NOT NULL AND l1_embedding IS NULL
+		ORDER BY ended_at ASC
+		LIMIT $1`, limit)
 	if err != nil {
-		return nil, fmt.Errorf("decode cursor: %w", err)
-	}
-	var c listCursor
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("unmarshal cursor: %w", err)
-	}
-	return &c, nil
-}
-
-// SemanticList paginates semantic.mnemes by (created_at, id) DESC.
-// Returns the page + an optional next_cursor (nil when exhausted).
-func (r *Repository) SemanticList(
-	ctx context.Context, p SemanticListParams,
-) ([]Mneme, *string, error) {
-	if p.Limit <= 0 {
-		p.Limit = 50
-	}
-
-	q := strings.Builder{}
-	args := []any{p.WorkspaceID, p.Limit + 1}
-	q.WriteString(`
-		SELECT id, workspace_id, concept, content, confidence, access_count,
-		       last_access, created_at, state, memory_type, tags, entities,
-		       source_episodic_ids, contributor_user_ids
-		FROM semantic.mnemes
-		WHERE workspace_id = $1`)
-
-	next := 3
-	if p.Filters.MemoryType != nil {
-		fmt.Fprintf(&q, " AND memory_type = $%d", next)
-		args = append(args, *p.Filters.MemoryType)
-		next++
-	}
-	if p.Filters.State != nil {
-		fmt.Fprintf(&q, " AND state = $%d", next)
-		args = append(args, *p.Filters.State)
-		next++
-	}
-	if len(p.Filters.Tags) > 0 {
-		fmt.Fprintf(&q, " AND tags @> $%d::text[]", next)
-		args = append(args, p.Filters.Tags)
-		next++
-	}
-	if len(p.Filters.Entities) > 0 {
-		fmt.Fprintf(&q, " AND entities && $%d::text[]", next)
-		args = append(args, p.Filters.Entities)
-		next++
-	}
-	if p.Cursor != nil && *p.Cursor != "" {
-		c, err := decodeCursor(*p.Cursor)
-		if err != nil {
-			return nil, nil, err
-		}
-		fmt.Fprintf(&q, " AND (created_at, id) < ($%d, $%d)", next, next+1)
-		args = append(args, c.CreatedAt, c.ID)
-	}
-
-	q.WriteString(" ORDER BY created_at DESC, id DESC LIMIT $2")
-
-	rows, err := r.pool.Query(ctx, q.String(), args...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("list: %w", err)
+		return nil, fmt.Errorf("closed sessions missing l1: %w", err)
 	}
 	defer rows.Close()
 
-	var mnemes []Mneme
+	var out []ClosedSession
 	for rows.Next() {
-		var m Mneme
-		if err := rows.Scan(&m.ID, &m.WorkspaceID, &m.Concept, &m.Content,
-			&m.Confidence, &m.AccessCount, &m.LastAccess, &m.CreatedAt,
-			&m.State, &m.MemoryType, &m.Tags, &m.Entities,
-			&m.SourceEpisodicIDs, &m.ContributorUserIDs); err != nil {
-			return nil, nil, fmt.Errorf("scan: %w", err)
+		var s ClosedSession
+		if err := rows.Scan(&s.ID, &s.WorkspaceID); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
 		}
-		mnemes = append(mnemes, m)
+		out = append(out, s)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
+	return out, rows.Err()
+}
 
-	var nextCursor *string
-	if len(mnemes) > p.Limit {
-		last := mnemes[p.Limit-1]
-		mnemes = mnemes[:p.Limit]
-		c := encodeCursor(listCursor{CreatedAt: last.CreatedAt, ID: last.ID})
-		nextCursor = &c
+// SessionEventRow is the minimal shape mentat needs to pool a session.
+// Type follows episodic.events.type (one of user/assistant/tool_result/
+// system); embedding is the per-event vector already populated by the
+// ingest path.
+type SessionEventRow struct {
+	Type      string
+	Embedding []float32
+}
+
+// SessionEvents returns every embedded event in a session, ordered the
+// way mentat expects (created_at ASC, id ASC). Rows whose embedding is
+// NULL are filtered out — they would carry no signal for pooling and
+// mentat rejects empty-vector inputs anyway.
+//
+// Note on ordering: the spec calls for `ts ASC, id ASC`, but
+// episodic.events stores the canonical timestamp as `created_at`
+// (see migrations/001_episodic.sql). created_at is the equivalent
+// column.
+func (r *Repository) SessionEvents(ctx context.Context, sessionID uuid.UUID) ([]SessionEventRow, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT type, embedding::text
+		FROM episodic.events
+		WHERE session_id = $1 AND embedding IS NOT NULL
+		ORDER BY created_at ASC, id ASC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session events: %w", err)
 	}
-	return mnemes, nextCursor, nil
+	defer rows.Close()
+
+	var out []SessionEventRow
+	for rows.Next() {
+		var row SessionEventRow
+		var lit string
+		if err := rows.Scan(&row.Type, &lit); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		emb, err := parseVectorLiteral(lit)
+		if err != nil {
+			return nil, fmt.Errorf("parse vector: %w", err)
+		}
+		row.Embedding = emb
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// UpdateSessionL1Embedding writes the pooled L1 vector into
+// episodic.sessions.l1_embedding. Idempotent: re-running with a fresh
+// pool result simply overwrites the previous value, which is what the
+// reconciler wants when a session gains additional events post-close.
+func (r *Repository) UpdateSessionL1Embedding(
+	ctx context.Context, sessionID uuid.UUID, emb []float32,
+) error {
+	if len(emb) == 0 {
+		return fmt.Errorf("update l1: empty embedding")
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE episodic.sessions
+		    SET l1_embedding = ($1::text)::vector
+		  WHERE id = $2`,
+		vectorLiteralFloat32(emb), sessionID)
+	if err != nil {
+		return fmt.Errorf("update l1 embedding: %w", err)
+	}
+	return nil
+}
+
+// parseVectorLiteral turns pgvector's text representation ("[1,2,3]")
+// back into []float32. We read vectors as text for the same reason the
+// ingest path writes them as text: pgx has no native pgvector codec
+// without the pgvector-go driver, and the text path is fast enough for
+// session-sized event sets.
+func parseVectorLiteral(s string) ([]float32, error) {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '[' || s[len(s)-1] != ']' {
+		return nil, fmt.Errorf("malformed vector literal: %q", s)
+	}
+	body := s[1 : len(s)-1]
+	if body == "" {
+		return []float32{}, nil
+	}
+	parts := strings.Split(body, ",")
+	out := make([]float32, len(parts))
+	for i, p := range parts {
+		f, err := strconv.ParseFloat(strings.TrimSpace(p), 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse component %d: %w", i, err)
+		}
+		out[i] = float32(f)
+	}
+	return out, nil
 }

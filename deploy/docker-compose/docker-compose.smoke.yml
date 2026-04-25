@@ -1,0 +1,61 @@
+# Smoke-test override: replaces the GPU-backed `melange` service with the
+# python hash-stub so the predictive-replay vertical-slice e2e can run
+# under an isolated Compose project without contending for the GPU. Also
+# clears the `all` profile gate on `ghola` so the e2e can drive the real
+# SessionStart -> Record -> SessionEnd -> Consolidate path that landed
+# the ended_at-propagation bug.
+#
+# Usage (see Makefile target `smoke-predictive`):
+#   docker compose -p predictive-smoke \
+#     -f docker-compose.yml -f docker-compose.smoke.yml \
+#     up -d --build postgres melange mentat ch-init chapterhouse ghola
+#
+# The override re-defines `melange` in-place rather than activating the
+# `stub` profile, because activating the profile would leave the GPU
+# `melange` service definition active and the two would race for
+# ${MELANGE_PORT}. Replacing the service body avoids that.
+services:
+  melange:
+    image: python:3.12-alpine
+    command: ["python", "/stub.py"]
+    # Override the inherited GPU reservation list. Empty list cancels it.
+    deploy:
+      resources:
+        reservations:
+          devices: []
+    environment:
+      PORT: "8082"
+      STUB_EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      HUGGING_FACE_HUB_TOKEN: ""
+    volumes:
+      - ./melange-stub/stub.py:/stub.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health').read()"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Override the base ghola service to clear the `all` profile gate;
+  # the smoke stack always needs the ghola daemon so the e2e can drive
+  # the real session_start / record / session_end path.
+  ghola:
+    profiles: []
+    # Encoding interval is irrelevant for the smoke test — SessionEnd
+    # fires Consolidate inline. Setting it long keeps the worker
+    # quiet so it doesn't race the test's session-end flush.
+    environment:
+      GHOLA_ADDR: 0.0.0.0:7421
+      GHOLA_LOOPBACK_ONLY: "false"
+      CHAPTERHOUSE_URL: http://chapterhouse:8080
+      CHAPTERHOUSE_API_KEY: ""
+      CHAPTERHOUSE_REQUIRE_KEY: "false"
+      MELANGE_URL: http://melange:8082
+      MELANGE_MODEL: ${MELANGE_MODEL:-qwen3-embedding}
+      ENCODING_INTERVAL: 1h
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7421/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
