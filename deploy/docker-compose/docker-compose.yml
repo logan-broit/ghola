@@ -23,6 +23,7 @@
 services:
   melange:
     image: vllm/vllm-openai:latest
+    restart: unless-stopped
     # vLLM serving Qwen3-Embedding-0.6B on Blackwell.
     # (TEI's Candle backend was compiled for sm_80 and refuses to
     # start on sm_120; vLLM already works on this GPU from the
@@ -77,6 +78,7 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-memory_api}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
@@ -114,6 +116,7 @@ services:
 
   chapterhouse:
     image: ghola/chapterhouse:dev
+    restart: unless-stopped
     depends_on:
       ch-init:
         condition: service_completed_successfully
@@ -154,6 +157,7 @@ services:
       context: ../..
       dockerfile: deploy/docker-compose/Dockerfile.ghola
     image: ghola/ghola:dev
+    restart: unless-stopped
     depends_on:
       chapterhouse:
         condition: service_healthy
