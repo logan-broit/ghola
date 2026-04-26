@@ -33,13 +33,15 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/logan-broit/ghola/internal/importlogs"
+	"github.com/logan-broit/ghola/internal/importlogs/adapters/jsonlfamily"
 )
 
 // adapters is the registry of per-source adapters known to this
-// build. Per-source packages register themselves via init().
-// jsonl-family lands in Task 2.2; this map is intentionally empty
-// today.
-var adapters = map[string]importlogs.Adapter{}
+// build. Direct literal so the registry is grep-able and there are
+// no init-order surprises; new adapters land here as they're built.
+var adapters = map[string]importlogs.Adapter{
+	"jsonl-family": jsonlfamily.New(),
+}
 
 type sourceList []importlogs.Source
 
