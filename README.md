@@ -67,9 +67,15 @@ Just the ghola HTTP daemon (assumes a reachable chapterhouse via
 }
 ```
 
-MCP tools surfaced: `session_start`, `session_end`, `list_sessions`,
-`record`, `branch`, `bookmark`, `navigate`, `recall`, `forget`,
-`share`, `consolidate`, `expand_session_workspace`.
+MCP tools surfaced (5 agent-facing): `record`, `recall`, `bookmark`,
+`navigate`, `forget`. `record` accepts an optional `cwd` — when
+`session_id` is omitted the service derives a workspace from `cwd`
+and reuses or provisions a session inline (no `session_start`
+bookkeeping for the model). Lifecycle and admin operations
+(`session_start`, `session_end`, `list_sessions`, `branch`,
+`expand_session_workspace`, `share`, `consolidate`) stay reachable
+over HTTP at `/v1/*` for hosts that drive memory programmatically;
+they're hidden from the model's tool catalog.
 
 **HTTP/JSON** (any client):
 

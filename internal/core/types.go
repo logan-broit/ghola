@@ -78,8 +78,13 @@ type Session struct {
 type RecordInput struct {
 	SessionID string  `json:"session_id"`
 	UserID    string  `json:"user_id"`
-	ParentID  *string `json:"parent_id,omitempty"`
-	Event     Event   `json:"event"` // partial — ID/embedding/CreatedAt may be filled
+	// Cwd is optional. When SessionID is empty, Record uses Cwd to
+	// derive a workspace via WorkspaceForCwd and either reuses the
+	// most-recent open session for (UserID, workspace) or provisions
+	// one inline. With an explicit SessionID, Cwd is ignored.
+	Cwd      *string `json:"cwd,omitempty"`
+	ParentID *string `json:"parent_id,omitempty"`
+	Event    Event   `json:"event"` // partial — ID/embedding/CreatedAt may be filled
 }
 
 // RecallInput is the unified cross-tier query. The service fans out

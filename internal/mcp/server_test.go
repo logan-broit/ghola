@@ -94,10 +94,14 @@ func callTool(t *testing.T, s *mcptest.Server, name string, args map[string]any)
 // Tests
 // ---------------------------------------------------------------------
 
-// TestTools_AllRegistered confirms every Core operation has a tool.
-// If a tool name drifts out of the catalog (typo, rename), this test
-// surfaces it before a Claude Code user notices.
-func TestTools_AllRegistered(t *testing.T) {
+// TestTools_AgentSurface confirms the MCP catalog is exactly the five
+// agent-relevant tools. The lifecycle / admin operations (session_start,
+// session_end, list_sessions, branch, expand_session_workspace, share,
+// consolidate) are reachable over HTTP but deliberately hidden from
+// the model's tool list so it doesn't have to reason about session
+// boundaries it has no good signal for. If a future change re-adds
+// one to the catalog, this test surfaces that intentionally.
+func TestTools_AgentSurface(t *testing.T) {
 	fg, hs := newFakeGhola(t)
 	_ = fg
 	s := newClient(t, hs.URL)
@@ -113,15 +117,21 @@ func TestTools_AllRegistered(t *testing.T) {
 		names[tool.Name] = true
 	}
 
-	expected := []string{
-		"session_start", "session_end", "list_sessions",
-		"record", "branch", "bookmark", "navigate",
-		"recall", "forget", "share", "consolidate",
-		"expand_session_workspace",
-	}
+	expected := []string{"record", "recall", "bookmark", "navigate", "forget"}
 	assert.Len(t, list.Tools, len(expected))
 	for _, want := range expected {
 		assert.True(t, names[want], "missing tool %q", want)
+	}
+
+	// Explicitly assert the lifecycle / admin tools are NOT exposed
+	// to the model. They stay reachable via HTTP for pi-mono and
+	// other hosts that drive memory programmatically.
+	for _, hidden := range []string{
+		"session_start", "session_end", "list_sessions",
+		"branch", "expand_session_workspace", "share", "consolidate",
+	} {
+		assert.False(t, names[hidden],
+			"%q must not be in the model-facing MCP catalog", hidden)
 	}
 }
 
@@ -171,7 +181,11 @@ func TestProxy_SurfacesDaemonError(t *testing.T) {
 
 	s := newClient(t, hs.URL)
 
-	out := callTool(t, s, "session_start", map[string]any{"user_id": "u1"})
+	out := callTool(t, s, "recall", map[string]any{
+		"user_id":    "u1",
+		"workspace":  "w1",
+		"query_text": "anything",
+	})
 
 	require.True(t, out.IsError, "daemon 401 must surface as an error result")
 	require.NotEmpty(t, out.Content)
@@ -180,44 +194,25 @@ func TestProxy_SurfacesDaemonError(t *testing.T) {
 	assert.Contains(t, text, "no api key")
 }
 
-// TestMCP_ExpandSessionWorkspace_ForwardsPath proves the new tool
-// translates to POST /v1/session_workspace and round-trips its args.
-func TestMCP_ExpandSessionWorkspace_ForwardsPath(t *testing.T) {
-	fg, hs := newFakeGhola(t)
-	fg.response["/v1/session_workspace"] = `{"added":true}`
-
-	s := newClient(t, hs.URL)
-
-	out := callTool(t, s, "expand_session_workspace", map[string]any{
-		"user_id":      "u1",
-		"session_id":   "s1",
-		"workspace_id": "w1",
-	})
-	require.NotNil(t, out)
-
-	fg.mu.Lock()
-	defer fg.mu.Unlock()
-	require.Len(t, fg.calls, 1)
-	assert.Equal(t, "/v1/session_workspace", fg.calls[0].Path)
-	assert.Equal(t, "u1", fg.calls[0].Body["user_id"])
-	assert.Equal(t, "s1", fg.calls[0].Body["session_id"])
-	assert.Equal(t, "w1", fg.calls[0].Body["workspace_id"])
-}
-
-// TestProxy_EndToEndOps exercises one tool per Core-op-family so the
-// wire shape stays stable — session_start (no state), record (object
-// arg), recall (bool/number args), forget (array arg).
+// TestProxy_EndToEndOps exercises one tool per arg-family so the wire
+// shape stays stable — record (object arg + cwd-fallback path),
+// recall (bool/number args), forget (array arg).
 func TestProxy_EndToEndOps(t *testing.T) {
 	fg, hs := newFakeGhola(t)
-	fg.response["/v1/session_start"] = `{"session":{"id":"s1","user_id":"u1"}}`
+	fg.response["/v1/record"] = `{"event":{"id":"e1"}}`
 	fg.response["/v1/recall"] = `{"hits":[],"tier_counts":{"working":0}}`
 	fg.response["/v1/forget"] = `{"forgotten":3}`
 
 	s := newClient(t, hs.URL)
 
-	callTool(t, s, "session_start", map[string]any{"user_id": "u1"})
+	callTool(t, s, "record", map[string]any{
+		"user_id": "u1",
+		"cwd":     "/tmp/proj",
+		"event":   map[string]any{"type": "user", "text": "hi"},
+	})
 	callTool(t, s, "recall", map[string]any{
 		"user_id":    "u1",
+		"workspace":  "w1",
 		"query_text": "kubernetes",
 		"limit":      5,
 	})
@@ -231,7 +226,7 @@ func TestProxy_EndToEndOps(t *testing.T) {
 	require.Len(t, fg.calls, 3)
 
 	paths := []string{fg.calls[0].Path, fg.calls[1].Path, fg.calls[2].Path}
-	assert.Equal(t, []string{"/v1/session_start", "/v1/recall", "/v1/forget"}, paths)
+	assert.Equal(t, []string{"/v1/record", "/v1/recall", "/v1/forget"}, paths)
 
 	// recall's number/bool args must round-trip.
 	assert.Equal(t, float64(5), fg.calls[1].Body["limit"])

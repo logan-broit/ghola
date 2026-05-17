@@ -64,44 +64,35 @@ type toolSpec struct {
 	Path string // "/v1/<op>"
 }
 
+// tools is the agent-facing MCP surface: five tools the model uses
+// turn-to-turn. The lifecycle / admin operations (session_start,
+// session_end, list_sessions, branch, expand_session_workspace,
+// share, consolidate) stay reachable over HTTP at /v1/* for hosts
+// that drive memory programmatically (pi-mono and friends) — they're
+// just hidden from the model's tool catalog so it doesn't have to
+// reason about session boundaries it has no good signal for.
+//
+// `record` accepts an optional cwd; when session_id is omitted, core
+// uses cwd to derive the workspace and either reuses the most-recent
+// open session for (user, workspace) or provisions one inline. This
+// removes the "model forgot to call session_start" failure mode that
+// every MCP host hits.
 func tools() []toolSpec {
 	return []toolSpec{
 		{
-			Tool: mcppkg.NewTool("session_start",
-				mcppkg.WithDescription("Provision a new session (fresh sietch file)."),
-				mcppkg.WithString("user_id",
-					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
-				mcppkg.WithString("agent_kind",
-					mcppkg.Description("claude-code, pi-mono, etc.")),
-				mcppkg.WithString("cwd"),
-				mcppkg.WithString("git_branch"),
-				mcppkg.WithString("source_device"),
-			),
-			Path: "/v1/session_start",
-		},
-		{
-			Tool: mcppkg.NewTool("session_end",
-				mcppkg.WithDescription("Final flush + close the session."),
-				mcppkg.WithString("session_id", mcppkg.Required()),
-			),
-			Path: "/v1/session_end",
-		},
-		{
-			Tool: mcppkg.NewTool("list_sessions",
-				mcppkg.WithDescription("Enumerate the caller's sessions."),
-				mcppkg.WithString("user_id",
-					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
-			),
-			Path: "/v1/list_sessions",
-		},
-		{
 			Tool: mcppkg.NewTool("record",
 				mcppkg.WithDescription(
-					"Append an event to the current session. The local service "+
-						"computes the embedding if it's omitted."),
-				mcppkg.WithString("session_id", mcppkg.Required()),
+					"Append an event to the active session. Pass cwd (the "+
+						"current project directory) and the local service will "+
+						"find or create the right session automatically — no "+
+						"session_id bookkeeping required. The embedding is "+
+						"computed if omitted."),
 				mcppkg.WithString("user_id",
 					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
+				mcppkg.WithString("cwd",
+					mcppkg.Description("Current project directory. Required when session_id is omitted; ignored otherwise.")),
+				mcppkg.WithString("session_id",
+					mcppkg.Description("Optional. If set, used verbatim; otherwise derived from cwd.")),
 				mcppkg.WithString("parent_id",
 					mcppkg.Description("Parent event id — unset appends to the current leaf.")),
 				mcppkg.WithObject("event", mcppkg.Required(),
@@ -110,17 +101,30 @@ func tools() []toolSpec {
 			Path: "/v1/record",
 		},
 		{
-			Tool: mcppkg.NewTool("branch",
+			Tool: mcppkg.NewTool("recall",
 				mcppkg.WithDescription(
-					"Fork a new child event from an existing parent. Like record() "+
-						"but parent_id is required."),
-				mcppkg.WithString("session_id", mcppkg.Required()),
+					"Hybrid query across working (sietch) + episodic + semantic; "+
+						"returns score-ranked hits with tier attribution."),
 				mcppkg.WithString("user_id",
 					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
-				mcppkg.WithString("parent_id", mcppkg.Required()),
-				mcppkg.WithObject("event", mcppkg.Required()),
+				mcppkg.WithString("workspace",
+					mcppkg.Description("Workspace id (uuid). Required.")),
+				mcppkg.WithString("session_id",
+					mcppkg.Description("Optional. Scopes the working-tier (sietch) hits.")),
+				mcppkg.WithString("query_text"),
+				mcppkg.WithNumber("limit",
+					mcppkg.Description("Max merged hits (default 10)."),
+					mcppkg.DefaultNumber(10),
+				),
+				mcppkg.WithBoolean("include_shared",
+					mcppkg.Description("Include events shared with the caller (episodic tier)."),
+					mcppkg.DefaultBool(true),
+				),
+				mcppkg.WithBoolean("include_sietch"),
+				mcppkg.WithBoolean("include_episode"),
+				mcppkg.WithBoolean("include_semant"),
 			),
-			Path: "/v1/branch",
+			Path: "/v1/recall",
 		},
 		{
 			Tool: mcppkg.NewTool("bookmark",
@@ -140,31 +144,6 @@ func tools() []toolSpec {
 			Path: "/v1/navigate",
 		},
 		{
-			Tool: mcppkg.NewTool("recall",
-				mcppkg.WithDescription(
-					"Hybrid query across working (sietch) + episodic + semantic; "+
-						"returns score-ranked hits with tier attribution."),
-				mcppkg.WithString("session_id"),
-				mcppkg.WithString("user_id",
-					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
-				mcppkg.WithString("workspace",
-					mcppkg.Description("Semantic-tier workspace id. Required for semantic hits.")),
-				mcppkg.WithString("query_text"),
-				mcppkg.WithNumber("limit",
-					mcppkg.Description("Max merged hits (default 10)."),
-					mcppkg.DefaultNumber(10),
-				),
-				mcppkg.WithBoolean("include_shared",
-					mcppkg.Description("Include events shared with the caller (episodic tier)."),
-					mcppkg.DefaultBool(true),
-				),
-				mcppkg.WithBoolean("include_sietch"),
-				mcppkg.WithBoolean("include_episode"),
-				mcppkg.WithBoolean("include_semant"),
-			),
-			Path: "/v1/recall",
-		},
-		{
 			Tool: mcppkg.NewTool("forget",
 				mcppkg.WithDescription(
 					"Soft-delete events. Flips text to '[forgotten]' and nulls "+
@@ -176,44 +155,6 @@ func tools() []toolSpec {
 					mcppkg.Items(map[string]any{"type": "string"})),
 			),
 			Path: "/v1/forget",
-		},
-		{
-			Tool: mcppkg.NewTool("expand_session_workspace",
-				mcppkg.WithDescription(
-					"Tag an existing session into an additional workspace. "+
-						"Use when the conversation has drifted into a topic "+
-						"outside the session's primary workspace, so future "+
-						"recalls scoped to that workspace can find this session."),
-				mcppkg.WithString("session_id", mcppkg.Required()),
-				mcppkg.WithString("workspace_id", mcppkg.Required()),
-				mcppkg.WithString("user_id",
-					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
-			),
-			Path: "/v1/session_workspace",
-		},
-		{
-			Tool: mcppkg.NewTool("share",
-				mcppkg.WithDescription("Grant team or user visibility to a session / branch / event."),
-				mcppkg.WithString("user_id",
-					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
-				mcppkg.WithString("target", mcppkg.Required(),
-					mcppkg.Enum("team", "user")),
-				mcppkg.WithString("target_id",
-					mcppkg.Description("Required when target='user'.")),
-				mcppkg.WithString("scope_type", mcppkg.Required(),
-					mcppkg.Enum("session", "branch", "event")),
-				mcppkg.WithString("scope_id", mcppkg.Required()),
-			),
-			Path: "/v1/share",
-		},
-		{
-			Tool: mcppkg.NewTool("consolidate",
-				mcppkg.WithDescription(
-					"Force-run Pipeline A for the given session: flushes all "+
-						"events past the watermark to episodic."),
-				mcppkg.WithString("session_id", mcppkg.Required()),
-			),
-			Path: "/v1/consolidate",
 		},
 	}
 }

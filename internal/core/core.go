@@ -128,6 +128,46 @@ func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session,
 	return s, nil
 }
 
+// resolveImplicitSession picks (or provisions) a session when Record is
+// called without an explicit SessionID. Rule: reuse the most-recent
+// un-ended session for (UserID, WorkspaceForCwd(*Cwd)); else create
+// one via SessionStart. Cwd is required — without it there's no
+// workspace anchor, and we fail closed with ErrMissingWorkspaceOrCwd
+// (a validation error → boundary returns 400).
+func (c *Core) resolveImplicitSession(ctx context.Context, in RecordInput) (string, error) {
+	if in.Cwd == nil || *in.Cwd == "" {
+		return "", ErrMissingWorkspaceOrCwd
+	}
+	workspaceID := WorkspaceForCwd(*in.Cwd).String()
+
+	sessions, err := c.Sietch.ListSessions(ctx, in.UserID)
+	if err != nil {
+		return "", fmt.Errorf("list sessions (user=%q): %w", in.UserID, err)
+	}
+	var best *Session
+	for i := range sessions {
+		s := &sessions[i]
+		if s.WorkspaceID != workspaceID || s.EndedAt != nil {
+			continue
+		}
+		if best == nil || s.StartedAt.After(best.StartedAt) {
+			best = s
+		}
+	}
+	if best != nil {
+		return best.ID, nil
+	}
+
+	sess, err := c.SessionStart(ctx, SessionStartInput{
+		UserID: in.UserID,
+		Cwd:    in.Cwd,
+	})
+	if err != nil {
+		return "", fmt.Errorf("auto session_start: %w", err)
+	}
+	return sess.ID, nil
+}
+
 // SessionEnd finalizes the session — flushes any remaining events to
 // chapterhouse and closes the sietch handle. Pipeline A's continuous
 // tick (Phase 5) supersedes most of this; SessionEnd is the explicit
@@ -162,12 +202,24 @@ func (c *Core) ListSessions(ctx context.Context, userID string) ([]Session, erro
 
 // Record appends an event to the current session. The embedding is
 // computed when absent.
+//
+// When SessionID is empty, Record falls back to cwd-derived session
+// resolution (resolveImplicitSession): reuse the most-recent open
+// session for (UserID, WorkspaceForCwd(*Cwd)), else provision one
+// inline. This is the affordance for MCP hosts (Claude Code, Codex,
+// Cursor) where the protocol has no conversation-start hook, so the
+// model would otherwise have to remember to call session_start
+// itself — which it usually doesn't.
 func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
-	if in.SessionID == "" {
-		return Event{}, ErrMissingSessionID
-	}
 	if in.UserID == "" {
 		return Event{}, ErrMissingUserID
+	}
+	if in.SessionID == "" {
+		sid, err := c.resolveImplicitSession(ctx, in)
+		if err != nil {
+			return Event{}, err
+		}
+		in.SessionID = sid
 	}
 
 	ev := in.Event

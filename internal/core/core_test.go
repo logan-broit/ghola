@@ -389,6 +389,130 @@ func TestRecord_EmbedsTextAndPersists(t *testing.T) {
 	assert.Equal(t, ev.ID, s.current["sess"])
 }
 
+// TestRecord_AutoCreatesSessionFromCwd: when a caller omits session_id
+// but supplies cwd, Record provisions a session inline (workspace
+// derived from cwd) and tags the event with the new session's ID.
+// This is the "agent forgot to call session_start" affordance — every
+// MCP host hits this because the protocol has no conversation-start
+// hook.
+func TestRecord_AutoCreatesSessionFromCwd(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1",
+		Cwd:    &cwd,
+		Event:  core.Event{Type: "user", Text: strPtr("hello")},
+	})
+	require.NoError(t, err)
+	require.Len(t, s.opened, 1, "auto-created exactly one session")
+	assert.Equal(t, s.opened[0].ID, ev.SessionID,
+		"event tagged with auto-created session id")
+	assert.Equal(t, core.WorkspaceForCwd(cwd).String(), s.opened[0].WorkspaceID,
+		"workspace derived from cwd")
+}
+
+// TestRecord_ReusesExistingOpenSessionForSameCwd: a subsequent record
+// for the same user+workspace must reuse the live session rather than
+// fragmenting the conversation across one-event-per-session shards.
+// Reuse rule: most-recent un-ended session whose workspace_id matches
+// uuid5(NS_workspace, cwd).
+func TestRecord_ReusesExistingOpenSessionForSameCwd(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	s.sessions = []core.Session{{
+		ID:          "sess-existing",
+		UserID:      "u1",
+		WorkspaceID: core.WorkspaceForCwd(cwd).String(),
+		StartedAt:   time.Unix(1_699_999_000, 0).UTC(),
+		// EndedAt nil -> still open
+	}}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1",
+		Cwd:    &cwd,
+		Event:  core.Event{Type: "user", Text: strPtr("turn 2")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "sess-existing", ev.SessionID, "reused existing open session")
+	assert.Empty(t, s.opened, "no new session created")
+}
+
+// TestRecord_PicksMostRecentOpenSession: when two open sessions exist
+// for the same user+workspace, the newer one wins. Older orphans get
+// left alone (caller closes them explicitly via session_end).
+func TestRecord_PicksMostRecentOpenSession(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	ws := core.WorkspaceForCwd(cwd).String()
+	s.sessions = []core.Session{
+		{ID: "older", UserID: "u1", WorkspaceID: ws,
+			StartedAt: time.Unix(1_699_000_000, 0).UTC()},
+		{ID: "newer", UserID: "u1", WorkspaceID: ws,
+			StartedAt: time.Unix(1_700_000_000, 0).UTC()},
+	}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("x")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "newer", ev.SessionID)
+}
+
+// TestRecord_IgnoresEndedSessionsAndCreatesNew: an ended session for
+// the same user+workspace is not eligible for reuse. New record gets
+// a fresh session.
+func TestRecord_IgnoresEndedSessionsAndCreatesNew(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	ws := core.WorkspaceForCwd(cwd).String()
+	endedAt := time.Unix(1_699_999_999, 0).UTC()
+	s.sessions = []core.Session{{
+		ID: "closed", UserID: "u1", WorkspaceID: ws,
+		StartedAt: time.Unix(1_699_999_000, 0).UTC(), EndedAt: &endedAt,
+	}}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("hi")},
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, "closed", ev.SessionID, "must not reuse an ended session")
+	require.Len(t, s.opened, 1, "must auto-create a new session")
+}
+
+// TestRecord_NoSessionNoCwdReturnsValidation: without session_id AND
+// without cwd, Record can't derive a workspace and must surface a
+// validation error so the boundary returns 400 instead of leaking
+// an internal "session required" 500.
+func TestRecord_NoSessionNoCwdReturnsValidation(t *testing.T) {
+	c, _, _, _ := newCore()
+	_, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1",
+		Event:  core.Event{Type: "user", Text: strPtr("hi")},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+}
+
+// TestRecord_ExplicitSessionIDWinsOverCwd: when both are supplied,
+// session_id is honored verbatim. cwd is decorative in that case —
+// no workspace re-derivation, no session lookup, no implicit creation.
+func TestRecord_ExplicitSessionIDWinsOverCwd(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		SessionID: "explicit",
+		UserID:    "u1",
+		Cwd:       &cwd,
+		Event:     core.Event{Type: "user", Text: strPtr("hi")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "explicit", ev.SessionID)
+	assert.Empty(t, s.opened, "no implicit session creation when SessionID is set")
+}
+
 func TestBranch_RequiresParent(t *testing.T) {
 	c, _, _, _ := newCore()
 	_, err := c.Branch(context.Background(), core.RecordInput{
