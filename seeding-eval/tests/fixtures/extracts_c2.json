@@ -1,0 +1,76 @@
+{
+  "issues": [
+    {
+      "id": 1100,
+      "number": 100,
+      "title": "App Router prefetch race on hover",
+      "body": "Repro: hover a Link rapidly while navigating; the second prefetch races the first and yields a stale cache entry.",
+      "created_at": "2025-02-15T10:00:00Z",
+      "closed_at": "2025-02-22T11:00:00Z",
+      "user": "alice",
+      "assignees": []
+    },
+    {
+      "id": 1300,
+      "number": 300,
+      "title": "Stale issue auto-closed by bot",
+      "body": "Old issue, no repro provided.",
+      "created_at": "2024-01-15T08:00:00Z",
+      "closed_at": "2024-08-01T00:00:00Z",
+      "user": "eve",
+      "assignees": []
+    }
+  ],
+  "links": {
+    "100": {
+      "pr": 200,
+      "commits": ["abc123", "def456"],
+      "files": [
+        "packages/next/src/server/router.ts",
+        "packages/next/src/server/cache.ts",
+        "test/integration/prefetch/test.ts"
+      ]
+    },
+    "300": {
+      "pr": null,
+      "commits": [],
+      "files": []
+    }
+  },
+  "prs": {
+    "200": {
+      "id": 2200,
+      "number": 200,
+      "title": "Fix prefetch race",
+      "body": "Closes #100.",
+      "merged_at": "2025-02-22T10:55:00Z",
+      "user": "bob",
+      "reviewers": [],
+      "approvers": ["carol"],
+      "merge_commit_sha": "abc123"
+    }
+  },
+  "commits": {
+    "abc123": {
+      "sha": "abc123",
+      "message": "Fix prefetch race",
+      "author": "bob",
+      "committer": "bob",
+      "authored_at": "2025-02-22T10:00:00Z",
+      "files": [
+        "packages/next/src/server/router.ts",
+        "packages/next/src/server/cache.ts"
+      ]
+    },
+    "def456": {
+      "sha": "def456",
+      "message": "Add regression test",
+      "author": "bob",
+      "committer": "bob",
+      "authored_at": "2025-02-21T17:00:00Z",
+      "files": [
+        "test/integration/prefetch/test.ts"
+      ]
+    }
+  }
+}

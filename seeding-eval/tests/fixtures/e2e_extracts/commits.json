@@ -1,0 +1,54 @@
+{
+  "sha022a": {
+    "sha": "sha022a",
+    "message": "Coalesce in-flight hover prefetches",
+    "author": "bob",
+    "committer": "bob",
+    "authored_at": "2025-02-22T10:00:00Z",
+    "files": [
+      "packages/next/src/server/router.ts",
+      "packages/next/src/server/cache.ts"
+    ]
+  },
+  "sha022b": {
+    "sha": "sha022b",
+    "message": "Add regression test for prefetch race",
+    "author": "bob",
+    "committer": "bob",
+    "authored_at": "2025-02-21T17:00:00Z",
+    "files": [
+      "test/integration/prefetch/test.ts"
+    ]
+  },
+  "sha200a": {
+    "sha": "sha200a",
+    "message": "Clear useFormState dispatcher on route transition",
+    "author": "erin",
+    "committer": "erin",
+    "authored_at": "2025-04-18T08:30:00Z",
+    "files": [
+      "packages/next/src/client/components/use-form-state.ts",
+      "packages/next/src/client/components/router.ts"
+    ]
+  },
+  "sha029a": {
+    "sha": "sha029a",
+    "message": "Normalize manifest paths to posix in webpack config",
+    "author": "grace",
+    "committer": "grace",
+    "authored_at": "2024-03-25T15:00:00Z",
+    "files": [
+      "packages/next/src/build/webpack-config.ts"
+    ]
+  },
+  "sha029b": {
+    "sha": "sha029b",
+    "message": "Extract path normalization helper",
+    "author": "grace",
+    "committer": "grace",
+    "authored_at": "2024-03-24T11:30:00Z",
+    "files": [
+      "packages/next/src/build/utils.ts"
+    ]
+  }
+}

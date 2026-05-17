@@ -1,0 +1,25 @@
+# Multi-stage build for the chapterhouse api + init + worker binaries.
+# Build context is the ghola monorepo root so we can COPY the
+# _chapterhouse/ch-server subtree.
+FROM golang:1.25-alpine AS build
+
+WORKDIR /src
+RUN apk add --no-cache git
+
+# Copy the ch-server module and build all binaries.
+COPY _chapterhouse/ch-server/go.mod _chapterhouse/ch-server/go.sum ./
+RUN go mod download
+
+COPY _chapterhouse/ch-server/ ./
+RUN CGO_ENABLED=0 go build -o /out/ch-api    ./cmd/api \
+ && CGO_ENABLED=0 go build -o /out/ch-init   ./cmd/init \
+ && CGO_ENABLED=0 go build -o /out/ch-worker ./cmd/worker
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=build /out/ch-api    /usr/local/bin/ch-api
+COPY --from=build /out/ch-init   /usr/local/bin/ch-init
+COPY --from=build /out/ch-worker /usr/local/bin/ch-worker
+
+# api is the default; docker-compose overrides command: for init/worker.
+ENTRYPOINT ["/usr/local/bin/ch-api"]

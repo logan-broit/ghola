@@ -1,0 +1,28 @@
+# Homelab overrides for ch-web
+# Usage: helm upgrade --install ch-web ch-web/charts/ch-web -n ch-system -f deploy/homelab/ch-web-values.yaml
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: thinkwright/chapterhouse/ch-web
+  tag: latest
+  pullPolicy: Always
+
+env:
+  API_URL: "http://ch-server:8080"
+  PORT: "8080"
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 50m
+    memory: 32Mi
+
+autoscaling:
+  enabled: false

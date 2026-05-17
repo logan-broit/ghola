@@ -1,0 +1,56 @@
+# Homelab overrides for ch-server
+# Usage: helm upgrade --install ch-server ch-server/charts/ch-server -n ch-system -f deploy/homelab/ch-server-values.yaml
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: thinkwright/chapterhouse/ch-server
+  tag: latest
+  pullPolicy: Always
+
+# Homelab-sized resources
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+config:
+  environment: local
+  logLevel: debug
+
+database:
+  host: memory-db-rw.ch-system.svc
+  port: 5432
+  name: memories
+  maxConns: 10
+  minConns: 2
+  existingSecret: memory-db-credentials
+  usernameKey: username
+  passwordKey: password
+
+embedding:
+  provider: openai
+  url: "http://tei.ch-system.svc"
+  model: Alibaba-NLP/gte-modernbert-base
+  dimensions: 768
+  apiKey: "not-needed"
+
+auth:
+  provider: default
+  defaultUser: "00000000-0000-0000-0000-000000000001"
+
+admin:
+  enabled: true
+  existingSecret: ch-admin-bootstrap
+  usernameKey: ADMIN_USERNAME
+  passwordKey: ADMIN_PASSWORD
+
+autoscaling:
+  enabled: false

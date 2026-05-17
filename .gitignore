@@ -1,0 +1,65 @@
+/ghola
+/ghola-mcp
+/ghola-*.exe
+/.ghola/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+/node_modules/
+/dist/
+/.env
+/.env.local
+/coverage/
+/tmp/
+
+# Rust extension build artifacts
+/extension/target/
+bootstrap-data/
+
+# Git worktrees for feature branches
+/.worktrees/
+
+# Python virtualenvs and caches (mentat service)
+/mentat/.venv/
+/seeding-eval/.venv/
+/seeding-eval/results/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Plan / spec / status docs — process artifacts, not code artifacts.
+# Drift the moment execution diverges. Kept locally for active
+# reference but not tracked; commit messages and top-level READMEs
+# carry the durable record. Applies under every subproject's docs/
+# tree — move durable architecture docs into top-level Markdown
+# (README / RUNBOOK / SECURITY_STATEMENT) if they need to be tracked.
+# Recover historical plans from git history (last tracked at 985a04b
+# for /docs/plans/; later removals carry their own SHA).
+**/docs/plans/
+**/docs/status/
+**/docs/issues/
+**/docs/archive/
+**/docs/notes/
+**/docs/specs/
+
+# Simplex specs follow the same rule everywhere in the tree.
+*.simplex
+
+# Agent / tool session artifacts (Claude Code, Samsara, Plex worktrees).
+**/.claude/
+**/.samsara/
+**/.plex/
+
+# SQLite WAL/SHM sidecar files.
+*.db-shm
+*.db-wal
+
+# Dormant extension's loose design notes / reports. Whole docs tree
+# under extension/ is process-artifact; data fixtures under tests/
+# are tracked, but evaluation writeups inside snapshot folders are
+# notes, not fixtures.
+/extension/docs/
+/extension/ANALYSIS.md
+/extension/PLEXUS_REPORT.md
+**/snapshots/**/*.md

@@ -1,0 +1,710 @@
+openapi: 3.1.0
+
+info:
+  title: Chapterhouse Internal API
+  version: "1.0.0-draft"
+  description: |
+    Private HTTP surface consumed only by the ghola local service on
+    behalf of agents. Not an agent-facing protocol — agents talk to
+    ghola, ghola talks to this API.
+
+    Event shape follows the JSONL-native event-shape addendum (one row
+    per JSONL line; `raw_event` is authoritative, projections drive
+    indexing). Plan/spec docs live under `docs/plans/` (gitignored) on
+    contributor checkouts; commit messages carry the durable record.
+
+    Every recall path is workspace-scoped: requests must carry a
+    `workspace_id`, and `episodic.session_workspaces` (N:N) determines
+    which sessions each query sees. A session belongs to one workspace
+    at `session_start` (cwd-derived if not passed) and may be tagged
+    into additional workspaces via `/v1/episodic/session_workspace`.
+
+    All endpoints require `Authorization: Bearer <api-key>`.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://chapterhouse.example.com
+    description: Production
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: episodic
+    description: Raw per-user event store (chapterhouse's source-of-truth tier).
+  - name: semantic
+    description: Distilled, shared mnemes (pg_ghola v2 cognitive scoring).
+
+paths:
+
+  /v1/episodic/ingest:
+    post:
+      tags: [episodic]
+      summary: Batch-insert a session and its events
+      description: |
+        Idempotent upsert on `events.id` and `sessions.id`
+        (ON CONFLICT DO UPDATE). Pipeline A in the ghola local service
+        relies on this idempotency: if a batch fails midway the
+        watermark is not advanced, and the next tick will re-POST the
+        same events safely.
+
+        **Server-side embedding backstop.** When the chapterhouse
+        deployment has an embedder configured (`EMBEDDING_URL` set), the
+        handler fills in any event with a nil `embedding` AND non-nil
+        `text` from the configured embedder before persistence — one
+        batched call covers all missing-embedding events in the request.
+        This is defense in depth: callers SHOULD embed at the wire
+        boundary (gives them control over latency + batching), but
+        forgetting to do so will not silently produce NULL-embedding
+        rows that the dense-vector recall tier cannot find.
+
+        Behaviors:
+        - `embedding` supplied → never overwritten.
+        - `embedding=null` AND `text` non-empty → backstop fills it.
+        - `embedding=null` AND `text` null/empty (tool calls, system
+          events) → persist with NULL embedding.
+        - embedder unconfigured → NULL passes through (legacy path,
+          preserved for tests + lighter-client paths).
+        - embedder configured but errors → entire batch fails 500, no
+          partial commits with NULL embeddings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngestRequest"
+      responses:
+        "200":
+          description: Upsert complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "500":
+          description: |
+            Server-side embedding backstop failed (the configured
+            embedder errored). The entire batch is rolled back; no
+            events were persisted. Retry once the embedder is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/episodic/query:
+    post:
+      tags: [episodic]
+      summary: Multi-ranking fan-out over episodic events
+      description: |
+        Fans the requested subset of event-grain rankings inside
+        chapterhouse and returns one ranked sub-list per requested
+        tier. Required: `rankings`, a non-empty subset of
+        `{"vector","fts","session_vector"}` — an absent or empty list
+        is rejected with 400.
+
+        Each tier maps to a single repo call:
+          - `vector`         → pure-cosine ranking on the per-event
+                                dense embedding (`embedding`).
+          - `fts`            → Postgres FTS (`ts_rank_cd`) over the
+                                `events.search_vector` projection of
+                                `text`. Catches literal phrase /
+                                proper-noun / code-identifier hits the
+                                dense path smooths over.
+          - `session_vector` → cosine over `episodic.sessions.l1_embedding`,
+                                the per-session pooled vector mentat
+                                populates at session-close. Catches
+                                paraphrase-style queries the per-event
+                                vector misses; hits' `session_id` is
+                                what client-side dedup-by-key collapses
+                                with per-event hits from the same
+                                session.
+
+        ACL: every tier respects per-user ownership and the
+        workspace-scoped `session_workspaces` filter. A future
+        `primitives` ranking lands in D1 behind a flag.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EpisodicMultiRankingRequest"
+      responses:
+        "200":
+          description: Per-tier ranked results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EpisodicMultiRankingResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/episodic/share:
+    post:
+      tags: [episodic]
+      summary: Grant another user or the team access to a scope
+      description: |
+        `scope_type` = session | branch | event. Session share exposes
+        all events with that `session_id`. Branch share exposes the
+        subtree rooted at `scope_id`. Event share exposes one row.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareRequest"
+      responses:
+        "200":
+          description: Share created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller does not own the referenced scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/episodic/forget:
+    post:
+      tags: [episodic]
+      summary: Soft-delete events by id
+      description: |
+        Replaces `text` with `"[forgotten]"` and nullifies `embedding`
+        so the tree structure stays intact (children keep their
+        `parent_id`) but the event is no longer retrievable via query.
+        Hard-delete is a separate admin-only endpoint, out of scope
+        for v1a.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgetRequest"
+      responses:
+        "200":
+          description: Forgotten
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgetResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/episodic/session_workspace:
+    post:
+      tags: [episodic]
+      summary: Tag an existing session into an additional workspace
+      description: |
+        The Hybrid-1 expand-on-demand path. When a conversation drifts
+        into a topic outside its primary workspace, this endpoint adds
+        another `(session_id, workspace_id)` row so future workspace-
+        scoped recalls find the session under the new workspace too.
+
+        Idempotent — `ON CONFLICT DO NOTHING`. The response's `added`
+        field tells the caller whether a new row was written
+        (`true`) or the pair already existed (`false`).
+
+        Pre-condition: the session must already exist in
+        `episodic.sessions` (i.e. consolidate has fired at least once).
+        FK-guarded preconditions surface as `409 CONFLICT` with the
+        message body literally "session not yet persisted; consolidate
+        first" — agents can read it and know what to do.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddSessionWorkspaceRequest"
+      responses:
+        "200":
+          description: Tag added (or already present)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddSessionWorkspaceResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/semantic/query:
+    post:
+      tags: [semantic]
+      summary: Query distilled semantic mnemes with cognitive scoring
+      description: |
+        Wraps the `semantic.recall(...)` SQL function from the ghola
+        extension. Hybrid vector+FTS candidate pool, ACT-R + Hebbian
+        scoring, Bayesian confidence weighting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SemanticQueryRequest"
+      responses:
+        "200":
+          description: Ranked mnemes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SemanticQueryResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/semantic/feedback:
+    post:
+      tags: [semantic]
+      summary: Apply Bayesian evidence to a mneme's confidence
+      description: |
+        Evidence in [0, 1]. Calls `semantic.update_confidence(id,
+        evidence)` and returns the new posterior (clamped to the
+        Laplace floor 0.025).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Mneme not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/semantic/list:
+    post:
+      tags: [semantic]
+      summary: Paginated listing of semantic mnemes with filters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SemanticListRequest"
+      responses:
+        "200":
+          description: Page of mnemes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SemanticListResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: api-key
+
+  responses:
+    BadRequest:
+      description: Malformed request body
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: Batch exceeds per-request limits
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Caller does not own the referenced resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: |
+        Precondition failed. For
+        `/v1/episodic/session_workspace`, this means the session
+        doesn't exist in `episodic.sessions` yet — the FK can't be
+        satisfied. The agent should call `/v1/episodic/ingest` (or
+        equivalently `consolidate` on the ghola side) first.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:    { type: string, example: "invalid_request" }
+        message: { type: string }
+
+    Uuid:
+      type: string
+      format: uuid
+      example: "69e56182-0000-0000-0000-000000000001"
+
+    Embedding:
+      type: array
+      description: |
+        Pre-computed embedding vector; dimension must match the
+        deployment's EMBEDDING_DIM.
+
+        Optional on ingest. If omitted AND the chapterhouse server is
+        configured with an embedder (`EMBEDDING_URL` set), the server
+        fills it in server-side from the event's `text` before
+        persistence (defense-in-depth backstop — see
+        `/v1/episodic/ingest`). If omitted AND the server has no
+        embedder configured, the row is inserted with NULL embedding
+        and will not be returned by vector search until embedded later.
+
+        Callers that want to control embedding latency or batch their
+        guild calls SHOULD supply embeddings explicitly. The server-
+        side backstop is defense in depth, not the primary path.
+      items: { type: number }
+      minItems: 1
+
+    Jsonb:
+      description: Arbitrary JSON value stored as jsonb.
+      nullable: true
+
+    Session:
+      type: object
+      required: [id, user_id, started_at, workspace_id]
+      properties:
+        id:             { $ref: "#/components/schemas/Uuid" }
+        user_id:        { $ref: "#/components/schemas/Uuid" }
+        workspace_id:
+          allOf: [{ $ref: "#/components/schemas/Uuid" }]
+          description: |
+            Required at ingest. The chapterhouse Ingest handler writes
+            an `episodic.session_workspaces (session_id, workspace_id)`
+            row in the same transaction as the `episodic.sessions`
+            upsert, so the session is recall-visible from this workspace
+            immediately on first consolidate.
+        started_at:     { type: string, format: date-time }
+        ended_at:       { type: string, format: date-time, nullable: true }
+        event_count:    { type: integer, minimum: 0 }
+        summary:        { type: string, nullable: true }
+        cwd:            { type: string, nullable: true }
+        git_branch:     { type: string, nullable: true }
+        agent_kind:     { type: string, nullable: true, description: "claude-code, pi-mono, etc." }
+        source_device:  { type: string, nullable: true }
+
+    Event:
+      type: object
+      required: [id, session_id, user_id, type, raw_event, created_at]
+      properties:
+        id:             { $ref: "#/components/schemas/Uuid" }
+        parent_id:      { oneOf: [{ $ref: "#/components/schemas/Uuid" }], nullable: true }
+        session_id:     { $ref: "#/components/schemas/Uuid" }
+        user_id:        { $ref: "#/components/schemas/Uuid" }
+        request_id:     { type: string, nullable: true, description: "Groups events of one API response into a 'turn' at query time." }
+        type:
+          type: string
+          enum: [user, assistant, tool_result, system]
+        role:           { type: string, nullable: true }
+        text:           { type: string, nullable: true, description: "Deterministic projection per the event-shape addendum; FTS + embedding target." }
+        tool_name:      { type: string, nullable: true }
+        tool_use_id:    { type: string, nullable: true }
+        tool_input:     { $ref: "#/components/schemas/Jsonb" }
+        tool_output:    { $ref: "#/components/schemas/Jsonb" }
+        bookmark_label: { type: string, nullable: true }
+        cwd:            { type: string, nullable: true }
+        git_branch:     { type: string, nullable: true }
+        agent_id:       { type: string, nullable: true }
+        is_sidechain:   { type: boolean, default: false }
+        model:          { type: string, nullable: true }
+        raw_event:      { $ref: "#/components/schemas/Jsonb" }
+        embedding:
+          oneOf: [{ $ref: "#/components/schemas/Embedding" }]
+          nullable: true
+          description: |
+            Optional. When omitted with a non-empty `text`, the server
+            fills it in via the configured embedder if one is wired
+            (see `/v1/episodic/ingest`). Events without text bodies
+            (tool calls, system events) persist with NULL embedding.
+        entities:       { type: array, items: { type: string } }
+        tags:           { type: array, items: { type: string } }
+        source_device:  { type: string, nullable: true }
+        created_at:     { type: string, format: date-time }
+
+    IngestRequest:
+      type: object
+      required: [session, events]
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+          maxItems: 1000
+
+    IngestResponse:
+      type: object
+      required: [session_id, inserted, updated]
+      properties:
+        session_id: { $ref: "#/components/schemas/Uuid" }
+        inserted:   { type: integer, description: "events that were new" }
+        updated:    { type: integer, description: "events that already existed and were updated in place" }
+
+    EpisodicMultiRankingRequest:
+      type: object
+      required: [user_id, workspace_id, rankings]
+      properties:
+        user_id:         { $ref: "#/components/schemas/Uuid" }
+        workspace_id:
+          allOf: [{ $ref: "#/components/schemas/Uuid" }]
+          description: |
+            Required. The query's candidate pool is restricted to
+            sessions that have a row in
+            `episodic.session_workspaces` for this workspace_id.
+        query_text:      { type: string, description: "Required when `rankings` includes `fts`." }
+        query_embedding:
+          oneOf: [{ $ref: "#/components/schemas/Embedding" }]
+          description: "Required when `rankings` includes `vector` or `session_vector`."
+        limit:           { type: integer, default: 10, minimum: 1, maximum: 200 }
+        include_shared:  { type: boolean, default: true }
+        rankings:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [vector, fts, session_vector]
+          description: |
+            Required. Names the per-tier subset to fan out across.
+            An absent or empty list is rejected with 400. Future
+            additions land here behind explicit feature flags
+            (e.g. `primitives` in D1).
+        tags_any:
+          type: array
+          items: { type: string }
+          description: |
+            Optional. Overlap-style tag filter (`tags && $`). Forwarded
+            by the server to every event-grain tier (`vector`, `fts`);
+            `session_vector` ignores it (different grain). Empty/absent
+            → no filter applied.
+
+    ScoreBreakdown:
+      type: object
+      properties:
+        semantic: { type: number, description: "Raw cosine score on dense tiers; zero on FTS-only tiers." }
+        fts:      { type: number, description: "Raw `ts_rank_cd` on FTS tiers; zero on dense-only tiers." }
+        merged:   { type: number, description: "Tier's single sort key — matches semantic on dense tiers, fts on keyword." }
+
+    EpisodicMultiRankingHit:
+      type: object
+      properties:
+        event_id:
+          oneOf: [{ $ref: "#/components/schemas/Uuid" }]
+          description: "Set on event-grain hits (`vector`, `fts`); absent on `session_vector` (the unit is the session)."
+        session_id:   { oneOf: [{ $ref: "#/components/schemas/Uuid" }], description: "Set on `session_vector` hits and on event-grain hits to enable client-side dedup-by-session." }
+        tier:
+          type: string
+          enum: [vector, fts, session_vector]
+        score:           { $ref: "#/components/schemas/ScoreBreakdown" }
+        text:            { type: string, description: "Per-event text on event-grain tiers; absent on `session_vector`." }
+        session_chunk_text: { type: string, description: "Role-prefixed full session text from `episodic.sessions.l1_chunk_text` for cross-encoder rerank." }
+
+    EpisodicMultiRankingResponse:
+      type: object
+      properties:
+        vector:
+          type: array
+          items: { $ref: "#/components/schemas/EpisodicMultiRankingHit" }
+          description: "Present (possibly empty `[]`) iff `vector` was in the request's `rankings`."
+        fts:
+          type: array
+          items: { $ref: "#/components/schemas/EpisodicMultiRankingHit" }
+          description: "Present (possibly empty `[]`) iff `fts` was in the request's `rankings`."
+        session_vector:
+          type: array
+          items: { $ref: "#/components/schemas/EpisodicMultiRankingHit" }
+          description: "Present (possibly empty `[]`) iff `session_vector` was in the request's `rankings`."
+
+    AddSessionWorkspaceRequest:
+      type: object
+      required: [user_id, session_id, workspace_id]
+      properties:
+        user_id:      { $ref: "#/components/schemas/Uuid" }
+        session_id:
+          allOf: [{ $ref: "#/components/schemas/Uuid" }]
+          description: |
+            Required. Must reference an existing row in
+            `episodic.sessions`; pre-consolidate sessions cause a 409.
+        workspace_id: { $ref: "#/components/schemas/Uuid" }
+
+    AddSessionWorkspaceResponse:
+      type: object
+      required: [added]
+      properties:
+        added:
+          type: boolean
+          description: |
+            `true` if a new `session_workspaces` row was inserted.
+            `false` if an identical row already existed (idempotent
+            no-op via `ON CONFLICT DO NOTHING`).
+
+    ShareRequest:
+      type: object
+      required: [owner_user_id, target, scope_type, scope_id]
+      properties:
+        owner_user_id: { $ref: "#/components/schemas/Uuid" }
+        target:
+          type: string
+          enum: [team, user]
+        target_id:     { oneOf: [{ $ref: "#/components/schemas/Uuid" }], nullable: true, description: "Required when target = user; ignored when target = team." }
+        scope_type:
+          type: string
+          enum: [session, branch, event]
+        scope_id:      { $ref: "#/components/schemas/Uuid" }
+
+    ShareResponse:
+      type: object
+      required: [id]
+      properties:
+        id: { $ref: "#/components/schemas/Uuid" }
+
+    ForgetRequest:
+      type: object
+      required: [user_id, event_ids]
+      properties:
+        user_id:   { $ref: "#/components/schemas/Uuid" }
+        event_ids:
+          type: array
+          items: { $ref: "#/components/schemas/Uuid" }
+          minItems: 1
+          maxItems: 1000
+
+    ForgetResponse:
+      type: object
+      required: [forgotten]
+      properties:
+        forgotten: { type: integer }
+
+    Mneme:
+      type: object
+      required: [id, workspace_id, concept, content, confidence, state, memory_type, created_at, last_access]
+      properties:
+        id:                   { $ref: "#/components/schemas/Uuid" }
+        workspace_id:         { $ref: "#/components/schemas/Uuid" }
+        concept:              { type: string }
+        content:              { type: string }
+        confidence:           { type: number }
+        access_count:         { type: integer }
+        last_access:          { type: string, format: date-time }
+        created_at:           { type: string, format: date-time }
+        state:
+          type: string
+          enum: [active, archived]
+        memory_type:
+          type: string
+          enum: [factual, experiential, procedural]
+        tags:                 { type: array, items: { type: string } }
+        entities:             { type: array, items: { type: string } }
+        source_episodic_ids:  { type: array, items: { $ref: "#/components/schemas/Uuid" } }
+        contributor_user_ids: { type: array, items: { $ref: "#/components/schemas/Uuid" } }
+
+    MnemeHit:
+      type: object
+      required: [mneme_id, score, content_match, activation, hebbian_boost, confidence, concept, content]
+      properties:
+        mneme_id:       { $ref: "#/components/schemas/Uuid" }
+        score:          { type: number }
+        content_match:  { type: number }
+        activation:     { type: number }
+        hebbian_boost:  { type: number }
+        confidence:     { type: number }
+        concept:        { type: string }
+        content:        { type: string }
+        tier:
+          type: string
+          const: semantic
+
+    SemanticQueryRequest:
+      type: object
+      required: [workspace_id, query_text, query_embedding]
+      properties:
+        workspace_id:    { $ref: "#/components/schemas/Uuid" }
+        query_text:      { type: string }
+        query_embedding: { $ref: "#/components/schemas/Embedding" }
+        limit:           { type: integer, default: 10, minimum: 1, maximum: 200 }
+        min_confidence:  { type: number, default: 0.0 }
+        memory_type:
+          type: string
+          enum: [factual, experiential, procedural]
+          nullable: true
+        tags:            { type: array, items: { type: string } }
+        filter_entities: { type: array, items: { type: string } }
+
+    SemanticQueryResponse:
+      type: object
+      required: [hits]
+      properties:
+        hits:
+          type: array
+          items: { $ref: "#/components/schemas/MnemeHit" }
+
+    FeedbackRequest:
+      type: object
+      required: [mneme_id, evidence]
+      properties:
+        mneme_id: { $ref: "#/components/schemas/Uuid" }
+        evidence:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    FeedbackResponse:
+      type: object
+      required: [mneme_id, confidence]
+      properties:
+        mneme_id:    { $ref: "#/components/schemas/Uuid" }
+        confidence:  { type: number, description: "Clamped posterior in [0.025, 0.975]." }
+
+    SemanticListFilters:
+      type: object
+      properties:
+        memory_type:
+          type: string
+          enum: [factual, experiential, procedural]
+          nullable: true
+        state:
+          type: string
+          enum: [active, archived]
+          nullable: true
+        tags:     { type: array, items: { type: string } }
+        entities: { type: array, items: { type: string } }
+
+    SemanticListRequest:
+      type: object
+      required: [workspace_id]
+      properties:
+        workspace_id: { $ref: "#/components/schemas/Uuid" }
+        limit:        { type: integer, default: 50, minimum: 1, maximum: 500 }
+        cursor:       { type: string, nullable: true, description: "Opaque pagination cursor from a previous response." }
+        filters:      { $ref: "#/components/schemas/SemanticListFilters" }
+
+    SemanticListResponse:
+      type: object
+      required: [mnemes]
+      properties:
+        mnemes:
+          type: array
+          items: { $ref: "#/components/schemas/Mneme" }
+        next_cursor:
+          type: string
+          nullable: true

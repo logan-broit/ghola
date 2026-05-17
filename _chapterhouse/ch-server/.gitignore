@@ -1,0 +1,8 @@
+# Server binary
+/ch-server
+
+# Worker binary (cmd/worker)
+/worker
+
+# Dependencies vendored from web (if any)
+web/

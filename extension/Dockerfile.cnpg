@@ -1,0 +1,67 @@
+# Build the ghola Postgres extension for CNPG PG18
+# Single-base: use CNPG image for BOTH build and runtime to guarantee ABI compatibility.
+# Build tools installed temporarily, then copied forward only via the runtime stage.
+
+# --- Stage 1: Build (on the CNPG base itself) ---
+FROM ghcr.io/cloudnative-pg/postgresql:18 AS builder
+
+USER root
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    pkg-config \
+    libssl-dev \
+    libclang-dev \
+    clang \
+    gnupg \
+    postgresql-server-dev-18 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install cargo-pgrx (keep in lockstep with Cargo.toml's pgrx pin).
+RUN cargo install cargo-pgrx@0.18.0
+
+# Init pgrx with CNPG's PG18
+RUN cargo pgrx init --pg18=/usr/bin/pg_config
+
+# Build pgvector
+RUN cd /tmp && git clone https://github.com/pgvector/pgvector.git && \
+    cd pgvector && make PG_CONFIG=/usr/bin/pg_config OPTFLAGS="-march=x86-64-v2" && \
+    make PG_CONFIG=/usr/bin/pg_config install
+
+# Copy ghola source
+WORKDIR /build/ghola
+COPY Cargo.toml Cargo.lock ghola.control ./
+COPY src/ src/
+COPY .cargo/ .cargo/
+
+# Build and install
+RUN cargo pgrx install --pg-config /usr/bin/pg_config --release
+
+# --- Stage 2: Clean runtime (same base, no build tools) ---
+FROM ghcr.io/cloudnative-pg/postgresql:18
+
+USER root
+
+# Copy pgvector from builder
+COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /usr/lib/postgresql/18/lib/
+COPY --from=builder /usr/share/postgresql/18/extension/vector* /usr/share/postgresql/18/extension/
+
+# Copy ghola from builder
+COPY --from=builder /usr/lib/postgresql/18/lib/ghola.so /usr/lib/postgresql/18/lib/
+COPY --from=builder /usr/share/postgresql/18/extension/ghola* /usr/share/postgresql/18/extension/
+
+# Production cluster still names the extension pg_recall (legacy). Symlink
+# the .so and all accompanying extension files so CREATE EXTENSION pg_recall
+# continues to work without touching the ArgoCD manifests.
+RUN ln -sf /usr/lib/postgresql/18/lib/ghola.so /usr/lib/postgresql/18/lib/pg_recall.so && \
+    for f in /usr/share/postgresql/18/extension/ghola*; do \
+      ln -sf "$f" "$(echo $f | sed 's/ghola/pg_recall/g')"; \
+    done
+
+USER 26

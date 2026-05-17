@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audit Log - Chapterhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/admin.css">
+    <script>window.CH_API_BASE = ''; window.CH_MOCK_MODE = false;</script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-logo">Chapterhouse</div>
+            <div class="sidebar-subtitle">Agentic Memory</div>
+            <nav>
+                <div class="nav-section">
+                    <div class="nav-section-title">Overview</div>
+                    <a class="nav-item" href="admin.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Dashboard</a>
+                </div>
+                <div class="nav-section" data-admin-only>
+                    <div class="nav-section-title">Admin</div>
+                    <a class="nav-item" href="users.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>Users</a>
+                    <a class="nav-item" href="keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API Keys</a>
+                    <a class="nav-item" href="audit.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Audit Log</a>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">Personal</div>
+                    <a class="nav-item" href="my-keys.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>My API Keys</a>
+                    <a class="nav-item" href="my-activity.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>My Activity</a>
+                    <a class="nav-item" href="settings.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</a>
+                </div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="user-avatar">--</div>
+                    <div class="user-details"><div class="user-name" id="user-name">Loading...</div><div class="user-role" id="user-role">-</div></div>
+                </div>
+                <button class="btn btn-secondary" style="width:100%;margin-top:12px" onclick="logout()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>Sign Out</button>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <div class="page-header">
+                <div class="page-header-content">
+                    <h1 class="page-title">Audit Log</h1>
+                    <p class="page-subtitle">System activity and security events</p>
+                </div>
+                <div class="page-actions">
+                    <button class="btn btn-secondary" onclick="exportCSV()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        Export CSV
+                    </button>
+                    <button class="btn btn-secondary" onclick="loadAudit()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                        Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div class="search-bar">
+                <select class="form-select" id="action-filter" onchange="currentOffset=0;loadAudit()" style="max-width:220px">
+                    <option value="">All Actions</option>
+                    <optgroup label="Admin Actions">
+                        <option value="login">login</option>
+                        <option value="logout">logout</option>
+                        <option value="create">create</option>
+                        <option value="update">update</option>
+                        <option value="delete">delete</option>
+                        <option value="revoke">revoke</option>
+                        <option value="change_password">change_password</option>
+                    </optgroup>
+                    <optgroup label="MCP Tools">
+                        <option value="mcp.remember">mcp.remember</option>
+                        <option value="mcp.recall">mcp.recall</option>
+                        <option value="mcp.forget">mcp.forget</option>
+                        <option value="mcp.list_memories">mcp.list_memories</option>
+                        <option value="mcp.share_memory">mcp.share_memory</option>
+                        <option value="mcp.export_memories">mcp.export_memories</option>
+                    </optgroup>
+                </select>
+                <select class="form-select" id="resource-filter" onchange="currentOffset=0;loadAudit()" style="max-width:200px">
+                    <option value="">All Resources</option>
+                    <option value="user">user</option>
+                    <option value="api_key">api_key</option>
+                    <option value="session">session</option>
+                    <option value="memory">memory</option>
+                </select>
+            </div>
+
+            <div class="card">
+                <div id="audit-table"></div>
+                <div id="audit-pagination" style="padding:0 20px"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/ui.js"></script>
+    <script>
+        const ch = window.chapterhouse;
+        let currentOffset = 0;
+        let allEntries = [];
+        const LIMIT = 50;
+
+        async function loadAudit() {
+            const action = document.getElementById('action-filter').value;
+            const resourceType = document.getElementById('resource-filter').value;
+            try {
+                const params = { limit: LIMIT, offset: currentOffset };
+                if (action) params.action = action;
+                if (resourceType) params.resource_type = resourceType;
+                const result = await ch.adminAudit.list(params);
+                allEntries = result.entries || [];
+
+                renderTable('audit-table', [
+                    { label: 'Time', render: e => `<span class="text-muted" style="font-size:12px;white-space:nowrap" title="${ch.formatDate(e.created_at)}">${formatShortTime(e.created_at)}</span>` },
+                    { label: 'Actor', render: e => `<span class="text-cyan" style="font-size:13px">${e.actor_username || ch.truncateId(e.actor_id)}</span>` },
+                    { label: 'Action', render: e => actionBadge(e.action) },
+                    { label: 'Resource', render: e => `${resourceBadge(e.resource_type)}${e.target_username ? ` <span class="text-muted" style="font-size:12px">${e.target_username}</span>` : ''}` },
+                    { label: 'Details', render: e => renderDetails(e) },
+                    { label: 'Client', render: e => `<span class="text-muted" style="font-size:11px;white-space:nowrap">${parseClient(e.user_agent)}</span>` },
+                    { label: 'IP', render: e => `<span class="text-muted" style="font-size:12px">${e.ip_address || '-'}</span>` },
+                ], allEntries, { emptyTitle: 'No audit entries', emptyText: 'No audit log entries match your filters.' });
+
+                renderPagination('audit-pagination', result.total || allEntries.length, currentOffset, LIMIT, (offset) => {
+                    currentOffset = offset;
+                    loadAudit();
+                });
+            } catch (err) {
+                toast.error('Failed to load audit log');
+            }
+        }
+
+        function formatShortTime(dateStr) {
+            if (!dateStr) return '-';
+            const d = new Date(dateStr);
+            const pad = n => String(n).padStart(2, '0');
+            return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+
+        function renderDetails(entry) {
+            if (!entry.details) return '<span class="text-muted">-</span>';
+            const d = entry.details;
+            const parts = [];
+            // MCP tool-specific fields
+            if (d.query) parts.push(`query: "${truncate(d.query, 40)}"`);
+            if (d.fact_preview) parts.push(`"${truncate(d.fact_preview, 40)}"`);
+            if (d.memory_type) parts.push(d.memory_type);
+            if (d.mode) parts.push(d.mode);
+            if (d.fact_id) parts.push(`#${d.fact_id}`);
+            if (d.tags_count) parts.push(`${d.tags_count} tags`);
+            if (d.tags_filter) parts.push(`tags: ${d.tags_filter}`);
+            if (d.duration_ms !== undefined) parts.push(`${d.duration_ms}ms`);
+            if (d.is_error) parts.push('<span style="color:var(--accent-red)">error</span>');
+            if (parts.length === 0) {
+                const str = JSON.stringify(d);
+                if (str === '{}') return '<span class="text-muted">-</span>';
+                return `<span class="text-muted" style="font-size:11px" title="${escapeHtml(str)}">${truncate(str, 40)}</span>`;
+            }
+            return `<span class="text-muted" style="font-size:11px" title="${escapeHtml(JSON.stringify(d))}">${parts.join(' · ')}</span>`;
+        }
+
+        function truncate(str, max) {
+            return str.length > max ? str.slice(0, max - 1) + '…' : str;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function parseClient(ua) {
+            if (!ua) return '-';
+            // Claude Code: claude-code/2.1.42 (claude-vscode, agent-sdk/0.2.42)
+            const ccMatch = ua.match(/claude-code\/([\d.]+)\s*\(([^)]*)\)/);
+            if (ccMatch) {
+                const env = ccMatch[2].includes('vscode') ? 'VS Code' : ccMatch[2].includes('cli') ? 'CLI' : ccMatch[2].split(',')[0];
+                return `Claude Code ${ccMatch[1]} (${env})`;
+            }
+            if (ua.includes('claude-code')) return 'Claude Code';
+            if (ua.includes('ClaudeDesktop')) return 'Claude Desktop';
+            if (ua.includes('claude-ai/')) return ua.match(/claude-ai\/[\d.]+/)?.[0] || 'Claude';
+            // Browsers
+            if (ua.includes('Firefox/')) return 'Firefox';
+            if (ua.includes('Edg/')) return 'Edge';
+            if (ua.includes('Chrome/') && !ua.includes('Edg/')) return 'Chrome';
+            if (ua.includes('Safari/') && !ua.includes('Chrome/')) return 'Safari';
+            // Tools
+            if (ua.startsWith('curl/')) return ua;
+            if (ua.length > 30) return truncate(ua, 20);
+            return ua;
+        }
+
+        function exportCSV() {
+            if (!allEntries.length) { toast.error('No data to export'); return; }
+            const headers = ['Timestamp', 'Actor', 'Action', 'Resource Type', 'Resource ID', 'IP Address', 'Details'];
+            const rows = allEntries.map(e => [
+                e.created_at,
+                e.actor_username || e.actor_id || '',
+                e.action,
+                e.resource_type,
+                e.resource_id || '',
+                e.ip_address || '',
+                e.details ? JSON.stringify(e.details) : '',
+            ]);
+            const csv = [headers, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `ch-audit-${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+            toast.success('CSV exported');
+        }
+
+        loadAudit();
+    </script>
+</body>
+</html>

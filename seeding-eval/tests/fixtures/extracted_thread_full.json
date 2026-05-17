@@ -1,0 +1,57 @@
+{
+  "issue": {
+    "id": 1100,
+    "number": 100,
+    "title": "Hydration mismatch on dynamic import",
+    "body": "Repro: import a component with next/dynamic ssr:false and observe a React hydration warning on first render.",
+    "created_at": "2024-03-15T14:33:01Z",
+    "closed_at": "2024-03-22T08:11:44Z",
+    "user": "alice",
+    "assignees": ["bob"],
+    "top_comment": {
+      "body": "I can repro on 14.2 too. Bisected to a47 -- the client manifest cache lives across requests now.",
+      "user": "rauchg",
+      "created_at": "2024-03-16T10:00:00Z",
+      "plus_one_count": 12
+    }
+  },
+  "pr": {
+    "id": 2200,
+    "number": 200,
+    "title": "Fix hydration mismatch",
+    "body": "Closes #100. Stop reusing client manifest entries across requests.",
+    "merged_at": "2024-03-22T08:00:00Z",
+    "user": "bob",
+    "reviewers": [],
+    "approvers": ["carol", "dave"],
+    "merge_commit_sha": "abc123abc123"
+  },
+  "commits": [
+    {
+      "sha": "abc123abc123",
+      "message": "Fix hydration mismatch (#200)\n\nStop reusing client manifest entries across requests.",
+      "author": "bob",
+      "committer": "bob",
+      "authored_at": "2024-03-22T08:00:00Z",
+      "files": [
+        "packages/next/src/client/router.ts",
+        "packages/next/src/client/page.ts"
+      ]
+    },
+    {
+      "sha": "def456def456",
+      "message": "Add regression test",
+      "author": "bob",
+      "committer": "bob",
+      "authored_at": "2024-03-21T17:00:00Z",
+      "files": [
+        "test/integration/hydration/test.ts"
+      ]
+    }
+  ],
+  "files": [
+    "packages/next/src/client/router.ts",
+    "packages/next/src/client/page.ts",
+    "test/integration/hydration/test.ts"
+  ]
+}

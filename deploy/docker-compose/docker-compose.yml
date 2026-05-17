@@ -1,0 +1,261 @@
+# Local dev stack for the ghola tiered-memory system.
+#
+#   docker compose up -d                   # full stack (postgres, embedder,
+#                                            ch-init, chapterhouse)
+#   docker compose --profile all up -d     # also start the ghola daemon
+#   docker compose --profile stub up -d    # swap real embedder for the
+#                                            Python hash-stub (fast but
+#                                            noisy; for deterministic
+#                                            unit-style runs)
+#
+# Services:
+#   postgres        pgvector/pgvector:pg17, bootstrapped by seed.sql
+#   guild           vLLM serving Qwen3-Embedding-0.6B (1024-dim)
+#   guild-stub      hash-seeded python stub — profile "stub" only
+#   mentat          predictive-replay service (pool/predict, :8084)
+#   truthsayer      cross-encoder reranker (BAAI/bge-reranker-base, :8085)
+#   ch-init         one-shot; applies episodic migrations then exits
+#   chapterhouse    ch-server HTTP API (:8080)
+#   chapterhouse-worker
+#                   ch-worker; drains co-activation queue every 30s
+#   ghola           ghola local daemon (:7421) — profile "all"
+#
+services:
+  guild:
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    # vLLM serving Qwen3-Embedding-0.6B on Blackwell.
+    # (TEI's Candle backend was compiled for sm_80 and refuses to
+    # start on sm_120; vLLM already works on this GPU from the
+    # host-side vllm-qwen36 experiments.)
+    ipc: host
+    command:
+      - Qwen/Qwen3-Embedding-0.6B
+      - --runner=pooling
+      - --served-model-name=qwen3-embedding
+      - --port=8082
+      - --host=0.0.0.0
+      - --gpu-memory-utilization=0.03
+      - --max-model-len=8192
+      - --dtype=float16
+      - --kv-cache-dtype=fp8
+      - --trust-remote-code
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "${EMBEDDING_PORT:-8082}:8082"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 180s
+
+  guild-stub:
+    profiles: ["stub"]
+    image: python:3.12-alpine
+    command: ["python", "/stub.py"]
+    environment:
+      PORT: "8082"
+      STUB_EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+    volumes:
+      - ./guild-stub/stub.py:/stub.py:ro
+    ports:
+      - "${EMBEDDING_PORT:-8082}:8082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health').read()"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  mentat:
+    build:
+      context: ../../mentat
+      dockerfile: Dockerfile
+    image: ghola/mentat:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      guild:
+        condition: service_healthy
+    environment:
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      MENTAT_WEIGHTS_ROOT: /weights
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+    volumes:
+      - mentat-weights:/weights
+    ports:
+      - "${MENTAT_PORT:-8084}:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  truthsayer:
+    build:
+      context: ../../truthsayer
+      dockerfile: Dockerfile
+    image: ghola/truthsayer:dev
+    restart: unless-stopped
+    environment:
+      TRUTHSAYER_MODEL: ${TRUTHSAYER_MODEL:-BAAI/bge-reranker-v2-m3}
+      TRUTHSAYER_DEVICE: ${TRUTHSAYER_DEVICE:-cuda}
+      TRUTHSAYER_DTYPE: ${TRUTHSAYER_DTYPE:-float16}
+      TRUTHSAYER_MAX_LENGTH: ${TRUTHSAYER_MAX_LENGTH:-8192}
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "${TRUTHSAYER_PORT:-8085}:8085"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8085/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 60s
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    # POSTGRES_PASSWORD defaults to "dev" for local-only dev. Override
+    # via env in any non-loopback deployment — this compose file is not
+    # production-shaped (no TLS, no secrets manager, no backup).
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memory_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-memories}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./seed.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memory_api} -d ${POSTGRES_DB:-memories}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ch-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.chapterhouse
+    image: ghola/chapterhouse:dev
+    entrypoint: ["/usr/local/bin/ch-init"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      GHOLA_EXTENSION_OPTIONAL: "true"
+    restart: "no"
+
+  chapterhouse:
+    image: ghola/chapterhouse:dev
+    restart: unless-stopped
+    depends_on:
+      ch-init:
+        condition: service_completed_successfully
+      guild:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: local
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+      AUTH_PROVIDER: default
+      AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://guild:8082}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      MENTAT_URL: ${MENTAT_URL:-http://mentat:8084}
+      MENTAT_CLUSTER_INTERVAL: ${MENTAT_CLUSTER_INTERVAL:-24h}
+      MENTAT_CLUSTER_WORKSPACES: ${MENTAT_CLUSTER_WORKSPACES:-}
+    ports:
+      - "${CHAPTERHOUSE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  chapterhouse-worker:
+    image: ghola/chapterhouse:dev
+    entrypoint: ["/usr/local/bin/ch-worker"]
+    restart: unless-stopped
+    depends_on:
+      ch-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-memory_api}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-memories}?sslmode=disable"
+      WORKER_TICK_SECONDS: "5"
+      WORKER_BATCH_SIZE: "2000"
+
+  ghola:
+    profiles: ["all"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.ghola
+    image: ghola/ghola:dev
+    restart: unless-stopped
+    depends_on:
+      chapterhouse:
+        condition: service_healthy
+      guild:
+        condition: service_healthy
+    environment:
+      GHOLA_ADDR: 0.0.0.0:7421
+      GHOLA_LOOPBACK_ONLY: "false"
+      AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
+      CHAPTERHOUSE_URL: http://chapterhouse:8080
+      CHAPTERHOUSE_API_KEY: ${CHAPTERHOUSE_API_KEY:-}
+      CHAPTERHOUSE_REQUIRE_KEY: "false"
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://guild:8082}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      TRUTHSAYER_URL: ${TRUTHSAYER_URL:-http://truthsayer:8085}
+      RERANK_TOPK: ${RERANK_TOPK:-50}
+      RERANK_WEIGHT: ${RERANK_WEIGHT:-0.5}
+      RRF_K: ${RRF_K:-60}
+      ENCODING_INTERVAL: ${ENCODING_INTERVAL:-5m}
+    ports:
+      - "${GHOLA_PORT:-7421}:7421"
+
+volumes:
+  postgres-data:
+  mentat-weights:

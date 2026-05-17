@@ -1,0 +1,18 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ch-server
+spec:
+  gateways:
+    - istio-ingress/default-gateway
+  hosts:
+    - ch.example.com
+  http:
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: ch-server.ch-system.svc.cluster.local
+            port:
+              number: 8080

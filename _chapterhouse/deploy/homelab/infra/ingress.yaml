@@ -1,0 +1,58 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chapterhouse
+  namespace: ch-system
+  annotations:
+    cert-manager.io/cluster-issuer: homelab-ca-issuer
+    haproxy.org/ssl-redirect: "false"
+    haproxy.org/timeout-http-request: "30s"
+    haproxy.org/timeout-connect: "10s"
+    haproxy.org/timeout-client: "60s"
+    haproxy.org/timeout-server: "60s"
+    haproxy.org/backend-protocol: "http"
+  labels:
+    app.kubernetes.io/name: chapterhouse
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: chapterhouse
+spec:
+  ingressClassName: haproxy
+  tls:
+    - hosts:
+        - ch.homelab.local
+      secretName: chapterhouse-tls
+  rules:
+    - host: ch.homelab.local
+      http:
+        paths:
+          # MCP endpoints -> ch-server (API key auth, no cookies)
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: ch-server
+                port:
+                  number: 8080
+          # Health probes -> ch-server (no auth)
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: ch-server
+                port:
+                  number: 8080
+          - path: /ready
+            pathType: Exact
+            backend:
+              service:
+                name: ch-server
+                port:
+                  number: 8080
+          # Everything else -> ch-web (proxies /api/ to ch-server)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ch-web
+                port:
+                  number: 80

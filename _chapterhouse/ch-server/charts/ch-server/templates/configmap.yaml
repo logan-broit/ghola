@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ch-server.fullname" . }}-config
+  labels:
+    {{- include "ch-server.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: {{ .Values.config.environment | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  SERVER_HOST: {{ .Values.server.host | quote }}
+  SERVER_PORT: {{ .Values.server.port | quote }}
+  DATABASE_HOST: {{ .Values.database.host | quote }}
+  DATABASE_PORT: {{ .Values.database.port | quote }}
+  DATABASE_NAME: {{ .Values.database.name | quote }}
+  DATABASE_MAX_CONNS: {{ .Values.database.maxConns | quote }}
+  DATABASE_MIN_CONNS: {{ .Values.database.minConns | quote }}
+  EMBEDDING_PROVIDER: {{ .Values.embedding.provider | quote }}
+  EMBEDDING_URL: {{ .Values.embedding.url | quote }}
+  EMBEDDING_MODEL: {{ .Values.embedding.model | quote }}
+  EMBEDDING_DIMENSIONS: {{ .Values.embedding.dimensions | quote }}
+  AUTH_PROVIDER: {{ .Values.auth.provider | quote }}
+  AUTH_DEFAULT_USER: {{ .Values.auth.defaultUser | quote }}
+  CORS_ORIGINS: {{ .Values.cors.origins | quote }}

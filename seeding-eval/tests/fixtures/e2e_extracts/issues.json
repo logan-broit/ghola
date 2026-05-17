@@ -1,0 +1,40 @@
+[
+  {
+    "id": 1022,
+    "number": 22,
+    "title": "App Router prefetch race on hover (server)",
+    "body": "Repro: hovering Link rapidly during navigation causes the server router cache to return stale entries. The race lives in packages/next/src/server/router.ts where a second prefetch starts before the first resolves. Expected: the second prefetch should either coalesce with the first or invalidate the stale cache key.",
+    "created_at": "2025-02-15T10:00:00Z",
+    "closed_at": "2025-02-22T11:00:00Z",
+    "user": "alice",
+    "assignees": [],
+    "top_comment": {
+      "body": "Confirmed on 14.2. The race lives in packages/next/src/server/router.ts -- second prefetch starts before the first resolves and the cache key is reused.",
+      "user": "rauchg",
+      "created_at": "2025-02-16T09:00:00Z",
+      "plus_one_count": 8
+    }
+  },
+  {
+    "id": 1200,
+    "number": 200,
+    "title": "useFormState client hook leaks state across navigations",
+    "body": "On the client, useFormState retains form state when the user navigates away and back. The leak is reproducible with two adjacent routes both using useFormState. Suspect: the action dispatcher in packages/next/src/client/components/use-form-state.ts holds a stale reference after route change.",
+    "created_at": "2025-04-10T14:30:00Z",
+    "closed_at": "2025-04-18T09:15:00Z",
+    "user": "carol",
+    "assignees": [],
+    "top_comment": null
+  },
+  {
+    "id": 1029,
+    "number": 29,
+    "title": "Build manifest path resolution breaks on Windows",
+    "body": "On Windows, the build pipeline emits backslash-separated paths in the build manifest, which then fail to load on Linux runtimes. The path normalization in packages/next/src/build/webpack-config.ts should always produce posix-style paths.",
+    "created_at": "2024-03-15T08:00:00Z",
+    "closed_at": "2024-03-25T16:00:00Z",
+    "user": "dave",
+    "assignees": [],
+    "top_comment": null
+  }
+]

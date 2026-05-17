@@ -1,0 +1,30 @@
+# Chapterhouse API - Homelab (K3s) Overrides
+# ============================================
+# Usage: helm upgrade --install ch-server ./ch-server/charts/ch-server -f ch-server/charts/ch-server/values-homelab.yaml
+
+replicaCount: 1
+
+image:
+  registry: ghcr.io
+  repository: thinkwright/chapterhouse/ch-server
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+config:
+  environment: homelab
+  logLevel: debug
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+virtualService:
+  enabled: false
+
+serviceMonitor:
+  enabled: false

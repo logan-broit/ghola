@@ -1,0 +1,77 @@
+replicaCount: 1
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# Image configuration
+image:
+  # -- Container registry
+  registry: registry.example.com
+  # -- Image repository
+  repository: chapterhouse/ch-web
+  # -- Image tag (defaults to Chart appVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Override the name of the chart
+nameOverride: ""
+# -- Override the full name of the chart
+fullnameOverride: ""
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Environment variables
+env:
+  API_URL: "http://ch-server:8080"
+  PORT: "8080"
+
+# Resource limits and requests
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 100m
+    memory: 32Mi
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+# Service account configuration
+serviceAccount:
+  create: true
+  name: ""
+
+# Istio VirtualService (usually managed from ch-server chart)
+virtualService:
+  enabled: false
+  hosts:
+    - ch.example.com
+  gateway: default-gateway
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,35 @@
+{
+  "23": {
+    "id": 2023,
+    "number": 23,
+    "title": "Coalesce hover prefetches in server router cache",
+    "body": "Closes #22. Adds an in-flight prefetch map keyed by URL so a second prefetch for the same key reuses the pending promise instead of racing.",
+    "merged_at": "2025-02-22T10:55:00Z",
+    "user": "bob",
+    "reviewers": [],
+    "approvers": ["carol"],
+    "merge_commit_sha": "sha022a"
+  },
+  "201": {
+    "id": 2201,
+    "number": 201,
+    "title": "Reset useFormState dispatcher on route change",
+    "body": "Closes #200. Clears the action dispatcher reference when the client router transitions, preventing stale state from leaking into the next route's form.",
+    "merged_at": "2025-04-18T09:10:00Z",
+    "user": "erin",
+    "reviewers": ["frank"],
+    "approvers": ["frank"],
+    "merge_commit_sha": "sha200a"
+  },
+  "30": {
+    "id": 2030,
+    "number": 30,
+    "title": "Normalize build manifest paths to posix",
+    "body": "Closes #29. Wraps emitted manifest paths in path.posix.normalize so builds produced on Windows load correctly on Linux runtimes.",
+    "merged_at": "2024-03-25T15:45:00Z",
+    "user": "grace",
+    "reviewers": [],
+    "approvers": ["heidi"],
+    "merge_commit_sha": "sha029a"
+  }
+}

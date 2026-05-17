@@ -1,0 +1,227 @@
+# Chapterhouse API Helm Chart Values
+# ====================================
+
+# -- Number of replicas
+replicaCount: 1
+
+# Image configuration
+image:
+  # -- Container registry
+  registry: registry.example.com
+  # -- Image repository
+  repository: chapterhouse/ch-server
+  # -- Image tag (defaults to Chart appVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: Always
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# -- Override the name of the chart
+nameOverride: ""
+# -- Override the full name of the chart
+fullnameOverride: ""
+
+# Service account configuration
+serviceAccount:
+  # -- Create a service account
+  create: true
+  # -- Annotations for the service account
+  annotations: {}
+  # -- Name of the service account (generated if not set)
+  name: ""
+
+# -- Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Service configuration
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- Service port
+  port: 8080
+
+# Resource limits and requests
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  # -- Enable autoscaling
+  enabled: false
+  # -- Minimum replicas
+  minReplicas: 2
+  # -- Maximum replicas
+  maxReplicas: 10
+  # -- Target CPU utilization percentage
+  targetCPUUtilizationPercentage: 80
+
+# -- Node selector
+nodeSelector: {}
+
+# -- Tolerations
+tolerations: []
+
+# -- Affinity rules
+affinity: {}
+
+# Liveness probe configuration
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+
+# Readiness probe configuration
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+
+# =============================================================================
+# Application Configuration
+# =============================================================================
+
+# Environment configuration
+config:
+  # -- Environment name
+  environment: production
+  # -- Log level
+  logLevel: info
+
+# Server configuration
+server:
+  # -- Server bind host
+  host: "0.0.0.0"
+  # -- Server port
+  port: 8080
+
+# Database configuration
+database:
+  # -- Database host (CNPG service name)
+  host: memory-db-rw.ch-system.svc
+  # -- Database port
+  port: 5432
+  # -- Database name
+  name: memories
+  # -- Maximum connections
+  maxConns: 25
+  # -- Minimum connections
+  minConns: 5
+  # -- Name of the secret containing database credentials (created by CNPG)
+  existingSecret: memory-db-credentials
+  # -- Key in secret for username
+  usernameKey: username
+  # -- Key in secret for password
+  passwordKey: password
+
+# Embedding service configuration
+embedding:
+  # -- Embedding provider (any OpenAI-compatible API: Together.ai, vLLM, OpenAI, etc.)
+  provider: openai
+  # -- Embedding service URL
+  url: "https://api.openai.com"
+  # -- Embedding model name
+  model: text-embedding-3-small
+  # -- Embedding dimensions
+  dimensions: 768
+  # -- API key for the embedding provider
+  apiKey: ""
+  # -- Name of existing secret containing the API key (alternative to apiKey)
+  existingSecret: ""
+  # -- Key in the existing secret
+  secretKey: EMBEDDING_API_KEY
+
+# Authentication configuration
+auth:
+  # -- Auth provider (default, jwt, apikey)
+  provider: default
+  # -- Default user UUID (for default provider)
+  defaultUser: "00000000-0000-0000-0000-000000000001"
+
+# Admin bootstrap configuration
+admin:
+  # -- Enable admin bootstrap
+  enabled: true
+  # -- Name of secret containing admin credentials
+  existingSecret: ch-admin-bootstrap
+  # -- Key in secret for admin username
+  usernameKey: ADMIN_USERNAME
+  # -- Key in secret for admin password
+  passwordKey: ADMIN_PASSWORD
+
+# CORS configuration
+cors:
+  # -- Allowed origins (comma-separated)
+  origins: "*"
+
+# =============================================================================
+# Ingress Configuration
+# =============================================================================
+
+ingress:
+  # -- Enable Ingress resource creation
+  enabled: false
+  # -- Ingress class name (e.g., nginx, haproxy, traefik)
+  className: ""
+  # -- Ingress annotations
+  annotations: {}
+  # -- Ingress hosts
+  hosts:
+    - host: ch.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- Ingress TLS configuration
+  tls: []
+  #  - secretName: ch-tls
+  #    hosts:
+  #      - ch.example.com
+
+# =============================================================================
+# Istio VirtualService Configuration
+# =============================================================================
+
+virtualService:
+  # -- Enable VirtualService creation
+  enabled: false
+  # -- Gateway to use
+  gateway: istio-ingress/default-gateway
+  # -- Hostname for the service
+  host: ch.example.com
+
+# =============================================================================
+# Init Container Configuration
+# =============================================================================
+
+# Init container configuration
+initContainer:
+  # -- Enable init container for pg_recall extension verification
+  enabled: false
+

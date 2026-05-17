@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Chapterhouse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg-dark: #0a0a0f;
+            --bg-card: rgba(20, 20, 30, 0.9);
+            --border-subtle: rgba(255, 255, 255, 0.1);
+            --border-hover: rgba(255, 255, 255, 0.2);
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --text-muted: rgba(255, 255, 255, 0.5);
+            --accent-blue: #3b82f6;
+            --accent-red: #f87171;
+            --gradient-primary: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6);
+        }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            min-height: 100vh;
+            background: linear-gradient(180deg, #0a0a0f 0%, #0d1a2d 50%, #1a3a5c 100%);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-container { width: 100%; max-width: 400px; padding: 24px; }
+        .logo { text-align: center; margin-bottom: 32px; }
+        .logo-text {
+            font-size: 32px; font-weight: 700;
+            background: var(--gradient-primary);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .logo-subtitle { font-size: 14px; color: var(--text-muted); margin-top: 4px; }
+        .login-card {
+            background: var(--bg-card); border: 1px solid var(--border-subtle);
+            border-radius: 16px; padding: 32px; backdrop-filter: blur(20px);
+        }
+        .login-title { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+        .login-subtitle { font-size: 14px; color: var(--text-secondary); margin-bottom: 24px; }
+        .form-group { margin-bottom: 20px; }
+        .form-label { display: block; font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px; }
+        .form-input {
+            width: 100%; padding: 12px 16px; font-size: 14px; color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-subtle);
+            border-radius: 8px; outline: none; transition: all 0.15s ease;
+        }
+        .form-input:focus { border-color: var(--accent-blue); background: rgba(255, 255, 255, 0.08); }
+        .form-input::placeholder { color: var(--text-muted); }
+        .btn {
+            width: 100%; padding: 12px 16px; font-size: 14px; font-weight: 500;
+            border: none; border-radius: 8px; cursor: pointer; transition: all 0.15s ease;
+        }
+        .btn-primary { background: var(--accent-blue); color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-primary:disabled { background: rgba(59, 130, 246, 0.5); cursor: not-allowed; }
+        .error-message {
+            background: rgba(248, 113, 113, 0.15); border: 1px solid rgba(248, 113, 113, 0.3);
+            color: var(--accent-red); padding: 12px 16px; border-radius: 8px;
+            font-size: 13px; margin-bottom: 20px; display: none;
+        }
+        .error-message.visible { display: block; }
+        .spinner {
+            display: inline-block; width: 16px; height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3); border-radius: 50%;
+            border-top-color: white; animation: spin 0.8s linear infinite;
+            margin-right: 8px; vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <div class="logo-text">Chapterhouse</div>
+            <div class="logo-subtitle">Agentic Memory System</div>
+        </div>
+
+        <div class="login-card">
+            <h1 class="login-title">Sign in</h1>
+            <p class="login-subtitle">Enter your credentials to access the admin console</p>
+
+            <div id="error-message" class="error-message"></div>
+
+            <form id="login-form">
+                <div class="form-group">
+                    <label class="form-label" for="username">Username</label>
+                    <input type="text" id="username" name="username" class="form-input"
+                        placeholder="admin" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="password">Password</label>
+                    <input type="password" id="password" name="password" class="form-input"
+                        placeholder="Enter your password" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary" id="submit-btn">Sign in</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('login-form');
+        const errorEl = document.getElementById('error-message');
+        const submitBtn = document.getElementById('submit-btn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            errorEl.classList.remove('visible');
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="spinner"></span>Signing in...';
+
+            try {
+                const resp = await fetch('/api/v1/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ username, password }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || 'Login failed');
+                window.location.href = 'admin.html';
+            } catch (err) {
+                errorEl.textContent = err.message;
+                errorEl.classList.add('visible');
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Sign in';
+            }
+        });
+    </script>
+</body>
+</html>

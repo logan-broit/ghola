@@ -1,0 +1,7 @@
+comment = 'ghola: Cognitive Memory Primitives for Postgres'
+default_version = '0.2.0'
+module_pathname = '$libdir/ghola'
+relocatable = false
+superuser = true
+schema = 'semantic'
+requires = 'vector'
