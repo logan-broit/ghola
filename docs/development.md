@@ -41,25 +41,44 @@ Override via `*_PORT` env vars in `deploy/docker-compose/.env`. See
 
 ## Hardware
 
-The as-shipped dev stack expects a CUDA GPU for the embedder service
-(guild = vLLM serving `Qwen3-Embedding-0.6B`). The reranker
-(truthsayer) defaults to CUDA but flips to CPU with
-`TRUTHSAYER_DEVICE=cpu`. Mentat is pure CPU (sklearn HDBSCAN).
+The as-shipped dev stack expects a **CUDA GPU** for the embedder
+service (guild = vLLM serving `Qwen3-Embedding-0.6B`); vLLM is
+CUDA-only and doesn't support Metal or CPU. The reranker (truthsayer)
+defaults to CUDA fp16 but accepts other devices via
+`TRUTHSAYER_DEVICE`. Mentat is pure CPU (sklearn HDBSCAN), no GPU
+concern.
 
-**For CPU-only deployments**, swap the embedder. The models themselves
-run on CPU (Qwen3-0.6B at ~2-3s/embed on a modern x86, bge-reranker-v2-m3
-at ~50ms/pair). Replace the `guild` compose service with one of:
+| Component | CUDA | Apple Silicon (Metal) | CPU |
+|---|---|---|---|
+| guild (embedder) | vLLM as shipped | swap the service | swap the service |
+| truthsayer (reranker) | default, fp16 | `TRUTHSAYER_DEVICE=mps` | `TRUTHSAYER_DEVICE=cpu` |
+| mentat (clustering) | n/a | n/a | always CPU |
 
-- [HuggingFace TEI](https://github.com/huggingface/text-embeddings-inference)
+**Swapping the embedder service.** The models themselves run on
+anything (Qwen3-0.6B at ~2-3s/embed on a modern x86 CPU, similar on
+M-series; bge-reranker-v2-m3 at ~50ms/pair on CPU). Replace the
+`guild` compose service with:
+
+- **Apple Silicon**: Ollama (Metal-native, exposes
+  `/v1/embeddings` OpenAI-compatible) or llama.cpp's `--embedding`
+  server, both backed by a GGUF Qwen3-Embedding build.
+- **CPU**:
+  [HuggingFace TEI](https://github.com/huggingface/text-embeddings-inference)
   CPU image (`ghcr.io/huggingface/text-embeddings-inference:cpu-1.5`),
-  pointed at the same model. Keep `EMBEDDING_URL` and
-  `EMBEDDING_MODEL` env vars unchanged.
-- A `sentence-transformers` FastAPI wrapper (small Python service,
-  ~30 lines).
+  pointed at the same model, or a `sentence-transformers` FastAPI
+  wrapper (~30 lines).
+
+Keep `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` env vars
+unchanged across the swap so ghola + chapterhouse don't need to know.
 
 The `guild-stub` profile (`docker compose --profile stub up -d`) swaps
 in a deterministic hash stub for tests where you don't care about
 embedding quality.
+
+**fp16 caveat.** Truthsayer's `dtype` knob only applies on CUDA
+(see `truthsayer/truthsayer/scorer.py`). On MPS / CPU the model
+runs in fp32 — by design, since MPS fp16 has historically been
+flaky and CPU fp16 inference isn't worth it.
 
 ## Env vars
 

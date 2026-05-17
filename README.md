@@ -8,13 +8,22 @@ current task.
 
 ## Install
 
-Build from source. Requires Go 1.22+ and Docker. A CUDA GPU is
-**recommended** for the embedder + reranker (the as-shipped dev stack
-uses vLLM, which needs CUDA), but the models themselves
-(`Qwen3-Embedding-0.6B`, `bge-reranker-v2-m3`) run on CPU — swap the
-embedder service for a CPU-friendly server (TEI, sentence-transformers)
-to deploy GPU-free. The reranker service flips to CPU with
-`TRUTHSAYER_DEVICE=cpu`.
+Build from source. Requires Go 1.22+ and Docker. A GPU is
+**recommended** for the embedder + reranker:
+
+- **CUDA** — the dev stack ships vLLM for the embedder, which is
+  CUDA-only. Reranker defaults to CUDA fp16.
+- **Apple Silicon (Metal)** — reranker honors
+  `TRUTHSAYER_DEVICE=mps`. Swap the vLLM embedder for an Ollama /
+  llama.cpp / MLX service (Metal-native), since vLLM doesn't support
+  Metal.
+- **CPU-only** — same swap pattern; use TEI's CPU image or a
+  `sentence-transformers` wrapper for the embedder, set
+  `TRUTHSAYER_DEVICE=cpu`.
+
+Models themselves (`Qwen3-Embedding-0.6B`, `bge-reranker-v2-m3`) run
+fine on all three; the constraint is which serving stack you wire in
+behind the embedder URL.
 
 ```sh
 git clone https://github.com/logan-broit/ghola
