@@ -177,11 +177,17 @@ top-10-session context), so a full run will span multiple subscription usage
 windows. That is expected, not an error: when a window is exhausted the run
 stops submitting, finishes in-flight calls, saves progress, and tells you to
 re-run after the window resets. Resume is **per-question** — each completed
-answer/judgment row is appended (and fsync'd) to `--out` as it lands, and a
-re-run skips question_ids already recorded as succeeded (prior failures are
-retried). So just re-run the same command after the window resets; it picks up
-where it left off. **Run it in tmux** (`tmux new-session -d -s lme-qa ...`) so
-a dropped terminal doesn't kill a multi-hour, multi-window job.
+answer/judgment row is appended (and fsync'd) to `--out` the moment it lands
+(durable before the stage finishes, so a hard crash mid-stage loses nothing),
+and a re-run skips question_ids already recorded as succeeded (prior failures
+are retried). The file is **append-only** — never rewritten — so a question
+that errored then succeeded on a later run leaves *both* rows on disk; that is
+harmless because every reader dedups **last-wins by question_id** (the stale
+errored row is superseded by the later succeeded one, and status reflects the
+final outcome). So just re-run the same command after the window resets; it
+picks up where it left off. **Run it in tmux**
+(`tmux new-session -d -s lme-qa ...`) so a dropped terminal doesn't kill a
+multi-hour, multi-window job.
 
 **Keep `--parallel` low (2).** The bottleneck is the usage window, not local
 concurrency — flooding it with parallel calls just exhausts the window faster

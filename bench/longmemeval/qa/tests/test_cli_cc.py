@@ -104,7 +104,9 @@ def test_run_then_judge_cc_backend(monkeypatch, dataset_file, run_file, tmp_path
 def test_cc_backend_per_question_resume(monkeypatch, dataset_file, run_file, tmp_path):
     # Pre-seed answers.jsonl: one succeeded row (must be skipped) and one
     # ERRORED row (must be retried). Only the un-done questions should hit the
-    # fake binary, and the file must be appended (not rewritten from scratch).
+    # fake binary, and the file is APPEND-ONLY (never truncate-rewritten): the
+    # stale errored row stays on disk, superseded last-wins by the fresh
+    # succeeded append.
     answers = tmp_path / "answers.jsonl"
     answers.write_text(
         json.dumps(
@@ -149,6 +151,7 @@ def test_cc_backend_per_question_resume(monkeypatch, dataset_file, run_file, tmp
     # the succeeded one was skipped.
     assert call_count(bindir) == 1
 
+    # Last-wins load (later line per qid wins) — what every reader applies.
     rows = {
         json.loads(l)["question_id"]: json.loads(l)
         for l in answers.read_text().splitlines()
@@ -156,12 +159,143 @@ def test_cc_backend_per_question_resume(monkeypatch, dataset_file, run_file, tmp
     }
     # The succeeded row is preserved verbatim (not re-run).
     assert rows["e47becba"]["hypothesis"] == "already done"
-    # The previously-errored row is now succeeded with the fresh answer.
+    # The previously-errored row is now succeeded with the fresh answer (last
+    # row per qid wins).
     assert rows["0862e8bf_abs"]["status"] == "succeeded"
     assert rows["0862e8bf_abs"]["hypothesis"] == "fresh answer"
-    # No duplicate rows for either id.
-    all_ids = [json.loads(l)["question_id"] for l in answers.read_text().splitlines() if l.strip()]
-    assert sorted(all_ids) == ["0862e8bf_abs", "e47becba"]
+
+    # Append-only: the stale errored 0862e8bf_abs row was NOT rewritten away —
+    # it stays on disk ahead of the fresh succeeded append (3 raw lines: the
+    # preserved e47becba, the stale errored 0862e8bf_abs, the fresh succeeded
+    # 0862e8bf_abs). Harmless because every reader dedups last-wins.
+    raw = [json.loads(l) for l in answers.read_text().splitlines() if l.strip()]
+    assert len(raw) == 3
+    assert [(r["question_id"], r["status"]) for r in raw] == [
+        ("e47becba", "succeeded"),
+        ("0862e8bf_abs", "errored"),
+        ("0862e8bf_abs", "succeeded"),
+    ]
+
+
+def test_cc_resume_last_wins_failed_then_succeeded(monkeypatch, dataset_file, run_file, tmp_path):
+    # An answers file can legitimately contain a FAILED row for a qid followed
+    # by a later SUCCEEDED row for the same qid (a prior run errored, a re-run
+    # then succeeded and appended — we never rewrite the file). Load must apply
+    # last-wins dedup by question_id so this qid counts as done and is NOT
+    # re-run; only the genuinely-undone qid hits the fake.
+    answers = tmp_path / "answers.jsonl"
+    answers.write_text(
+        json.dumps(
+            {
+                "question_id": "e47becba",
+                "question_type": "single-session-user",
+                "k": 10,
+                "hypothesis": "",
+                "status": "errored",
+                "error": "prior boom",
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "question_id": "e47becba",
+                "question_type": "single-session-user",
+                "k": 10,
+                "hypothesis": "recovered answer",
+                "status": "succeeded",
+                "error": "",
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            }
+        )
+        + "\n"
+    )
+
+    bindir = _use_fake(monkeypatch, tmp_path, {"answer": "fresh answer"})
+    rc = cli.run_main(
+        [
+            "--dataset", str(dataset_file),
+            "--run", str(run_file),
+            "--out", str(answers),
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+
+    # The fake was invoked exactly ONCE: e47becba is done (last-wins=succeeded,
+    # not re-run despite the leading failed row); only 0862e8bf_abs runs.
+    assert call_count(bindir) == 1
+
+    # Load with last-wins dedup: e47becba resolves to the recovered (succeeded)
+    # row, counted once. The freshly-run abstention qid is succeeded too.
+    rows: dict[str, dict] = {}
+    for l in answers.read_text().splitlines():
+        if l.strip():
+            r = json.loads(l)
+            rows[r["question_id"]] = r  # last line wins
+    assert rows["e47becba"]["status"] == "succeeded"
+    assert rows["e47becba"]["hypothesis"] == "recovered answer"
+    assert rows["0862e8bf_abs"]["status"] == "succeeded"
+    assert rows["0862e8bf_abs"]["hypothesis"] == "fresh answer"
+
+
+def test_cc_judge_last_wins_superseded_failed_row(monkeypatch, dataset_file, tmp_path):
+    # The judge reads answers.jsonl. That file may contain a failed reader row
+    # for a qid later superseded by a succeeded row (append-only resume). The
+    # judge must apply last-wins dedup so it judges the SUCCEEDED hypothesis,
+    # once — not the stale failed one, and not both.
+    answers = tmp_path / "answers.jsonl"
+    answers.write_text(
+        json.dumps(
+            {
+                "question_id": "e47becba",
+                "question_type": "single-session-user",
+                "k": 10,
+                "hypothesis": "",
+                "status": "errored",
+                "error": "prior boom",
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "question_id": "e47becba",
+                "question_type": "single-session-user",
+                "k": 10,
+                "hypothesis": "Business Administration",
+                "status": "succeeded",
+                "error": "",
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            }
+        )
+        + "\n"
+    )
+
+    bindir = _use_fake(monkeypatch, tmp_path, {"answer": "yes"})
+    judgments = tmp_path / "judgments.jsonl"
+    report = tmp_path / "report.md"
+    rc = cli.judge_main(
+        [
+            "--dataset", str(dataset_file),
+            "--answers", str(answers),
+            "--out", str(judgments),
+            "--report", str(report),
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+
+    # Judged exactly once (last-wins collapsed the two e47becba rows into one).
+    assert call_count(bindir) == 1
+    jrows = [json.loads(l) for l in judgments.read_text().splitlines() if l.strip()]
+    qids = [r["question_id"] for r in jrows]
+    assert qids.count("e47becba") == 1
+    # The succeeded hypothesis was judged (status succeeded, not the failed one).
+    (jr,) = [r for r in jrows if r["question_id"] == "e47becba"]
+    assert jr["status"] == "succeeded"
 
 
 def test_batches_missing_key_error_suggests_cc(monkeypatch, dataset_file, run_file, tmp_path):

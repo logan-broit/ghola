@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
@@ -107,15 +108,20 @@ class UsageLimitExhausted(Exception):
 
 
 # Substrings that, on a nonzero exit, indicate the subscription usage window is
-# exhausted. Kept broad and conservative per the plan — false positives only
-# cost an early (recoverable) stop, while a missed match would busy-retry an
-# exhausted window.
+# exhausted. Anchored on "usage"/"limit" phrasing so transient crashes don't
+# masquerade as a usage-window stop — notably the bare "out of" marker was
+# removed because it matched "ran out of memory" (an OOM crash should be
+# recorded errored + retried, not treated as a recoverable-window stop). The
+# matcher is consulted ONLY on a nonzero exit against stderr/stdout (never the
+# model's answer text): a false positive only costs a recoverable early stop
+# (the next re-run picks up where it left off) — the deliberate tradeoff over a
+# missed match that would busy-retry an exhausted window.
 _USAGE_LIMIT_MARKERS = (
     "usage limit",
     "rate limit",
-    "limit reached",
+    "limit reached",  # "5-hour limit reached", "weekly limit reached"
     "limit exceeded",
-    "out of",  # "out of usage", "you are out of ..."
+    "hour limit",  # "5-hour limit", "you've hit your 5-hour limit"
     "upgrade to",
     "resets at",
     "try again later",
@@ -321,8 +327,26 @@ class CCRunner:
             model=model,
         )
 
-    def run(self, requests: list[CCRequest], label: str = "stage") -> list[CCResult]:
+    def run(
+        self,
+        requests: list[CCRequest],
+        label: str = "stage",
+        on_result: Callable[[CCResult], None] | None = None,
+    ) -> list[CCResult]:
         """Run all requests through a bounded pool; return one CCResult each.
+
+        ``on_result`` (if given) is invoked once per landed result so the caller
+        can persist each row AS IT LANDS — per-question durability, not
+        end-of-stage. It is called from THIS method's ``as_completed`` loop,
+        which runs on the calling (main) thread; the worker threads only run
+        ``_run_one`` and never touch ``on_result``. So the callback is
+        single-threaded by construction and needs no lock — it may freely
+        append+fsync to a file. The callback fires for every collected result,
+        including on the usage-limit path: the partial results that landed
+        before the limit are persisted as they land, and the limit only stops
+        NEW submissions (the in-flight items still drain through the callback
+        before ``UsageLimitExhausted`` is raised). A callback that raises
+        propagates out of ``run`` (it is the caller's failure to handle).
 
         Emits a stderr progress line every ``progress_every`` completions.
         Raises ``UsageLimitExhausted`` (carrying whatever results landed) on a
@@ -353,6 +377,11 @@ class CCRunner:
                     # Short-circuited after the stop flag was set; not counted.
                     continue
                 results.append(res)
+                # Persist-as-it-lands hook (main thread; see method docstring).
+                # Done BEFORE counting/progress so a row is durable the moment
+                # the future is collected.
+                if on_result is not None:
+                    on_result(res)
                 done += 1
                 if res.status != "succeeded":
                     errored += 1

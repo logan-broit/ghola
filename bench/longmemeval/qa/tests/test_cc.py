@@ -9,9 +9,12 @@ claude 2.1.170 output (init event + result element).
 
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
-from lme_qa.cc import CCRequest, CCRunner, UsageLimitExhausted
+from lme_qa.cc import CCRequest, CCRunner, UsageLimitExhausted, _looks_like_usage_limit
 from tests.fake_claude_bin import (
     call_count,
     read_argv_log,
@@ -167,3 +170,66 @@ def test_results_cover_all_custom_ids(tmp_path):
     reqs = [CCRequest(f"q{i}", "SYS", f"u{i}") for i in range(5)]
     results = runner.run(reqs)
     assert {r.custom_id for r in results} == {f"q{i}" for i in range(5)}
+
+
+def test_on_result_callback_invoked_per_result(tmp_path):
+    # The on_result callback fires once per landed future, on the main thread,
+    # so the CLI can persist each row as it lands rather than after the whole
+    # stage. Collect (custom_id, status) per call and assert coverage.
+    binpath = write_fake_claude(tmp_path / "bin", {"answer": "ok"})
+    runner = _runner(binpath, parallel=1)
+    seen: list[tuple[str, str]] = []
+    reqs = [CCRequest(f"q{i}", "SYS", f"u{i}") for i in range(3)]
+    results = runner.run(reqs, on_result=lambda r: seen.append((r.custom_id, r.status)))
+    assert {cid for cid, _ in seen} == {"q0", "q1", "q2"}
+    assert {r.custom_id for r in results} == {"q0", "q1", "q2"}
+
+
+def test_on_result_persists_before_stage_completes(tmp_path):
+    # Durability proof: the callback runs as each future lands, BEFORE the stage
+    # finishes. Persist inside on_result; raise after the first row so the stage
+    # is aborted mid-flight — then assert the first row is already on disk.
+    binpath = write_fake_claude(tmp_path / "bin", {"answer": "ok"})
+    runner = _runner(binpath, parallel=1)
+    out = tmp_path / "landed.jsonl"
+    count = 0
+
+    def persist(r):
+        nonlocal count
+        with out.open("a") as fh:
+            fh.write(json.dumps({"question_id": r.custom_id, "status": r.status}) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        count += 1
+        if count == 1:
+            raise RuntimeError("abort mid-stage after first row")
+
+    reqs = [CCRequest(f"q{i}", "SYS", f"u{i}") for i in range(3)]
+    with pytest.raises(RuntimeError, match="abort mid-stage"):
+        runner.run(reqs, on_result=persist)
+
+    # The first row is durably on disk even though the stage was aborted before
+    # completing — proves persistence is per-question, not end-of-stage.
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "succeeded"
+
+
+def test_usage_limit_matcher_no_false_positive_on_oom():
+    # "ran out of memory" must NOT trip the matcher — the bare "out of"
+    # substring was removed precisely because it matched OOM crashes (a
+    # transient failure that should be recorded errored + retried, not a
+    # recoverable-window stop).
+    assert _looks_like_usage_limit("ran out of memory") is False
+    assert _looks_like_usage_limit("Killed: out of memory (oom)") is False
+    # A bare "out of" with no usage/limit phrasing stays a normal error.
+    assert _looks_like_usage_limit("the model is out of scope here") is False
+
+
+def test_usage_limit_matcher_still_trips_on_real_limits():
+    # The genuine usage-window messages must still match (a missed match would
+    # busy-retry an exhausted window).
+    assert _looks_like_usage_limit("Claude usage limit reached") is True
+    assert _looks_like_usage_limit("5-hour limit reached; try again later") is True
+    assert _looks_like_usage_limit("You've hit your usage limit") is True
+    assert _looks_like_usage_limit("rate limit exceeded") is True

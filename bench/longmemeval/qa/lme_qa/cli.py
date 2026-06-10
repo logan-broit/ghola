@@ -7,8 +7,11 @@ Two execution backends select via ``--backend`` (default ``batches``):
     so an interrupted run resumes by polling the in-flight batch.
   - ``claude-code``: drive headless ``claude -p`` once per question through the
     operator's Claude Code subscription (no API key). Resume is per-question:
-    completed answer/judgment rows are appended to ``--out`` as they land and
-    re-running skips question_ids already succeeded (failures are retried).
+    each completed answer/judgment row is appended to ``--out`` the moment it
+    lands (durable before the stage finishes) and re-running skips question_ids
+    already succeeded (failures are retried). The output is append-only — never
+    rewritten — so stale errored rows from a prior run are left in place and
+    superseded last-wins by question_id on load (every reader dedups).
 
 The reader/judge prompt content is shared across both backends (built once from
 prompts.py) so the two paths are directly comparable — the model is identical
@@ -109,6 +112,26 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _dedup_last_wins(rows: list[dict[str, Any]], key: str = "question_id") -> list[dict[str, Any]]:
+    """Collapse rows to one-per-``key``, last occurrence wins, order preserved.
+
+    The cc backend's output is append-only (never truncate-rewritten), so a qid
+    that failed then succeeded on a later run appears twice — the earlier failed
+    row superseded by the later succeeded one. Every reader of such a file must
+    take the LAST row per qid; ``status`` then reflects the final outcome. Rows
+    without ``key`` are passed through unchanged (no qid to dedup on).
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    no_key: list[dict[str, Any]] = []
+    for row in rows:
+        k = row.get(key)
+        if k is None:
+            no_key.append(row)
+        else:
+            latest[k] = row  # last wins
+    return no_key + list(latest.values())
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as fh:
@@ -132,19 +155,22 @@ def _append_jsonl_row(path: Path, row: dict[str, Any]) -> None:
 
 
 def _completed_ids(path: Path) -> set[str]:
-    """question_ids in ``path`` already recorded with status=="succeeded".
+    """question_ids whose LATEST row in ``path`` has status=="succeeded".
 
-    Used by the cc backend to skip done questions on resume. Non-succeeded rows
-    (errored/empty) are intentionally NOT included, so prior failures get
-    retried on the next run. A missing/empty file yields an empty set.
+    Used by the cc backend to skip done questions on resume. Last-wins by qid:
+    the file is append-only, so a qid that failed then succeeded on a re-run has
+    its succeeded row last and is counted done; a qid whose latest row is
+    non-succeeded (errored/empty) is NOT counted, so it is retried. A
+    missing/empty file yields an empty set.
     """
     if not path.exists():
         return set()
-    done: set[str] = set()
+    latest: dict[str, dict[str, Any]] = {}
     for row in _load_jsonl(path):
-        if row.get("status") == "succeeded" and row.get("question_id"):
-            done.add(row["question_id"])
-    return done
+        qid = row.get("question_id")
+        if qid:
+            latest[qid] = row  # last row wins
+    return {qid for qid, row in latest.items() if row.get("status") == "succeeded"}
 
 
 def _default_state(out_path: Path) -> Path:
@@ -302,12 +328,17 @@ def _cc_run_with_resume(
     """Run a stage through the claude-code backend with per-question resume.
 
     Skips question_ids already recorded with status=="succeeded" in ``out_path``
-    (prior failures ARE retried). Rewrites ``out_path`` keeping only those
-    preserved succeeded rows, then appends each fresh result row as it lands
-    (append + flush + fsync) so a crash or usage-window exhaustion mid-run loses
-    nothing. Returns (all_rows, exhausted) where ``all_rows`` is the preserved +
-    freshly-run rows and ``exhausted`` is True if a usage limit cut the run
-    short (partial progress is on disk either way).
+    (prior failures ARE retried). The output is APPEND-ONLY: each fresh result
+    row is built + appended + flushed + fsync'd the moment its future lands (via
+    CCRunner's ``on_result`` callback, which runs on this thread), so a crash or
+    usage-window exhaustion mid-run loses nothing — every completed row is
+    already durable. We never truncate-rewrite the file (a crash mid-rewrite
+    could lose previously-succeeded rows); stale errored/duplicate rows left
+    behind by a prior run are harmless because every reader of this file applies
+    last-wins dedup by question_id (``_completed_ids`` here, and the judge's
+    answer load). Returns (all_rows, exhausted) where ``all_rows`` is the
+    preserved + freshly-run rows and ``exhausted`` is True if a usage limit cut
+    the run short (partial progress is on disk either way).
 
     ``row_of`` maps a CCResult to the stage's persisted row dict (so reader and
     judge keep their own shapes); the preserved rows are reused verbatim.
@@ -315,13 +346,13 @@ def _cc_run_with_resume(
     done = _completed_ids(out_path)
     preserved: list[dict[str, Any]] = []
     if out_path.exists():
-        # Keep only the succeeded rows we're skipping; drop non-succeeded so a
-        # retried question doesn't leave a stale errored duplicate behind.
-        for prior in _load_jsonl(out_path):
-            if prior.get("status") == "succeeded" and prior.get("question_id") in done:
-                preserved.append(prior)
-    # Rewrite the file with just the preserved rows; fresh results append after.
-    _write_jsonl(out_path, preserved)
+        # The succeeded rows we're skipping (last-wins per qid so a
+        # failed-then-succeeded pair resolves to the succeeded one); these are
+        # returned for aggregation but NOT rewritten to disk — they are already
+        # there. Non-done qids' stale rows stay on disk, superseded last-wins by
+        # the fresh append.
+        latest = {r["question_id"]: r for r in _dedup_last_wins(_load_jsonl(out_path))}
+        preserved = [latest[qid] for qid in done if qid in latest]
 
     todo = [
         CCRequest(qid, system, user_text)
@@ -337,23 +368,29 @@ def _cc_run_with_resume(
 
     runner = CCRunner(claude_bin=claude_bin, parallel=parallel, timeout_s=timeout_s)
     exhausted = False
-    fresh_results: list[Any]
+    fresh_rows: list[dict[str, Any]] = []
+
+    def _persist(result: Any) -> None:
+        # Invoked on the main thread per landed result (see CCRunner.run): build
+        # the row and append+flush+fsync it immediately so it survives a crash.
+        row = row_of(result)
+        fresh_rows.append(row)
+        _append_jsonl_row(out_path, row)
+
     try:
-        fresh_results = runner.run(todo, label=label)
-    except UsageLimitExhausted as exc:
+        runner.run(todo, label=label, on_result=_persist)
+    except UsageLimitExhausted:
+        # Rows that landed before the limit were already persisted by _persist
+        # (called per-result inside run); the exception only stops NEW
+        # submissions. fresh_rows already holds exactly what hit disk.
         exhausted = True
-        fresh_results = exc.results
         print(
             f"{label}: subscription usage window exhausted "
-            f"({len(fresh_results)} completed this run); progress saved to "
+            f"({len(fresh_rows)} completed this run); progress saved to "
             f"{out_path}. Re-run the same command after the window resets to "
             f"continue (already-succeeded questions are skipped).",
             file=sys.stderr,
         )
-
-    fresh_rows = [row_of(r) for r in fresh_results]
-    for row in fresh_rows:
-        _append_jsonl_row(out_path, row)
 
     return preserved + fresh_rows, exhausted
 
@@ -407,7 +444,12 @@ def judge_main(argv: list[str] | None = None) -> int:
     else:
         _require_api_key()
     by_qid = _load_dataset(args.dataset)
-    answers = _load_jsonl(args.answers)
+    # The cc backend appends to answers.jsonl (never rewrites), so a qid that
+    # failed then succeeded on a re-run appears twice — take the last row per
+    # qid (last-wins) so the judge scores the final hypothesis once, not a stale
+    # failed row and not both. The batches path writes one row per qid, so the
+    # dedup is a no-op there.
+    answers = _dedup_last_wins(_load_jsonl(args.answers))
     state_path = args.state or _default_state(args.out)
 
     # Build the judge prompt per answer ONCE (the same prompt content for both
