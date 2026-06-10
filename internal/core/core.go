@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/logan-broit/ghola/internal/truthsayer"
 )
@@ -51,6 +52,11 @@ type Core struct {
 	// RerankTimeout caps the truthsayer round-trip. Failures (timeout,
 	// 5xx, transport) degrade to RRF-only with a warn log.
 	RerankTimeout time.Duration
+	// TierTimeout caps each recall tier's round-trip independently.
+	// A tier that exceeds it (or errors) is dropped from the fan-out
+	// and reported in RecallResult.Degraded — one slow tier must not
+	// stall or fail the whole recall.
+	TierTimeout time.Duration
 }
 
 // New builds a Core with sensible defaults.
@@ -64,6 +70,7 @@ func New(s SietchStore, ch ChapterhouseClient, emb Embedder) *Core {
 		RerankTopK:    50,
 		RerankWeight:  0.5,
 		RerankTimeout: 30 * time.Second,
+		TierTimeout:   10 * time.Second,
 	}
 }
 
@@ -77,12 +84,18 @@ var ErrValidation = errors.New("validation")
 var (
 	ErrMissingSessionID = fmt.Errorf("%w: session_id required", ErrValidation)
 	ErrMissingUserID    = fmt.Errorf("%w: user_id required", ErrValidation)
+	// ErrMissingWorkspace is retained as the legacy workspace-required
+	// sentinel. No code path returns it any more — both SessionStart and
+	// Recall now accept a cwd anchor and fail with ErrMissingWorkspaceOrCwd
+	// — but it stays exported so external callers' errors.Is checks keep
+	// compiling. Both wrap ErrValidation, so boundary 400-mapping is
+	// unaffected either way.
 	ErrMissingWorkspace = fmt.Errorf("%w: workspace required", ErrValidation)
-	// ErrMissingWorkspaceOrCwd: SessionStart needs at least one anchor
-	// for workspace scoping. Symmetric with ErrMissingWorkspace on the
-	// recall path; together they enforce "every chapterhouse-bound
-	// query carries a workspace, every ingested session is scoped to
-	// one."
+	// ErrMissingWorkspaceOrCwd: SessionStart and Recall each need at
+	// least one anchor for workspace scoping — an explicit workspace or
+	// a cwd to derive one from. Together they enforce "every
+	// chapterhouse-bound query carries a workspace, every ingested
+	// session is scoped to one."
 	ErrMissingWorkspaceOrCwd = fmt.Errorf("%w: workspace_id or cwd required", ErrValidation)
 )
 
@@ -140,9 +153,28 @@ func (c *Core) resolveImplicitSession(ctx context.Context, in RecordInput) (stri
 	}
 	workspaceID := WorkspaceForCwd(*in.Cwd).String()
 
-	sessions, err := c.Sietch.ListSessions(ctx, in.UserID)
+	if sid, ok, err := c.findOpenSession(ctx, in.UserID, workspaceID); err != nil {
+		return "", err
+	} else if ok {
+		return sid, nil
+	}
+
+	sess, err := c.SessionStart(ctx, SessionStartInput{
+		UserID: in.UserID,
+		Cwd:    in.Cwd,
+	})
 	if err != nil {
-		return "", fmt.Errorf("list sessions (user=%q): %w", in.UserID, err)
+		return "", fmt.Errorf("auto session_start: %w", err)
+	}
+	return sess.ID, nil
+}
+
+// findOpenSession returns the most-recent un-ended session for
+// (userID, workspaceID), or ok=false when there is none.
+func (c *Core) findOpenSession(ctx context.Context, userID, workspaceID string) (string, bool, error) {
+	sessions, err := c.Sietch.ListSessions(ctx, userID)
+	if err != nil {
+		return "", false, fmt.Errorf("list sessions (user=%q): %w", userID, err)
 	}
 	var best *Session
 	for i := range sessions {
@@ -154,18 +186,10 @@ func (c *Core) resolveImplicitSession(ctx context.Context, in RecordInput) (stri
 			best = s
 		}
 	}
-	if best != nil {
-		return best.ID, nil
+	if best == nil {
+		return "", false, nil
 	}
-
-	sess, err := c.SessionStart(ctx, SessionStartInput{
-		UserID: in.UserID,
-		Cwd:    in.Cwd,
-	})
-	if err != nil {
-		return "", fmt.Errorf("auto session_start: %w", err)
-	}
-	return sess.ID, nil
+	return best.ID, true, nil
 }
 
 // SessionEnd finalizes the session — flushes any remaining events to
@@ -238,9 +262,16 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 	if len(ev.Embedding) == 0 && ev.Text != nil && *ev.Text != "" {
 		emb, err := c.Embedder.Embed(ctx, *ev.Text)
 		if err != nil {
-			return Event{}, fmt.Errorf("embed (session=%q): %w", ev.SessionID, err)
+			// Never lose a write because the embedder is down. The
+			// event lands in sietch without an embedding; the encoding
+			// worker's backfill pass (BackfillEmbeddings) fills it in
+			// when the embedder recovers, and Consolidate holds it
+			// back from chapterhouse until then.
+			slog.WarnContext(ctx, "embed failed; recording without embedding",
+				"session_id", ev.SessionID, "err", err.Error())
+		} else {
+			ev.Embedding = emb
 		}
-		ev.Embedding = emb
 	}
 
 	stored, err := c.Sietch.RecordEvent(ctx, ev)
@@ -251,6 +282,40 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 		return stored, fmt.Errorf("set current: %w", err)
 	}
 	return stored, nil
+}
+
+// BackfillEmbeddings embeds events recorded while the embedder was
+// down (Record degrades to no-embedding rather than losing the write).
+// Returns the number backfilled. Called by the encoding worker before
+// each Consolidate pass; safe to call any time.
+func (c *Core) BackfillEmbeddings(ctx context.Context, sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, ErrMissingSessionID
+	}
+	const batch = 64
+	total := 0
+	for {
+		evs, err := c.Sietch.EventsNeedingEmbedding(ctx, sessionID, batch)
+		if err != nil {
+			return total, fmt.Errorf("events needing embedding (session=%q): %w", sessionID, err)
+		}
+		if len(evs) == 0 {
+			return total, nil
+		}
+		for _, ev := range evs {
+			emb, err := c.Embedder.Embed(ctx, *ev.Text)
+			if err != nil {
+				return total, fmt.Errorf("backfill embed (session=%q event=%q): %w", sessionID, ev.ID, err)
+			}
+			if err := c.Sietch.SetEmbedding(ctx, sessionID, ev.ID, emb); err != nil {
+				return total, fmt.Errorf("set embedding (event=%q): %w", ev.ID, err)
+			}
+			total++
+		}
+		if len(evs) < batch {
+			return total, nil
+		}
+	}
 }
 
 // Branch starts a new child event from an existing parent and moves
@@ -300,8 +365,15 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	if in.UserID == "" {
 		return RecallResult{}, ErrMissingUserID
 	}
+	// Workspace resolution mirrors Record: explicit wins, else derive
+	// from cwd. The `*in.Cwd != ""` guard catches the pointer-to-empty
+	// case so we don't collapse every empty-cwd recall onto a single
+	// bogus WorkspaceForCwd("") id.
+	if in.Workspace == "" && in.Cwd != nil && *in.Cwd != "" {
+		in.Workspace = WorkspaceForCwd(*in.Cwd).String()
+	}
 	if in.Workspace == "" {
-		return RecallResult{}, ErrMissingWorkspace
+		return RecallResult{}, ErrMissingWorkspaceOrCwd
 	}
 	if in.Limit <= 0 {
 		in.Limit = 10
@@ -312,6 +384,16 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		in.IncludeSietch = true
 		in.IncludeEpisode = true
 		in.IncludeSemant = true
+	}
+
+	// The MCP agent rarely knows a session id. When the working tier is
+	// requested without one, scope it to the most-recent open session
+	// in this workspace — the same session Record would append to.
+	// A miss or error just means no working-tier hits, not a failure.
+	if in.IncludeSietch && in.SessionID == "" {
+		if sid, ok, err := c.findOpenSession(ctx, in.UserID, in.Workspace); err == nil && ok {
+			in.SessionID = sid
+		}
 	}
 
 	// Per-stage wall-clock timings, opt-in via in.IncludeTimings.
@@ -333,6 +415,7 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		recallStart = time.Now()
 	}
 
+	var degraded []string
 	var emb []float32
 	if in.QueryText != "" {
 		var embStart time.Time
@@ -344,24 +427,36 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			timings["embed"] = ms(time.Since(embStart))
 		}
 		if err != nil {
-			return RecallResult{}, fmt.Errorf("embed query (user=%q workspace=%q): %w", in.UserID, in.Workspace, err)
+			// Lexical tiers don't need the query embedding; degrade
+			// to FTS-only instead of failing the whole recall.
+			slog.WarnContext(ctx, "query embed failed; lexical-only recall",
+				"err", err.Error())
+			degraded = append(degraded, "embed")
+		} else {
+			emb = e
 		}
-		emb = e
 	}
 
-	// Per-tier fan-out, parallelized via errgroup. Each tier writes to
-	// its own captured slice — no shared state, no mutex needed. The
-	// errgroup-derived context cancels in-flight tiers if any one
-	// returns an error, so we don't waste compute on results that will
-	// be discarded. Sietch's two sub-queries (vector + FTS) write to
-	// separate slices and merge after Wait so we don't race on a single
-	// append target.
+	// Per-tier fan-out, parallelized via sync.WaitGroup. The tiers are
+	// independent: each goroutine wraps its call in its own
+	// context.WithTimeout(ctx, c.TierTimeout) and writes ONLY its own
+	// captured hit slice, duration, and error variable. No shared
+	// mutable state crosses goroutines, and wg.Wait() establishes a
+	// happens-before edge for every read below — safe under -race.
 	//
-	// Ordering after Wait is irrelevant: RRF + dedup-by-key are
-	// order-independent, and exemplar selection picks the highest raw
-	// score across tiers. The sequential order the previous version had
-	// (sietch → episodic → keyword → session-vector → semantic) was an
-	// accident of code layout, not a behavioral contract.
+	// Degrade-and-report, not cancel-on-first-error: a tier that times
+	// out or errors is dropped from the fan-out and its name is appended
+	// to `degraded` after Wait. The surviving tiers' hits still fuse and
+	// return. Only when EVERY attempted tier failed (failed == attempted,
+	// attempted > 0) do we error — there are no hits to return. This is
+	// the deliberate inverse of the old errgroup contract, where the
+	// first tier error cancelled the rest and sank the whole recall;
+	// one slow or down tier must not take recall with it.
+	//
+	// Ordering after Wait is irrelevant to RRF: dedup-by-key and fusion
+	// are order-independent, and exemplar selection picks the highest
+	// raw score across tiers. The degraded-tier list IS order-stable
+	// (fixed check order below) so callers get deterministic JSON.
 	var (
 		sietchVectorHits  []RecallHit
 		sietchFTSHits     []RecallHit
@@ -377,43 +472,63 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		// non-nil empty → flag was on but no in-set boosts surfaced (the
 		// seeded set has no associations among themselves) — RRF treats
 		// this as a tier with zero entries, a clean no-op.
-		primitivesHits    []RecallHit
+		primitivesHits []RecallHit
 
-		sietchVectorDur   time.Duration
-		sietchFTSDur      time.Duration
-		episodicMultiDur  time.Duration
-		semanticDur       time.Duration
+		sietchVectorDur  time.Duration
+		sietchFTSDur     time.Duration
+		episodicMultiDur time.Duration
+		semanticDur      time.Duration
+
+		// Per-tier errors. Each goroutine writes only its own; read
+		// after Wait. sietch vector + FTS land in the episodic / sietch
+		// degrade buckets below via the fixed check order.
+		sietchVectorErr error
+		sietchFTSErr    error
+		episodicErr     error
+		semanticErr     error
 	)
 
 	var fanoutStart time.Time
 	if in.IncludeTimings {
 		fanoutStart = time.Now()
 	}
-	g, gctx := errgroup.WithContext(ctx)
+
+	var wg sync.WaitGroup
+	run := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
+	// attempted counts the tiers actually fanned out (gates passed), so
+	// the all-fail check below distinguishes "every tier we tried died"
+	// from "no tier was eligible" (attempted == 0, not an error).
+	attempted := 0
 
 	if in.IncludeSietch && in.SessionID != "" {
 		if len(emb) > 0 {
-			g.Go(func() error {
+			attempted++
+			run(func() {
+				tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+				defer cancel()
 				s := time.Now()
-				h, err := c.Sietch.SearchVector(gctx, in.SessionID, emb, in.Limit)
+				h, err := c.Sietch.SearchVector(tctx, in.SessionID, emb, in.Limit)
 				sietchVectorDur = time.Since(s)
 				if err != nil {
-					return fmt.Errorf("sietch vector (session=%q): %w", in.SessionID, err)
+					sietchVectorErr = fmt.Errorf("sietch vector (session=%q): %w", in.SessionID, err)
+					return
 				}
 				sietchVectorHits = h
-				return nil
 			})
 		}
 		if in.QueryText != "" {
-			g.Go(func() error {
+			attempted++
+			run(func() {
+				tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+				defer cancel()
 				s := time.Now()
-				h, err := c.Sietch.SearchFTS(gctx, in.SessionID, in.QueryText, in.Limit)
+				h, err := c.Sietch.SearchFTS(tctx, in.SessionID, in.QueryText, in.Limit)
 				sietchFTSDur = time.Since(s)
 				if err != nil {
-					return fmt.Errorf("sietch fts (session=%q): %w", in.SessionID, err)
+					sietchFTSErr = fmt.Errorf("sietch fts (session=%q): %w", in.SessionID, err)
+					return
 				}
 				sietchFTSHits = h
-				return nil
 			})
 		}
 	}
@@ -429,9 +544,8 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		//     is meaningless.
 		//   - "session_vector" requires an embedding; without one the
 		//     pooled-vector cosine has nothing to score against.
-		// One round-trip drives all requested tiers (errgroup is
-		// preserved so the semantic tier still runs in parallel with
-		// the multi call).
+		// One round-trip drives all requested tiers; it runs in parallel
+		// with the semantic call.
 		rankings := make([]string, 0, 3)
 		rankings = append(rankings, "vector")
 		if in.QueryText != "" {
@@ -441,9 +555,12 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			rankings = append(rankings, "session_vector")
 		}
 
-		g.Go(func() error {
+		attempted++
+		run(func() {
+			tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+			defer cancel()
 			s := time.Now()
-			res, err := c.Chapterhouse.QueryEpisodicMulti(gctx, EpisodicMultiQuery{
+			res, err := c.Chapterhouse.QueryEpisodicMulti(tctx, EpisodicMultiQuery{
 				UserID:         in.UserID,
 				WorkspaceID:    in.Workspace,
 				QueryText:      in.QueryText,
@@ -456,7 +573,8 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			})
 			episodicMultiDur = time.Since(s)
 			if err != nil {
-				return fmt.Errorf("episodic multi (user=%q workspace=%q): %w", in.UserID, in.Workspace, err)
+				episodicErr = fmt.Errorf("episodic multi (user=%q workspace=%q): %w", in.UserID, in.Workspace, err)
+				return
 			}
 			// Map each requested ranking sub-list back onto the
 			// per-tier hit slot the post-fan-out RRF logic already
@@ -476,14 +594,16 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			if res.Primitives != nil {
 				primitivesHits = *res.Primitives
 			}
-			return nil
 		})
 	}
 
 	if in.IncludeSemant {
-		g.Go(func() error {
+		attempted++
+		run(func() {
+			tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+			defer cancel()
 			s := time.Now()
-			h, err := c.Chapterhouse.QuerySemantic(gctx, SemanticQuery{
+			h, err := c.Chapterhouse.QuerySemantic(tctx, SemanticQuery{
 				Workspace:      in.Workspace,
 				QueryText:      in.QueryText,
 				QueryEmbedding: emb,
@@ -491,16 +611,45 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			})
 			semanticDur = time.Since(s)
 			if err != nil {
-				return fmt.Errorf("semantic: %w", err)
+				semanticErr = fmt.Errorf("semantic: %w", err)
+				return
 			}
 			semanticHits = h
-			return nil
 		})
 	}
 
-	if err := g.Wait(); err != nil {
-		return RecallResult{}, err
+	wg.Wait()
+
+	// Tally tier failures in a fixed order so RecallResult.Degraded is
+	// stable JSON for callers. sietch's two sub-queries collapse into
+	// "sietch_vector" / "sietch_fts" degrade entries; the episodic multi
+	// call is one "episodic" entry; semantic is one "semantic" entry.
+	checks := []struct {
+		name string
+		err  error
+	}{
+		{"sietch_vector", sietchVectorErr},
+		{"sietch_fts", sietchFTSErr},
+		{"episodic", episodicErr},
+		{"semantic", semanticErr},
 	}
+	var firstErr error
+	failed := 0
+	for _, ck := range checks {
+		if ck.err == nil {
+			continue
+		}
+		failed++
+		degraded = append(degraded, ck.name)
+		if firstErr == nil {
+			firstErr = ck.err
+		}
+		slog.WarnContext(ctx, "recall tier failed; degrading", "tier", ck.name, "err", ck.err.Error())
+	}
+	if attempted > 0 && failed == attempted {
+		return RecallResult{}, fmt.Errorf("recall: all %d tiers failed (%s): %w", attempted, strings.Join(degraded, ", "), firstErr)
+	}
+
 	if in.IncludeTimings {
 		timings["fanout_total"] = ms(time.Since(fanoutStart))
 		if sietchVectorDur > 0 {
@@ -660,7 +809,7 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	if in.IncludeTimings {
 		timings["total"] = ms(time.Since(recallStart))
 	}
-	return RecallResult{Hits: hits, TierCounts: counts, Timings: timings}, nil
+	return RecallResult{Hits: hits, TierCounts: counts, Timings: timings, Degraded: degraded}, nil
 }
 
 // ms converts a duration to milliseconds with sub-ms precision (3 decimals).
@@ -881,6 +1030,26 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, nil
 	}
 
+	// Ship only the contiguous prefix of embedded events. Events past
+	// the first un-embedded one are held back — the watermark must stay
+	// a contiguous prefix of the id-ordered log, and the backfill pass
+	// (BackfillEmbeddings) will fill the gap before the next tick.
+	cut := len(pending)
+	for i := range pending {
+		if needsEmbedding(pending[i]) {
+			cut = i
+			break
+		}
+	}
+	if held := len(pending) - cut; held > 0 {
+		slog.InfoContext(ctx, "consolidate: holding back events awaiting embedding",
+			"session_id", sessionID, "held", held)
+	}
+	if cut == 0 {
+		return 0, nil
+	}
+	pending = pending[:cut]
+
 	// Source the session row from sietch so ended_at, cwd, agent_kind,
 	// etc. all flow through to chapterhouse on every consolidation
 	// pass. Chapterhouse UPSERTs on id, so the same session metadata
@@ -921,4 +1090,10 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, fmt.Errorf("advance watermark: %w", err)
 	}
 	return len(pending), nil
+}
+
+// needsEmbedding reports whether an event should carry an embedding
+// but doesn't yet (recorded while the embedder was unreachable).
+func needsEmbedding(ev Event) bool {
+	return len(ev.Embedding) == 0 && ev.Text != nil && *ev.Text != ""
 }

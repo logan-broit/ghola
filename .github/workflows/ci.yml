@@ -21,7 +21,7 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./...
+      - run: go test -race ./...
 
   go-chapterhouse:
     name: go (chapterhouse)
@@ -40,11 +40,10 @@ jobs:
           cache-dependency-path: _chapterhouse/ch-server/go.sum
       - run: go vet ./...
       - run: go build ./...
-      # Skip packages that require a live Postgres + migrations. They
-      # pass locally via `make test` / `make smoke-predictive`; wiring
-      # them into CI needs a postgres service + migration step (open
-      # work for v0.1+).
-      - run: go test ./internal/auth/... ./internal/config/... ./internal/embedding/... ./internal/mneme/... ./internal/middleware/... ./internal/primitives/... ./internal/secrets/...
+      # Postgres-dependent packages (handler, repository, consolidation,
+      # semantic) self-provision pgvector/pgvector:pg17 via
+      # testcontainers — the runner's Docker daemon is all they need.
+      - run: go test -race -timeout 20m ./...
 
   go-chweb:
     name: go (ch-web)
@@ -63,3 +62,22 @@ jobs:
           cache-dependency-path: _chapterhouse/ch-web/go.sum
       - run: go vet ./...
       - run: go build ./...
+
+  python-mentat:
+    name: pytest (mentat)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mentat
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # torch is a hard dep (pooler.py). Pull the CPU-only wheel first so
+      # the editable install below doesn't drag in the ~2GB CUDA build.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e '.[dev]'
+      # Skip the integration test (test_cluster_endpoint.py); it needs a
+      # live Postgres with the chapterhouse schemas — out of scope here.
+      - run: pytest tests -q -m "not integration"

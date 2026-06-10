@@ -25,20 +25,35 @@ import (
 // ---------------------------------------------------------------------
 
 type fakeSietch struct {
-	opened   []core.Session
-	closed   []string
-	ended    map[string]time.Time
-	events   []core.Event
-	current  map[string]string
-	bookmarks []struct{ SessionID, EventID, Label string }
-	softForget []struct{ SessionID string; IDs []string }
+	opened     []core.Session
+	closed     []string
+	ended      map[string]time.Time
+	events     []core.Event
+	current    map[string]string
+	bookmarks  []struct{ SessionID, EventID, Label string }
+	softForget []struct {
+		SessionID string
+		IDs       []string
+	}
 
 	watermarks map[string]string
 	pending    map[string][]core.Event
 
+	// needEmbedding is the canned EventsNeedingEmbedding result per
+	// session; setEmbeddings records the (sessionID,eventID) backfills
+	// BackfillEmbeddings drives.
+	needEmbedding map[string][]core.Event
+	setEmbeddings []struct{ SessionID, EventID string }
+
 	vectorHits map[string][]core.RecallHit
 	ftsHits    map[string][]core.RecallHit
 	sessions   []core.Session
+
+	// searchVectorSessions / searchFTSSessions capture the session id
+	// each working-tier sub-query was invoked with — tests assert the
+	// implicit open-session resolution scoped the call correctly.
+	searchVectorSessions []string
+	searchFTSSessions    []string
 
 	// metadata returned by GetSession, keyed by session id. Tests that
 	// care about ended_at / cwd / etc. populate this directly.
@@ -47,13 +62,14 @@ type fakeSietch struct {
 
 func newFakeSietch() *fakeSietch {
 	return &fakeSietch{
-		current:     map[string]string{},
-		watermarks:  map[string]string{},
-		pending:     map[string][]core.Event{},
-		vectorHits:  map[string][]core.RecallHit{},
-		ftsHits:     map[string][]core.RecallHit{},
-		ended:       map[string]time.Time{},
-		sessionRows: map[string]core.Session{},
+		current:       map[string]string{},
+		watermarks:    map[string]string{},
+		pending:       map[string][]core.Event{},
+		vectorHits:    map[string][]core.RecallHit{},
+		ftsHits:       map[string][]core.RecallHit{},
+		ended:         map[string]time.Time{},
+		sessionRows:   map[string]core.Session{},
+		needEmbedding: map[string][]core.Event{},
 	}
 }
 
@@ -97,16 +113,21 @@ func (f *fakeSietch) CurrentEvent(_ context.Context, sid string) (string, error)
 	return f.current[sid], nil
 }
 func (f *fakeSietch) SearchVector(_ context.Context, sid string, _ []float32, _ int) ([]core.RecallHit, error) {
+	f.searchVectorSessions = append(f.searchVectorSessions, sid)
 	return f.vectorHits[sid], nil
 }
 func (f *fakeSietch) SearchFTS(_ context.Context, sid, _ string, _ int) ([]core.RecallHit, error) {
+	f.searchFTSSessions = append(f.searchFTSSessions, sid)
 	return f.ftsHits[sid], nil
 }
 func (f *fakeSietch) ListSessions(_ context.Context, _ string) ([]core.Session, error) {
 	return f.sessions, nil
 }
 func (f *fakeSietch) SoftForget(_ context.Context, sid string, ids []string) error {
-	f.softForget = append(f.softForget, struct{ SessionID string; IDs []string }{sid, ids})
+	f.softForget = append(f.softForget, struct {
+		SessionID string
+		IDs       []string
+	}{sid, ids})
 	return nil
 }
 func (f *fakeSietch) Watermark(_ context.Context, sid string) (string, error) {
@@ -119,25 +140,38 @@ func (f *fakeSietch) SetWatermark(_ context.Context, sid, eid string) error {
 func (f *fakeSietch) PendingEvents(_ context.Context, sid, _ string) ([]core.Event, error) {
 	return f.pending[sid], nil
 }
+func (f *fakeSietch) EventsNeedingEmbedding(_ context.Context, sid string, _ int) ([]core.Event, error) {
+	return f.needEmbedding[sid], nil
+}
+func (f *fakeSietch) SetEmbedding(_ context.Context, sid, eid string, _ []float32) error {
+	f.setEmbeddings = append(f.setEmbeddings, struct{ SessionID, EventID string }{sid, eid})
+	return nil
+}
 
 type fakeChapterhouse struct {
-	ingests []struct{ Sess core.Session; Events []core.Event }
+	ingests []struct {
+		Sess   core.Session
+		Events []core.Event
+	}
 	// multiQueries records every QueryEpisodicMulti call — the only
 	// event-grain entry point core.Recall uses post-A6.
 	multiQueries []core.EpisodicMultiQuery
 	semQueries   []core.SemanticQuery
 	shares       []core.ShareInput
-	forgets      []struct{ UserID string; IDs []string }
+	forgets      []struct {
+		UserID string
+		IDs    []string
+	}
 
 	inserted, updated int
 	// Per-tier canned responses keyed by the multi-ranking sub-list
 	// they populate (vector → Vector, fts → FTS, session_vector →
 	// SessionVector). Tests set these directly; QueryEpisodicMulti
 	// projects them onto the response based on q.Rankings.
-	episResp    []core.RecallHit
-	kwResp      []core.RecallHit
-	svResp      []core.RecallHit
-	semResp     []core.RecallHit
+	episResp []core.RecallHit
+	kwResp   []core.RecallHit
+	svResp   []core.RecallHit
+	semResp  []core.RecallHit
 	// primResp drives the 4th sub-list (Primitives). Three-state
 	// semantics mirror the wire (chapterhouse.QueryEpisodicMultiResponse):
 	//   - nil → primitives field absent on the response (flag off, OR
@@ -148,10 +182,23 @@ type fakeChapterhouse struct {
 	// QueryEpisodicMulti only surfaces this when q.Primitives=true — so
 	// tests that set primResp without flipping the flag still pin the
 	// "off → no primitives sub-list" property.
-	primResp *[]core.RecallHit
+	primResp    *[]core.RecallHit
 	shareID     string
 	forgetCount int
 	err         error
+
+	// multiErr / semErr let recall-degradation tests fail one
+	// chapterhouse tier independently of the other (the shared `err`
+	// field above fails everything at once, which the happy-path tests
+	// don't touch). When set they take precedence over `err` for that
+	// method.
+	multiErr error
+	semErr   error
+	// semBlockUntilCtxDone makes QuerySemantic block until its context
+	// is cancelled, then return ctx.Err(). Drives the per-tier timeout
+	// test without a fixed sleep — the tier unblocks the instant
+	// TierTimeout fires.
+	semBlockUntilCtxDone bool
 }
 
 func newFakeChapterhouse() *fakeChapterhouse {
@@ -159,7 +206,10 @@ func newFakeChapterhouse() *fakeChapterhouse {
 }
 
 func (f *fakeChapterhouse) IngestEpisodic(_ context.Context, s core.Session, events []core.Event) (int, int, error) {
-	f.ingests = append(f.ingests, struct{ Sess core.Session; Events []core.Event }{s, events})
+	f.ingests = append(f.ingests, struct {
+		Sess   core.Session
+		Events []core.Event
+	}{s, events})
 	return f.inserted, f.updated, f.err
 }
 
@@ -169,6 +219,9 @@ func (f *fakeChapterhouse) IngestEpisodic(_ context.Context, s core.Session, eve
 // contract ghola.client implements.
 func (f *fakeChapterhouse) QueryEpisodicMulti(_ context.Context, q core.EpisodicMultiQuery) (core.EpisodicMultiResult, error) {
 	f.multiQueries = append(f.multiQueries, q)
+	if f.multiErr != nil {
+		return core.EpisodicMultiResult{}, f.multiErr
+	}
 	if f.err != nil {
 		return core.EpisodicMultiResult{}, f.err
 	}
@@ -200,14 +253,24 @@ func (f *fakeChapterhouse) ShareEpisodic(_ context.Context, s core.ShareInput) (
 	return f.shareID, f.err
 }
 func (f *fakeChapterhouse) ForgetEpisodic(_ context.Context, uid string, ids []string) (int, error) {
-	f.forgets = append(f.forgets, struct{ UserID string; IDs []string }{uid, ids})
+	f.forgets = append(f.forgets, struct {
+		UserID string
+		IDs    []string
+	}{uid, ids})
 	return f.forgetCount, f.err
 }
 func (f *fakeChapterhouse) AddSessionWorkspace(_ context.Context, _ core.AddSessionWorkspaceInput) (bool, error) {
 	return true, f.err
 }
-func (f *fakeChapterhouse) QuerySemantic(_ context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
+func (f *fakeChapterhouse) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	f.semQueries = append(f.semQueries, q)
+	if f.semBlockUntilCtxDone {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if f.semErr != nil {
+		return nil, f.semErr
+	}
 	return f.semResp, f.err
 }
 
@@ -363,6 +426,45 @@ func TestConsolidate_LeavesEndedAtNilForActiveSessions(t *testing.T) {
 	require.Len(t, ch.ingests, 1)
 	assert.Nil(t, ch.ingests[0].Sess.EndedAt,
 		"active session must not carry ended_at; reconciler eligibility flips on this column")
+}
+
+// TestConsolidate_HoldsBackUnembeddedSuffix: the watermark must stay a
+// contiguous prefix of the id-ordered log. An un-embedded event (one
+// recorded while the embedder was down) cuts the shippable prefix —
+// everything from it onward is held back until backfill catches up.
+func TestConsolidate_HoldsBackUnembeddedSuffix(t *testing.T) {
+	c, s, ch, _ := newCore()
+	e1 := core.Event{ID: "e1", UserID: "u1", SessionID: "sess", Type: "user",
+		Text: strPtr("a"), Embedding: []float32{1, 0}}
+	e2 := core.Event{ID: "e2", UserID: "u1", SessionID: "sess", Type: "user",
+		Text: strPtr("b")} // no embedding -> the cut point
+	e3 := core.Event{ID: "e3", UserID: "u1", SessionID: "sess", Type: "user",
+		Text: strPtr("c"), Embedding: []float32{0, 1}}
+	s.pending["sess"] = []core.Event{e1, e2, e3}
+
+	n, err := c.Consolidate(context.Background(), "sess")
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the embedded prefix ships")
+	require.Len(t, ch.ingests, 1)
+	require.Len(t, ch.ingests[0].Events, 1)
+	assert.Equal(t, "e1", ch.ingests[0].Events[0].ID)
+	assert.Equal(t, "e1", s.watermarks["sess"], "watermark advances only to the shipped prefix")
+}
+
+// TestConsolidate_AllUnembedded_NoOp: when the very first pending event
+// still needs an embedding there is no contiguous embedded prefix to
+// ship. Consolidate must no-op: no ingest, no watermark advance.
+func TestConsolidate_AllUnembedded_NoOp(t *testing.T) {
+	c, s, ch, _ := newCore()
+	s.pending["sess"] = []core.Event{
+		{ID: "e1", UserID: "u1", SessionID: "sess", Type: "user", Text: strPtr("a")},
+	}
+
+	n, err := c.Consolidate(context.Background(), "sess")
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+	assert.Empty(t, ch.ingests, "nothing embedded -> nothing ships")
+	assert.Empty(t, s.watermarks["sess"], "watermark must not advance")
 }
 
 func TestListSessions_DelegatesToSietch(t *testing.T) {
@@ -687,11 +789,12 @@ func TestRecall_RRFFavorsCrossTierAgreement(t *testing.T) {
 // agreement on top of dense agreement compounds further.
 //
 // Layout (event-grain after the dedup-by-grain fix):
-//   evt-fts:   only the keyword tier matches (literal phrase that
-//              didn't embed well — proper noun, code identifier).
-//   evt-dense: only the dense episodic tier matches.
-//   evt-both:  matches in dense AND keyword (same event_id surfaced
-//              by both tiers — cross-tier agreement compounds RRF).
+//
+//	evt-fts:   only the keyword tier matches (literal phrase that
+//	           didn't embed well — proper noun, code identifier).
+//	evt-dense: only the dense episodic tier matches.
+//	evt-both:  matches in dense AND keyword (same event_id surfaced
+//	           by both tiers — cross-tier agreement compounds RRF).
 func TestRecall_KeywordTierParticipatesInRRF(t *testing.T) {
 	c, s, ch, _ := newCore()
 	sidFTS := "s-fts"
@@ -738,15 +841,16 @@ func TestRecall_KeywordTierParticipatesInRRF(t *testing.T) {
 // Recall output.
 //
 // Layout:
-//   sid-sv-only:  matches only on episodic.sessions.l1_embedding
-//                 (paraphrase-style query the per-event vector misses).
-//   sid-ep-only:  matches only on the per-event dense tier.
-//   sid-both:     matches in both tiers — surfaces as TWO hits because
-//                 the session-vector tier produces session-grain output
-//                 and the per-event tier produces event-grain output.
-//                 They are not the same "document"; collapsing them
-//                 erases the per-event identity, which is what dedup-
-//                 by-grain prevents.
+//
+//	sid-sv-only:  matches only on episodic.sessions.l1_embedding
+//	              (paraphrase-style query the per-event vector misses).
+//	sid-ep-only:  matches only on the per-event dense tier.
+//	sid-both:     matches in both tiers — surfaces as TWO hits because
+//	              the session-vector tier produces session-grain output
+//	              and the per-event tier produces event-grain output.
+//	              They are not the same "document"; collapsing them
+//	              erases the per-event identity, which is what dedup-
+//	              by-grain prevents.
 func TestRecall_SessionVectorTierParticipatesInRRF(t *testing.T) {
 	c, _, ch, _ := newCore()
 	sidSVOnly := "s-sv-only"
@@ -1271,6 +1375,173 @@ func TestRecall_RerankFallsBackToContentWhenSessionChunkEmpty(t *testing.T) {
 	assert.Equal(t, "the meeting is at 3pm", first["text"], "fallback to exemplar Content")
 }
 
+// TestRecall_CwdDerivesWorkspace: an MCP agent rarely knows the
+// workspace UUID, but it always knows cwd. When Workspace is empty and
+// Cwd is set, Recall must derive the workspace via WorkspaceForCwd —
+// the same mapping Record uses — and scope the chapterhouse tiers to it.
+func TestRecall_CwdDerivesWorkspace(t *testing.T) {
+	c, _, ch, _ := newCore()
+	cwd := "/tmp/proj"
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Cwd:       strPtr(cwd),
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.multiQueries, 1)
+	assert.Equal(t, core.WorkspaceForCwd(cwd).String(), ch.multiQueries[0].WorkspaceID,
+		"workspace derived from cwd reaches the chapterhouse query")
+}
+
+// TestRecall_NoWorkspaceNoCwd_Errors: neither an explicit workspace nor
+// a cwd to derive one from -> validation error so the boundary returns
+// 400 instead of an unscoped recall.
+func TestRecall_NoWorkspaceNoCwd_Errors(t *testing.T) {
+	c, _, _, _ := newCore()
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		QueryText: "kubernetes",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+}
+
+// TestRecall_CwdPointerToEmptyDoesNotDerive: a non-nil pointer to ""
+// must NOT derive WorkspaceForCwd("") — that would collapse every
+// empty-cwd recall to a single bogus workspace. Mirrors Record's guard.
+func TestRecall_CwdPointerToEmptyDoesNotDerive(t *testing.T) {
+	c, _, _, _ := newCore()
+	empty := ""
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Cwd:       &empty,
+		QueryText: "kubernetes",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+}
+
+// TestRecall_ResolvesOpenSessionForSietchTier: the working tier needs a
+// session id, but the MCP agent rarely has one. When IncludeSietch is
+// requested without a session_id, Recall must scope it to the most-
+// recent open session in the derived workspace — the same session
+// Record would append to — and drive SearchVector/SearchFTS with it.
+func TestRecall_ResolvesOpenSessionForSietchTier(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	ws := core.WorkspaceForCwd(cwd).String()
+	s.sessions = []core.Session{{
+		ID:          "sess-open",
+		UserID:      "u1",
+		WorkspaceID: ws,
+		StartedAt:   time.Unix(1_700_000_000, 0).UTC(),
+		// EndedAt nil -> still open
+	}}
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:        "u1",
+		Cwd:           strPtr(cwd),
+		QueryText:     "kubernetes",
+		IncludeSietch: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, s.searchVectorSessions, "sess-open",
+		"working-tier vector search scoped to the resolved open session")
+	assert.Contains(t, s.searchFTSSessions, "sess-open",
+		"working-tier FTS search scoped to the resolved open session")
+}
+
+// TestRecall_EmbedFailure_DegradesToLexical: when the embedder is down
+// the lexical tiers (FTS) need no embedding, so recall must degrade to
+// FTS-only instead of hard-failing. The multi call still fires but with
+// an empty QueryEmbedding and rankings limited to ["vector","fts"]
+// (session_vector needs an embedding and is dropped).
+func TestRecall_EmbedFailure_DegradesToLexical(t *testing.T) {
+	c, _, ch, emb := newCore()
+	emb.err = errors.New("guild down")
+	ch.kwResp = []core.RecallHit{{Tier: "keyword", Score: 0.5, ID: "k1"}}
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err, "embedder downtime must not fail the whole recall")
+	assert.Contains(t, out.Degraded, "embed")
+	require.Len(t, ch.multiQueries, 1)
+	assert.Empty(t, ch.multiQueries[0].QueryEmbedding,
+		"multi call must run with no embedding when embed failed")
+	assert.ElementsMatch(t, []string{"vector", "fts"}, ch.multiQueries[0].Rankings,
+		"session_vector ranking dropped without an embedding")
+}
+
+// TestRecall_TierFailure_Degrades: one tier failing must not sink the
+// recall. The episodic multi call errors, the semantic tier succeeds —
+// recall returns the semantic hits and reports "episodic" as degraded.
+func TestRecall_TierFailure_Degrades(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.multiErr = errors.New("episodic 503")
+	ch.semResp = []core.RecallHit{{Tier: "semantic", Score: 0.7, ID: "m1"}}
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err, "one tier failing must not fail the recall")
+	require.NotEmpty(t, out.Hits, "surviving semantic hits must come through")
+	assert.Equal(t, "m1", out.Hits[0].ID)
+	assert.Equal(t, []string{"episodic"}, out.Degraded)
+}
+
+// TestRecall_AllTiersFail_Errors: if every attempted tier fails there
+// are no surviving hits, so recall must surface an error that names the
+// all-fail condition and wraps an underlying tier error.
+func TestRecall_AllTiersFail_Errors(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.multiErr = errors.New("episodic 503")
+	ch.semErr = errors.New("semantic 503")
+	// No sietch session — only the two chapterhouse tiers are attempted.
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "all", "error must name the all-fail condition")
+	assert.ErrorContains(t, err, "503", "error must wrap an underlying tier error")
+}
+
+// TestRecall_TierTimeout: a tier that exceeds TierTimeout is dropped
+// and reported degraded — it must not stall or fail the recall. The
+// semantic tier blocks until its context is cancelled; the episodic
+// tier returns instantly. Recall must come back well under a second
+// with episodic hits and "semantic" degraded.
+func TestRecall_TierTimeout(t *testing.T) {
+	c, _, ch, _ := newCore()
+	c.TierTimeout = 10 * time.Millisecond
+	ch.episResp = []core.RecallHit{{Tier: "episodic", Score: 0.7, ID: "e1"}}
+	ch.semBlockUntilCtxDone = true
+
+	start := time.Now()
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err, "a slow tier must not fail the recall")
+	assert.Less(t, elapsed, time.Second, "recall must not block on the slow tier")
+	assert.Contains(t, out.Degraded, "semantic")
+	ids := make([]string, len(out.Hits))
+	for i, h := range out.Hits {
+		ids[i] = h.ID
+	}
+	assert.Contains(t, ids, "e1", "episodic hits must still surface")
+}
+
 func TestForget_AcrossTiers(t *testing.T) {
 	c, s, ch, _ := newCore()
 	ch.forgetCount = 2
@@ -1341,7 +1612,6 @@ func TestConsolidate_NoopWhenEmpty(t *testing.T) {
 	assert.Empty(t, ch.ingests)
 }
 
-
 // A minimal validation sweep so the input-guard branches are covered
 // without a bespoke test per operation.
 func TestInputValidation_MissingIDs(t *testing.T) {
@@ -1376,13 +1646,52 @@ func TestInputValidation_MissingIDs(t *testing.T) {
 }
 
 // Sanity: embedder failures surface.
-func TestRecord_EmbedderErrorPropagates(t *testing.T) {
-	c, _, _, emb := newCore()
+// TestBackfillEmbeddings_FillsAll: the backfill pass drains every
+// event that needs an embedding, calling SetEmbedding for each.
+func TestBackfillEmbeddings_FillsAll(t *testing.T) {
+	c, s, _, _ := newCore()
+	s.needEmbedding["sess"] = []core.Event{
+		{ID: "e1", SessionID: "sess", UserID: "u1", Text: strPtr("a")},
+		{ID: "e2", SessionID: "sess", UserID: "u1", Text: strPtr("b")},
+	}
+
+	n, err := c.BackfillEmbeddings(context.Background(), "sess")
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	require.Len(t, s.setEmbeddings, 2)
+	assert.Equal(t, "e1", s.setEmbeddings[0].EventID)
+	assert.Equal(t, "e2", s.setEmbeddings[1].EventID)
+}
+
+// TestBackfillEmbeddings_EmbedderStillDown: if the embedder errors
+// mid-pass nothing is written; the events stay in the backlog for the
+// next tick.
+func TestBackfillEmbeddings_EmbedderStillDown(t *testing.T) {
+	c, s, _, emb := newCore()
+	emb.err = errors.New("guild still down")
+	s.needEmbedding["sess"] = []core.Event{
+		{ID: "e1", SessionID: "sess", UserID: "u1", Text: strPtr("a")},
+	}
+
+	n, err := c.BackfillEmbeddings(context.Background(), "sess")
+	require.Error(t, err)
+	assert.Equal(t, 0, n)
+	assert.Empty(t, s.setEmbeddings, "no embedding written when the embedder is down")
+}
+
+// TestRecord_EmbedderDown_StoresWithoutEmbedding: a record must never
+// be lost because the embedder is unreachable. Record degrades to a
+// no-embedding write; BackfillEmbeddings fills it in on recovery.
+func TestRecord_EmbedderDown_StoresWithoutEmbedding(t *testing.T) {
+	c, s, _, emb := newCore()
 	emb.err = errors.New("guild down")
-	_, err := c.Record(context.Background(), core.RecordInput{
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
 		SessionID: "sess", UserID: "u1",
 		Event: core.Event{Type: "user", Text: strPtr("needs embedding")},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "embed")
+	require.NoError(t, err, "embedder downtime must not fail the write")
+	require.Len(t, s.events, 1)
+	assert.Empty(t, s.events[0].Embedding, "event lands without an embedding")
+	assert.Equal(t, ev.ID, s.current["sess"], "current pointer still advances")
 }

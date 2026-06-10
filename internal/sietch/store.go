@@ -634,6 +634,58 @@ func (s *Store) PendingEvents(ctx context.Context, sessionID, afterEventID strin
 	return out, rows.Err()
 }
 
+// EventsNeedingEmbedding returns active events that have text but no
+// embedding yet — i.e. events recorded while the embedder was
+// unreachable — in id (chronological) order. Only ID, SessionID,
+// UserID and Text are populated; that is all the backfill pass needs.
+func (s *Store) EventsNeedingEmbedding(ctx context.Context, sessionID string, limit int) ([]core.Event, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	db, err := s.sessionConn(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, session_id, user_id, text
+		FROM events
+		WHERE state = 'active' AND embedding IS NULL
+		  AND text IS NOT NULL AND text != ''
+		ORDER BY id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []core.Event
+	for rows.Next() {
+		var ev core.Event
+		var text sql.NullString
+		if err := rows.Scan(&ev.ID, &ev.SessionID, &ev.UserID, &text); err != nil {
+			return nil, err
+		}
+		ev.Text = stringPtr(text)
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+// SetEmbedding backfills the embedding for one event. The state guard
+// keeps a concurrent forget from being resurrected by a late backfill.
+func (s *Store) SetEmbedding(ctx context.Context, sessionID, eventID string, emb []float32) error {
+	db, err := s.sessionConn(sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		`UPDATE events SET embedding = ? WHERE id = ? AND state = 'active'`,
+		nullBlob(packFloat32(emb)), eventID)
+	return err
+}
+
 // ---------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------

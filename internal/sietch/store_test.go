@@ -172,6 +172,70 @@ func TestSoftForget_FlipsState(t *testing.T) {
 	assert.Empty(t, pending)
 }
 
+func TestEventsNeedingEmbedding_RoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(context.Background(), sess))
+
+	// e1: text but no embedding -> recorded while embedder was down.
+	e1 := mkEvent(sess, "needs embedding", nil)
+	// e2: text AND embedding -> already embedded, must not be returned.
+	e2 := mkEvent(sess, "already embedded", []float32{1, 0, 0, 0})
+	// e3: nil text (e.g. a tool-output-only event) -> nothing to embed.
+	e3 := mkEvent(sess, "", nil)
+	e3.Text = nil
+	// e4: non-nil but empty-string text, no embedding -> still nothing to
+	// embed. Pins the `text != ''` clause in EventsNeedingEmbedding's SQL
+	// against accidental removal (a nil-only guard would wrongly return e4).
+	e4 := mkEvent(sess, "", nil)
+
+	for _, e := range []core.Event{e1, e2, e3, e4} {
+		_, err := s.RecordEvent(context.Background(), e)
+		require.NoError(t, err)
+	}
+
+	need, err := s.EventsNeedingEmbedding(context.Background(), sess.ID, 0)
+	require.NoError(t, err)
+	require.Len(t, need, 1, "only e1 needs embedding; e4's empty-string text must be excluded")
+	assert.Equal(t, e1.ID, need[0].ID)
+	assert.Equal(t, sess.ID, need[0].SessionID)
+	assert.Equal(t, "u1", need[0].UserID)
+	require.NotNil(t, need[0].Text)
+	assert.Equal(t, "needs embedding", *need[0].Text)
+
+	// Backfill the embedding; e1 drops out of the needs-embedding set.
+	require.NoError(t, s.SetEmbedding(context.Background(), sess.ID, e1.ID,
+		[]float32{1, 0, 0, 0}))
+	need, err = s.EventsNeedingEmbedding(context.Background(), sess.ID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, need)
+
+	// And the backfilled event now surfaces under vector search.
+	hits, err := s.SearchVector(context.Background(), sess.ID,
+		[]float32{1, 0, 0, 0}, 10)
+	require.NoError(t, err)
+	ids := make([]string, len(hits))
+	for i, h := range hits {
+		ids[i] = h.ID
+	}
+	assert.Contains(t, ids, e1.ID, "backfilled event must be searchable")
+}
+
+func TestEventsNeedingEmbedding_SkipsForgotten(t *testing.T) {
+	s := newTestStore(t)
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(context.Background(), sess))
+
+	e := mkEvent(sess, "sensitive, un-embedded", nil)
+	_, err := s.RecordEvent(context.Background(), e)
+	require.NoError(t, err)
+	require.NoError(t, s.SoftForget(context.Background(), sess.ID, []string{e.ID}))
+
+	need, err := s.EventsNeedingEmbedding(context.Background(), sess.ID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, need, "forgotten events must never be backfilled")
+}
+
 func TestWatermark_RoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	sess := mkSession("u1")

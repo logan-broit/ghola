@@ -35,6 +35,43 @@ plus the 5-tier RRF fan-out plus cross-encoder rerank
 `single-session-preference` remains the stickiest category and is the
 open work for the next recall-pipeline iteration.
 
+## Pinned configuration (2026-05-17 run)
+
+The published numbers were produced with exactly this stack; treat any
+deviation as a different experiment.
+
+| Knob | Value |
+|---|---|
+| RRF_K | 60 |
+| RERANK_TOPK | 50 |
+| RERANK_WEIGHT | 0.5 |
+| RERANK_TIMEOUT | 30s |
+| TIER_TIMEOUT | 10s |
+| Reranker | BAAI/bge-reranker-v2-m3, fp16, max_length 8192 (CUDA) |
+| Embedder | Qwen3-Embedding-0.6B, 1024-dim, served by vLLM (fp16) |
+| Dataset | LongMemEval-S, 500 questions |
+| Harness | GHOLA_V2_DELEGATE=1 (core.Recall end-to-end) |
+
+These are the `core.Config` defaults (`internal/core/core.go`,
+`New()`); `RRF_K`, `RERANK_TOPK`, `RERANK_WEIGHT`, and
+`GHOLA_TIER_TIMEOUT_MS` are env-overridable (`cmd/ghola/main.go`).
+`RERANK_TIMEOUT` is a code default only. Reranker/embedder values are
+the committed `deploy/docker-compose/docker-compose.yml` defaults
+(`truthsayer` and `guild` services).
+
+Caveats, stated plainly:
+
+- Single run; no variance estimate yet. A 3x rerun is open work — treat
+  the digits after the decimal point accordingly.
+- These are retrieval metrics (R@k over evidence sessions), not
+  end-to-end QA accuracy. They are not comparable to QA-accuracy numbers
+  other systems report on the same benchmark.
+- Serving-stack sensitivity: these numbers were produced with the
+  embedder served by vLLM at fp16. Serving the same model through a
+  different stack or quantization (e.g. llama.cpp with a Q8_0 GGUF)
+  changes the embeddings — re-validate before comparing against these
+  numbers.
+
 ## Running the harness
 
 The ghola backend adapter lives in this repo at

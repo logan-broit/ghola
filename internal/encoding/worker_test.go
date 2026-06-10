@@ -3,6 +3,7 @@ package encoding_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -49,6 +50,18 @@ func (*recordingChapterhouse) QuerySemantic(context.Context, core.SemanticQuery)
 type nullEmbedder struct{}
 
 func (nullEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return []float32{0.1, 0.2, 0.3, 0.4}, nil
+}
+
+// toggleEmbedder simulates embedder downtime: while down it errors, so
+// Record degrades to a no-embedding write; flipping up lets the
+// backfill pass embed the backlog.
+type toggleEmbedder struct{ down bool }
+
+func (e *toggleEmbedder) Embed(context.Context, string) ([]float32, error) {
+	if e.down {
+		return nil, errors.New("embedder down")
+	}
 	return []float32{0.1, 0.2, 0.3, 0.4}, nil
 }
 
@@ -112,6 +125,57 @@ func TestWorker_TickShipsPendingEvents(t *testing.T) {
 
 	assert.Equal(t, int32(1), ch.ingestCalls.Load())
 	assert.Len(t, ch.lastEvents, 5, "all 5 pending events should ship")
+}
+
+// TestWorker_TickBackfillsThenShips: an event recorded while the
+// embedder was down lands without an embedding (Record degrades) and
+// Consolidate holds it back. Once the embedder recovers, the worker's
+// per-tick backfill pass fills the embedding and the same tick ships
+// the now-embedded event.
+func TestWorker_TickBackfillsThenShips(t *testing.T) {
+	store, err := sietch.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ch := &recordingChapterhouse{}
+	emb := &toggleEmbedder{down: true}
+	c := core.New(store, ch, emb)
+
+	cwd := "/test"
+	sess, err := c.SessionStart(context.Background(), core.SessionStartInput{
+		UserID: "u1", Cwd: &cwd,
+	})
+	require.NoError(t, err)
+	text := "recorded while embedder down"
+	rec, err := c.Record(context.Background(), core.RecordInput{
+		SessionID: sess.ID, UserID: "u1",
+		Event: core.Event{Type: "user", Text: &text,
+			RawEvent: json.RawMessage(`{"t":"x"}`)},
+	})
+	require.NoError(t, err)
+
+	// Confirm the precondition: the event is queued for backfill.
+	need, err := store.EventsNeedingEmbedding(context.Background(), sess.ID, 0)
+	require.NoError(t, err)
+	require.Len(t, need, 1)
+
+	emb.down = false
+
+	w := encoding.NewWorker(c,
+		func(ctx context.Context) ([]string, error) {
+			return store.ActiveSessionIDs(ctx)
+		},
+		time.Hour, quietLogger())
+	require.NoError(t, w.Tick(context.Background()))
+
+	// Backfill filled the embedding, so nothing is left needing one...
+	need, err = store.EventsNeedingEmbedding(context.Background(), sess.ID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, need, "backfill must clear the un-embedded backlog")
+	// ...and the now-embedded event shipped on the same tick.
+	assert.Equal(t, int32(1), ch.ingestCalls.Load())
+	require.Len(t, ch.lastEvents, 1)
+	assert.Equal(t, rec.ID, ch.lastEvents[0].ID)
 }
 
 func TestWorker_EmptyPendingIsNoop(t *testing.T) {
