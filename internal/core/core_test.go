@@ -379,6 +379,45 @@ func TestConsolidate_LeavesEndedAtNilForActiveSessions(t *testing.T) {
 		"active session must not carry ended_at; reconciler eligibility flips on this column")
 }
 
+// TestConsolidate_HoldsBackUnembeddedSuffix: the watermark must stay a
+// contiguous prefix of the id-ordered log. An un-embedded event (one
+// recorded while the embedder was down) cuts the shippable prefix —
+// everything from it onward is held back until backfill catches up.
+func TestConsolidate_HoldsBackUnembeddedSuffix(t *testing.T) {
+	c, s, ch, _ := newCore()
+	e1 := core.Event{ID: "e1", UserID: "u1", SessionID: "sess", Type: "user",
+		Text: strPtr("a"), Embedding: []float32{1, 0}}
+	e2 := core.Event{ID: "e2", UserID: "u1", SessionID: "sess", Type: "user",
+		Text: strPtr("b")} // no embedding -> the cut point
+	e3 := core.Event{ID: "e3", UserID: "u1", SessionID: "sess", Type: "user",
+		Text: strPtr("c"), Embedding: []float32{0, 1}}
+	s.pending["sess"] = []core.Event{e1, e2, e3}
+
+	n, err := c.Consolidate(context.Background(), "sess")
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the embedded prefix ships")
+	require.Len(t, ch.ingests, 1)
+	require.Len(t, ch.ingests[0].Events, 1)
+	assert.Equal(t, "e1", ch.ingests[0].Events[0].ID)
+	assert.Equal(t, "e1", s.watermarks["sess"], "watermark advances only to the shipped prefix")
+}
+
+// TestConsolidate_AllUnembedded_NoOp: when the very first pending event
+// still needs an embedding there is no contiguous embedded prefix to
+// ship. Consolidate must no-op: no ingest, no watermark advance.
+func TestConsolidate_AllUnembedded_NoOp(t *testing.T) {
+	c, s, ch, _ := newCore()
+	s.pending["sess"] = []core.Event{
+		{ID: "e1", UserID: "u1", SessionID: "sess", Type: "user", Text: strPtr("a")},
+	}
+
+	n, err := c.Consolidate(context.Background(), "sess")
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+	assert.Empty(t, ch.ingests, "nothing embedded -> nothing ships")
+	assert.Empty(t, s.watermarks["sess"], "watermark must not advance")
+}
+
 func TestListSessions_DelegatesToSietch(t *testing.T) {
 	c, s, _, _ := newCore()
 	s.sessions = []core.Session{{ID: "a", UserID: "u1"}}

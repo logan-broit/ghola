@@ -888,6 +888,26 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, nil
 	}
 
+	// Ship only the contiguous prefix of embedded events. Events past
+	// the first un-embedded one are held back — the watermark must stay
+	// a contiguous prefix of the id-ordered log, and the backfill pass
+	// (BackfillEmbeddings) will fill the gap before the next tick.
+	cut := len(pending)
+	for i := range pending {
+		if needsEmbedding(pending[i]) {
+			cut = i
+			break
+		}
+	}
+	if held := len(pending) - cut; held > 0 {
+		slog.InfoContext(ctx, "consolidate: holding back events awaiting embedding",
+			"session_id", sessionID, "held", held)
+	}
+	if cut == 0 {
+		return 0, nil
+	}
+	pending = pending[:cut]
+
 	// Source the session row from sietch so ended_at, cwd, agent_kind,
 	// etc. all flow through to chapterhouse on every consolidation
 	// pass. Chapterhouse UPSERTs on id, so the same session metadata
@@ -928,4 +948,10 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, fmt.Errorf("advance watermark: %w", err)
 	}
 	return len(pending), nil
+}
+
+// needsEmbedding reports whether an event should carry an embedding
+// but doesn't yet (recorded while the embedder was unreachable).
+func needsEmbedding(ev Event) bool {
+	return len(ev.Embedding) == 0 && ev.Text != nil && *ev.Text != ""
 }
