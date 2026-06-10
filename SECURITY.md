@@ -21,7 +21,7 @@ is welcome — let me know if you have a timeline.
 
 - Upstream dependencies (pgvector, vLLM, FastAPI, etc.) — report those
   to their respective projects.
-- The dormant Rust extension (`extension/`) — kept as algorithm
+- The retired Rust extension (`attic/extension/`) — kept as algorithm
   reference; not built or shipped.
 
 ## Surface notes

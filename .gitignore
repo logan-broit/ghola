@@ -13,8 +13,8 @@
 /coverage/
 /tmp/
 
-# Rust extension build artifacts
-/extension/target/
+# Rust extension build artifacts (retired crate under attic/)
+/attic/extension/target/
 bootstrap-data/
 
 # Git worktrees for feature branches
@@ -55,11 +55,11 @@ __pycache__/
 *.db-shm
 *.db-wal
 
-# Dormant extension's loose design notes / reports. Whole docs tree
-# under extension/ is process-artifact; data fixtures under tests/
-# are tracked, but evaluation writeups inside snapshot folders are
-# notes, not fixtures.
-/extension/docs/
-/extension/ANALYSIS.md
-/extension/PLEXUS_REPORT.md
+# Retired extension's loose design notes / reports (now under attic/).
+# Whole docs tree under attic/extension/ is process-artifact; data
+# fixtures under tests/ are tracked, but evaluation writeups inside
+# snapshot folders are notes, not fixtures.
+/attic/extension/docs/
+/attic/extension/ANALYSIS.md
+/attic/extension/PLEXUS_REPORT.md
 **/snapshots/**/*.md

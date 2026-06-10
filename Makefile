@@ -1,4 +1,4 @@
-.PHONY: all extension server service test dev-up dev-down clean smoke-predictive smoke-predictive-down
+.PHONY: all server service test dev-up dev-down clean smoke-predictive smoke-predictive-down
 
 # Smoke-test stack uses an isolated Compose project + alternate host
 # ports so it never collides with the dev stack. Override on the make
@@ -18,15 +18,11 @@ SMOKE_COMPOSE = cd deploy/docker-compose && \
     docker compose -p $(SMOKE_PROJECT) \
         -f docker-compose.yml -f docker-compose.smoke.yml
 
-EXT_DIR     := extension
 SERVER_DIR  := _chapterhouse/ch-server
 SERVICE_BIN := ghola
 MCP_BIN     := ghola-mcp
 
-all: extension server service
-
-extension:
-	cd $(EXT_DIR) && cargo pgrx package
+all: server service
 
 server:
 	cd $(SERVER_DIR) && go build ./...
@@ -36,7 +32,6 @@ service:
 	go build -o $(MCP_BIN) ./cmd/ghola-mcp
 
 test:
-	cd $(EXT_DIR) && cargo pgrx test pg16
 	cd $(SERVER_DIR) && go test ./...
 	go test ./...
 
@@ -48,7 +43,6 @@ dev-down:
 
 clean:
 	rm -f $(SERVICE_BIN) $(MCP_BIN)
-	cd $(EXT_DIR) && cargo clean
 	cd $(SERVER_DIR) && go clean
 
 # Full-stack smoke for the predictive-replay v1a vertical slice.
