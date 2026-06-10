@@ -12,14 +12,17 @@ at a single SHA. State as of 2026-05-16.
 - `cmd/import-logs/` — one-shot tool that ingests existing JSONL
   conversation logs (Claude Code, pi-mono) into ghola via the same
   pipeline as live recording.
-- `extension/` — `ghola` Rust extension (pgrx). Was the original home
-  of the cognitive primitives (ACT-R, Ebbinghaus, Hebbian, Bayesian,
-  contradiction) running inside Postgres. Production primitives now
-  live in `_chapterhouse/ch-server/internal/primitives/` and run in
-  the Go server; the Rust extension is kept as an algorithm reference
-  (not built or wired into the dev stack). Own `Cargo.toml`, own
-  `Dockerfile.cnpg`. Cargo `name = "ghola"` — the `pg_` prefix is
-  reserved by Postgres and was dropped.
+- `attic/` — retired code kept for context and mining, not built or
+  shipped. See `attic/README.md`.
+- `attic/extension/` — `ghola` Rust extension (pgrx). Was the original
+  home of the cognitive primitives (ACT-R, Ebbinghaus, Hebbian,
+  Bayesian, contradiction) running inside Postgres. Production
+  primitives now live in `_chapterhouse/ch-server/internal/primitives/`
+  and run in the Go server; the Rust crate is retired to `attic/` as an
+  algorithm reference (not built or wired into any Makefile target, the
+  dev stack, or CI). Own `Cargo.toml`, own `Dockerfile.cnpg`. Cargo
+  `name = "ghola"` — the `pg_` prefix is reserved by Postgres and was
+  dropped.
 - `_chapterhouse/` — the recall backend. Sibling Go module
   (separate `go.mod`), vendored at root for single-SHA monorepo
   releases. **The `_` prefix is purely historical** — chapterhouse was
@@ -65,7 +68,7 @@ at a single SHA. State as of 2026-05-16.
   semantic-tier units `internal/semantic/` persists).
 - `internal/primitives/` — cognitive primitives (ACT-R activation,
   Ebbinghaus decay, Hebbian co-activation, Bayesian confidence,
-  contradiction). Migrated out of the dormant `extension/` Rust
+  contradiction). Migrated out of the retired `attic/extension/` Rust
   crate; runs in-process.
 - `internal/consolidation/` — episodic→semantic consolidation worker
   (drains co-activation queue, calls mentat, persists mnemes).
@@ -105,14 +108,16 @@ history if you need the old code.
 The root `Makefile` delegates per-component:
 
 ```
-make extension   # cargo pgrx package for extension/
 make server      # go build for _chapterhouse/ch-server
 make service     # go build for cmd/ghola/ + cmd/ghola-mcp/
 make dev-up      # docker compose up on deploy/docker-compose/
 make all         # everything
-make test        # run Go + Rust tests
+make test        # run Go tests
 make smoke-predictive  # isolated smoke-test stack on alternate ports
 ```
+
+The retired Rust crate under `attic/extension/` is not in the build
+graph; build it by hand with `cargo` if you need to mine the algorithms.
 
 The `server` target `cd`s into `_chapterhouse/ch-server/` because that's
 where the Go module lives.

@@ -3,6 +3,8 @@ package sietch_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -325,6 +327,25 @@ func TestGetSession_ReturnsRow(t *testing.T) {
 	assert.Nil(t, got.EndedAt, "fresh session must have ended_at = nil")
 }
 
+// TestGetSession_MissingRowIsErrSessionNotFound: opening a conn for a
+// never-OpenSession'd id makes conn() create a schema-only .sqlite
+// file (create-on-open) with no `session` row — the orphan a recall
+// for a GC'd session leaves behind. GetSession and Watermark both Scan
+// that missing row, so both must surface core.ErrSessionNotFound rather
+// than a raw sql.ErrNoRows the worker can't classify.
+func TestGetSession_MissingRowIsErrSessionNotFound(t *testing.T) {
+	s := newTestStore(t)
+	orphan := core.NewID() // never OpenSession'd
+
+	_, err := s.GetSession(context.Background(), orphan)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrSessionNotFound)
+
+	_, err = s.Watermark(context.Background(), orphan)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrSessionNotFound)
+}
+
 func TestOpenSession_PersistsWorkspaceID(t *testing.T) {
 	s := newTestStore(t)
 	sess := core.Session{
@@ -338,6 +359,44 @@ func TestOpenSession_PersistsWorkspaceID(t *testing.T) {
 	got, err := s.GetSession(context.Background(), sess.ID)
 	require.NoError(t, err)
 	assert.Equal(t, sess.WorkspaceID, got.WorkspaceID)
+}
+
+func TestRemoveSession_DeletesFileAndSiblings(t *testing.T) {
+	root := t.TempDir()
+	s, err := sietch.Open(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(context.Background(), sess))
+	// RecordEvent writes through WAL mode, so the -wal/-shm siblings
+	// exist alongside the base .sqlite by the time we remove.
+	_, err = s.RecordEvent(context.Background(), mkEvent(sess, "x", nil))
+	require.NoError(t, err)
+
+	base := filepath.Join(root, sess.ID+".sqlite")
+	require.FileExists(t, base)
+
+	require.NoError(t, s.RemoveSession(context.Background(), sess.ID))
+
+	for _, p := range []string{base, base + "-wal", base + "-shm"} {
+		_, statErr := os.Stat(p)
+		assert.True(t, os.IsNotExist(statErr), "expected %s gone, got %v", p, statErr)
+	}
+
+	// ListSessions enumerates files under the root, so the removed
+	// session must no longer appear.
+	sessions, err := s.ListSessions(context.Background(), "u1")
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
+}
+
+func TestRemoveSession_Idempotent(t *testing.T) {
+	s := newTestStore(t)
+	// Never opened: removing it is a clean no-op.
+	require.NoError(t, s.RemoveSession(context.Background(), "never-existed"))
+	// And removing twice in a row stays a no-op.
+	require.NoError(t, s.RemoveSession(context.Background(), "never-existed"))
 }
 
 func TestListSessions_UserScoping(t *testing.T) {

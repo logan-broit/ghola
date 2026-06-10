@@ -57,6 +57,13 @@ type SietchStore interface {
 	// SetEmbedding backfills one event's embedding. State-guarded so a
 	// concurrent forget is not resurrected by a late backfill.
 	SetEmbedding(ctx context.Context, sessionID, eventID string, emb []float32) error
+
+	// RemoveSession deletes the session's working-tier file. GCSession
+	// calls this only after the session is ended and fully consolidated,
+	// at which point the file is a redundant local cache of what
+	// chapterhouse already holds. Must be idempotent — removing an
+	// absent session is a no-op.
+	RemoveSession(ctx context.Context, sessionID string) error
 }
 
 // ChapterhouseClient wraps the /v1 REST surface. Implementation in

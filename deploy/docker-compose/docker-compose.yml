@@ -255,7 +255,13 @@ services:
       ENCODING_INTERVAL: ${ENCODING_INTERVAL:-5m}
     ports:
       - "${GHOLA_PORT:-7421}:7421"
+    volumes:
+      # Persist the sietch working tier across container recreates.
+      # Without it the per-session SQLite files (the working memory
+      # not yet consolidated to chapterhouse) die on every redeploy.
+      - ghola-sessions:/root/.ghola/sessions
 
 volumes:
   postgres-data:
   mentat-weights:
+  ghola-sessions:

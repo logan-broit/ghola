@@ -58,6 +58,14 @@ type fakeSietch struct {
 	// metadata returned by GetSession, keyed by session id. Tests that
 	// care about ended_at / cwd / etc. populate this directly.
 	sessionRows map[string]core.Session
+
+	// getSessionErr lets a test force GetSession to fail for a given id
+	// (e.g. returning core.ErrSessionNotFound for the orphan-GC path).
+	getSessionErr map[string]error
+
+	// removeSessions records the ids passed to RemoveSession so GC
+	// tests can assert whether (and which) sessions were dropped.
+	removeSessions []string
 }
 
 func newFakeSietch() *fakeSietch {
@@ -70,6 +78,7 @@ func newFakeSietch() *fakeSietch {
 		ended:         map[string]time.Time{},
 		sessionRows:   map[string]core.Session{},
 		needEmbedding: map[string][]core.Event{},
+		getSessionErr: map[string]error{},
 	}
 }
 
@@ -92,6 +101,9 @@ func (f *fakeSietch) MarkEnded(_ context.Context, id string, t time.Time) error 
 	return nil
 }
 func (f *fakeSietch) GetSession(_ context.Context, id string) (core.Session, error) {
+	if err := f.getSessionErr[id]; err != nil {
+		return core.Session{}, err
+	}
 	if row, ok := f.sessionRows[id]; ok {
 		return row, nil
 	}
@@ -145,6 +157,10 @@ func (f *fakeSietch) EventsNeedingEmbedding(_ context.Context, sid string, _ int
 }
 func (f *fakeSietch) SetEmbedding(_ context.Context, sid, eid string, _ []float32) error {
 	f.setEmbeddings = append(f.setEmbeddings, struct{ SessionID, EventID string }{sid, eid})
+	return nil
+}
+func (f *fakeSietch) RemoveSession(_ context.Context, sid string) error {
+	f.removeSessions = append(f.removeSessions, sid)
 	return nil
 }
 
@@ -1694,4 +1710,102 @@ func TestRecord_EmbedderDown_StoresWithoutEmbedding(t *testing.T) {
 	require.Len(t, s.events, 1)
 	assert.Empty(t, s.events[0].Embedding, "event lands without an embedding")
 	assert.Equal(t, ev.ID, s.current["sess"], "current pointer still advances")
+}
+
+// ---------------------------------------------------------------------
+// GCSession — sietch file garbage collection.
+// ---------------------------------------------------------------------
+
+// markEndedRow seeds a fake session row whose ended_at is `ago` before
+// the fixed test clock. Returns the session id.
+func markEndedRow(c *core.Core, s *fakeSietch, ago time.Duration) string {
+	id := "gc-sess"
+	ended := c.Now().Add(-ago)
+	s.sessionRows[id] = core.Session{ID: id, UserID: "u1", EndedAt: &ended}
+	return id
+}
+
+func TestGCSession_RemovesDrainedEndedSession(t *testing.T) {
+	c, s, _, _ := newCore()
+	id := markEndedRow(c, s, 8*24*time.Hour) // ended 8 days ago, past 7d retention
+	// No pending events, nothing awaiting embedding: maps are empty.
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.True(t, removed, "ended + drained + past retention -> remove")
+	assert.Equal(t, []string{id}, s.removeSessions)
+}
+
+func TestGCSession_KeepsOpenSession(t *testing.T) {
+	c, s, _, _ := newCore()
+	// EndedAt nil: the session is still open.
+	s.sessionRows["open"] = core.Session{ID: "open", UserID: "u1"}
+
+	removed, err := c.GCSession(context.Background(), "open")
+	require.NoError(t, err)
+	assert.False(t, removed)
+	assert.Empty(t, s.removeSessions)
+}
+
+func TestGCSession_KeepsRecentlyEnded(t *testing.T) {
+	c, s, _, _ := newCore()
+	id := markEndedRow(c, s, 24*time.Hour) // ended 1 day ago, inside 7d retention
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.False(t, removed, "still inside the retention window")
+	assert.Empty(t, s.removeSessions)
+}
+
+func TestGCSession_KeepsUnconsolidated(t *testing.T) {
+	c, s, _, _ := newCore()
+	id := markEndedRow(c, s, 8*24*time.Hour)
+	// A pending event past the watermark: not yet shipped to chapterhouse.
+	s.pending[id] = []core.Event{{ID: "e1", SessionID: id, UserID: "u1"}}
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.False(t, removed, "unconsolidated events must not be GC'd")
+	assert.Empty(t, s.removeSessions)
+}
+
+func TestGCSession_KeepsAwaitingBackfill(t *testing.T) {
+	c, s, _, _ := newCore()
+	id := markEndedRow(c, s, 8*24*time.Hour)
+	// Belt-and-suspenders: an event that still needs an embedding.
+	s.needEmbedding[id] = []core.Event{{ID: "e1", SessionID: id, UserID: "u1"}}
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.False(t, removed, "events awaiting backfill must not be GC'd")
+	assert.Empty(t, s.removeSessions)
+}
+
+func TestGCSession_DisabledWhenRetentionZero(t *testing.T) {
+	c, s, _, _ := newCore()
+	c.SietchRetention = 0 // GC disabled
+	id := markEndedRow(c, s, 8*24*time.Hour)
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.False(t, removed)
+	// Retention-zero short-circuits before any store call, so nothing
+	// is removed regardless of the session's eligibility.
+	assert.Empty(t, s.removeSessions)
+}
+
+// TestGCSession_RemovesOrphanFile: a sietch file with no session row
+// (recreated by conn()'s create-on-open after GC, e.g. a recall for a
+// GC'd session id) surfaces as core.ErrSessionNotFound from GetSession.
+// GCSession must treat it as an orphan — remove the file and report
+// (true, nil) — not propagate the error and re-log it every tick.
+func TestGCSession_RemovesOrphanFile(t *testing.T) {
+	c, s, _, _ := newCore()
+	id := "orphan-sess"
+	s.getSessionErr[id] = core.ErrSessionNotFound
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.True(t, removed, "schema-only orphan -> remove")
+	assert.Equal(t, []string{id}, s.removeSessions)
 }

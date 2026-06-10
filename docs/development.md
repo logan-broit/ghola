@@ -5,16 +5,19 @@
 The root `Makefile` orchestrates per-component:
 
 ```sh
-make extension     # cargo pgrx package for extension/ (dormant — algorithm reference)
 make server        # go build for _chapterhouse/ch-server
 make service       # go build for cmd/ghola + cmd/ghola-mcp
 make all           # everything
-make test          # run Go + Rust tests
+make test          # run Go tests
 make dev-up        # docker compose up on deploy/docker-compose
 make dev-down      # tear it down
 make smoke-predictive       # isolated smoke stack on alternate ports
 make smoke-predictive-down  # tear it down
 ```
+
+The original Rust extension is retired to `attic/extension/` (algorithm
+reference, not in the build graph). Build it by hand with `cargo` if you
+need to mine it.
 
 `make server` `cd`s into `_chapterhouse/ch-server/` because that
 subproject has its own `go.mod`.
@@ -89,10 +92,10 @@ recall-tuning ones are listed in
 ## Tests
 
 ```sh
-make test           # Go + Rust
+make test           # Go
 go test ./...       # root module only
 (cd _chapterhouse/ch-server && go test ./...)
-(cd extension && cargo test)   # dormant extension
+(cd attic/extension && cargo test)   # retired extension, not in the build graph
 ```
 
 Integration tests live under `test/` (cross-binary, acceptance-criteria

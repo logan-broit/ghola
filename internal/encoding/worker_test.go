@@ -300,6 +300,125 @@ func TestWorker_TriggerForcesImmediateConsolidation(t *testing.T) {
 	<-done
 }
 
+// TestWorker_TickGCsDrainedSession: a session that is ended, fully
+// consolidated, and older than SietchRetention has its sietch file
+// removed on the tick. A session ended only recently is kept. Uses an
+// injectable clock (core.Now) rather than sleeps so the 8-day jump is
+// instant.
+func TestWorker_TickGCsDrainedSession(t *testing.T) {
+	store, err := sietch.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ch := &recordingChapterhouse{}
+	c := core.New(store, ch, nullEmbedder{})
+	now := time.Unix(1_700_000_000, 0).UTC()
+	c.Now = func() time.Time { return now }
+
+	cwd := "/test"
+	// "old" will be fully drained and aged past retention; "recent"
+	// ends right before the clock jump so it stays inside the window.
+	oldSess, err := c.SessionStart(context.Background(),
+		core.SessionStartInput{UserID: "u1", Cwd: &cwd})
+	require.NoError(t, err)
+	text := "an event"
+	_, err = c.Record(context.Background(), core.RecordInput{
+		SessionID: oldSess.ID, UserID: "u1",
+		Event: core.Event{Type: "user", Text: &text,
+			RawEvent: json.RawMessage(`{"t":"x"}`)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, c.SessionEnd(context.Background(), oldSess.ID))
+
+	w := encoding.NewWorker(c,
+		func(ctx context.Context) ([]string, error) {
+			return store.ActiveSessionIDs(ctx)
+		},
+		time.Hour, quietLogger())
+
+	// First tick: consolidates whatever's left; nothing is old enough
+	// to GC yet (ended == now), so the file survives.
+	require.NoError(t, w.Tick(context.Background()))
+	ids, err := store.ActiveSessionIDs(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, ids, oldSess.ID, "session not yet past retention")
+
+	// A second session that ends 1h before the jump — inside the 7d
+	// window, so it must be kept after the jump.
+	recentSess, err := c.SessionStart(context.Background(),
+		core.SessionStartInput{UserID: "u1", Cwd: &cwd})
+	require.NoError(t, err)
+	_, err = c.Record(context.Background(), core.RecordInput{
+		SessionID: recentSess.ID, UserID: "u1",
+		Event: core.Event{Type: "user", Text: &text,
+			RawEvent: json.RawMessage(`{"t":"y"}`)},
+	})
+	require.NoError(t, err)
+	// End recentSess 8 days minus 1h ahead of the original clock, so
+	// after the +8d jump it is only 1h old.
+	now = now.Add(8*24*time.Hour - time.Hour)
+	require.NoError(t, c.SessionEnd(context.Background(), recentSess.ID))
+
+	// Jump the clock so oldSess is 8d+ past its end, recentSess only 1h.
+	now = now.Add(time.Hour)
+	require.NoError(t, w.Tick(context.Background()))
+
+	ids, err = store.ActiveSessionIDs(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, ids, oldSess.ID,
+		"drained session past retention must be GC'd")
+	assert.Contains(t, ids, recentSess.ID,
+		"recently-ended session must be kept")
+}
+
+// TestWorker_TickGCsOrphanFile: a schema-only sietch file (no session
+// row — what conn()'s create-on-open leaves behind when a recall names
+// a GC'd session id) is enumerated by ActiveSessionIDs every tick.
+// Consolidate fails on it (Watermark can't find the row), but GC must
+// still run and remove the orphan — the per-session sequence may not
+// bail on the Consolidate failure. A healthy session in the same tick
+// is still consolidated, proving the pass isn't aborted.
+func TestWorker_TickGCsOrphanFile(t *testing.T) {
+	store, err := sietch.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ch := &recordingChapterhouse{}
+	c := core.New(store, ch, nullEmbedder{})
+	now := time.Unix(1_700_000_000, 0).UTC()
+	c.Now = func() time.Time { return now }
+
+	// A healthy session with one pending event — must still ship.
+	healthy := seedEvents(t, c, 1)
+
+	// Create a schema-only orphan: GetSession on a never-opened id makes
+	// conn() write the schema with no session row. Ignore the (expected)
+	// ErrSessionNotFound; we only want the file on disk.
+	orphan := core.NewID()
+	_, _ = store.GetSession(context.Background(), orphan)
+
+	ids, err := store.ActiveSessionIDs(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, ids, orphan, "orphan file must be enumerated")
+
+	w := encoding.NewWorker(c,
+		func(ctx context.Context) ([]string, error) {
+			return store.ActiveSessionIDs(ctx)
+		},
+		time.Hour, quietLogger())
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	ids, err = store.ActiveSessionIDs(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, ids, orphan,
+		"orphan must be GC'd even though Consolidate failed on it")
+	assert.Contains(t, ids, healthy,
+		"healthy session must remain (not yet ended/past retention)")
+	assert.Equal(t, int32(1), ch.ingestCalls.Load(),
+		"healthy session still shipped — the pass was not aborted")
+}
+
 func TestWorker_PerSessionErrorDoesNotAbortTick(t *testing.T) {
 	// A broken Core that fails on one session but succeeds on others —
 	// simplest way to prove resilience is a SessionSource that

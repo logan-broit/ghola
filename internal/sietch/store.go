@@ -196,6 +196,32 @@ func (s *Store) CloseSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// RemoveSession closes the cached handle and deletes the session's
+// SQLite file plus its WAL/SHM siblings. Callers (Core.GCSession)
+// guarantee the session is fully consolidated first — after that the
+// file is a redundant local cache of what chapterhouse already holds.
+// Idempotent: removing an absent session is a no-op.
+func (s *Store) RemoveSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return errors.New("session id required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if db, ok := s.conns[sessionID]; ok {
+		if err := db.Close(); err != nil {
+			return fmt.Errorf("close %s: %w", sessionID, err)
+		}
+		delete(s.conns, sessionID)
+	}
+	base := s.pathFor(sessionID)
+	for _, p := range []string{base, base + "-wal", base + "-shm"} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------
 // RecordEvent
 // ---------------------------------------------------------------------
@@ -482,6 +508,11 @@ func (s *Store) readSessionRow(ctx context.Context, sessionID string) (core.Sess
 		FROM session WHERE id = ?
 	`, sessionID).Scan(&id, &uid, &started, &ended, &lastEvent, &eventCount,
 		&summary, &workspaceID, &cwd, &gitBranch, &agentKind, &sourceDevice)
+	if errors.Is(err, sql.ErrNoRows) {
+		// File exists (conn() create-on-open) but no session row — an
+		// orphan. Surface a typed sentinel so GCSession can recognize it.
+		return core.Session{}, fmt.Errorf("%w (session=%q)", core.ErrSessionNotFound, sessionID)
+	}
 	if err != nil {
 		return core.Session{}, err
 	}
@@ -537,6 +568,10 @@ func (s *Store) Watermark(ctx context.Context, sessionID string) (string, error)
 	err = db.QueryRowContext(ctx,
 		`SELECT watermark_event_id FROM session WHERE id = ?`, sessionID,
 	).Scan(&w)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Same orphan case as readSessionRow: schema-only file, no row.
+		return "", fmt.Errorf("%w (session=%q)", core.ErrSessionNotFound, sessionID)
+	}
 	if err != nil {
 		return "", err
 	}

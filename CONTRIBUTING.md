@@ -8,8 +8,9 @@ the code easier to read, or the docs less wrong."
 - Go 1.22+
 - Docker (for the local dev stack)
 - A GPU is **recommended** but not required — see below
-- Optional: Rust + `cargo pgrx` if you want to build the dormant
-  `extension/` crate; not needed for normal development
+- Optional: Rust + `cargo pgrx` if you want to build the retired
+  `attic/extension/` crate; not in the build graph, not needed for
+  normal development
 
 ## Build + run
 

@@ -37,14 +37,15 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/logan-broit/ghola/internal/embedding"
 	"github.com/logan-broit/ghola/internal/envcfg"
 	"github.com/logan-broit/ghola/internal/importlogs"
 	"github.com/logan-broit/ghola/internal/importlogs/adapters/github"
 	"github.com/logan-broit/ghola/internal/importlogs/adapters/jsonlfamily"
+	"github.com/logan-broit/ghola/pkg/embedding"
 )
 
 // adapters is the registry of per-source adapters known to this
@@ -136,7 +137,14 @@ func run() error {
 	embedderModel := envcfg.String("EMBEDDING_MODEL", "qwen3-embedding")
 	var embedder importlogs.Embedder
 	if !dryRun && embedderURL != "" {
-		embedder = embedding.New(embedderURL, embedderModel)
+		// Timeout 15s + Retries 3 preserve the former internal/embedding.New
+		// hard-coded values, keeping the swap to pkg/embedding behavior-neutral.
+		embedder = embedding.New(embedding.Config{
+			BaseURL: embedderURL,
+			Model:   embedderModel,
+			Timeout: 15 * time.Second,
+			Retries: 3,
+		})
 		logger.Info("embedder enabled",
 			"url", embedderURL, "model", embedderModel)
 	}
