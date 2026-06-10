@@ -29,9 +29,9 @@ import (
 // service: text in, []float32 out. It is structurally identical to
 // core.Embedder; redeclaring it here keeps internal/importlogs free of
 // an internal/core import (the package doesn't otherwise need core types
-// — it builds them, doesn't consume them). *embedding.Guild satisfies
-// this signature directly, so cmd/import-logs can pass a real Guild
-// client without an adapter wrapper.
+// — it builds them, doesn't consume them). *embedding.Client (from
+// pkg/embedding) satisfies this signature directly, so cmd/import-logs
+// can pass a real embeddings client without an adapter wrapper.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }

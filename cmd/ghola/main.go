@@ -38,12 +38,12 @@ import (
 
 	"github.com/logan-broit/ghola/internal/chapterhouse"
 	"github.com/logan-broit/ghola/internal/core"
-	"github.com/logan-broit/ghola/internal/embedding"
 	"github.com/logan-broit/ghola/internal/encoding"
 	"github.com/logan-broit/ghola/internal/envcfg"
 	ghttp "github.com/logan-broit/ghola/internal/http"
 	"github.com/logan-broit/ghola/internal/sietch"
 	"github.com/logan-broit/ghola/internal/truthsayer"
+	"github.com/logan-broit/ghola/pkg/embedding"
 )
 
 func main() {
@@ -111,7 +111,14 @@ func run() error {
 	defer store.Close()
 
 	chClient := chapterhouse.New(chBase, chKey)
-	embedder := embedding.New(embedBase, embedModel)
+	// Timeout 15s + Retries 3 preserve the former internal/embedding.New
+	// hard-coded values, keeping the swap to pkg/embedding behavior-neutral.
+	embedder := embedding.New(embedding.Config{
+		BaseURL: embedBase,
+		Model:   embedModel,
+		Timeout: 15 * time.Second,
+		Retries: 3,
+	})
 
 	c := core.New(store, chClient, embedder)
 	c.Truthsayer = tsClient
