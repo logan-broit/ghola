@@ -23,34 +23,68 @@ class FakeBatchesState:
     """Mutable, test-controllable state shared with the request handler."""
 
     def __init__(self) -> None:
-        # batch_id -> {"requests": [...], "polls_remaining": int, "results": [rows]}
+        # batch_id -> {"requests": [...], "polls_remaining": int, "results": [rows],
+        #              "created_at": iso8601, "gone": bool}
         self.batches: dict[str, dict[str, Any]] = {}
         self.created_payloads: list[dict[str, Any]] = []  # raw create bodies seen
         self.poll_counts: dict[str, int] = {}
+        # order batches were created in, for the list endpoint (newest last)
+        self.create_order: list[str] = []
         self._next = 0
         # default behavior for a freshly created batch
         self.default_polls_until_ended = 0
         self.default_results: list[dict[str, Any]] = []
+        # batch_ids that should 404 on retrieve (simulate stale state)
+        self.gone_batch_ids: set[str] = set()
 
     def new_batch_id(self) -> str:
         self._next += 1
         return f"msgbatch_fake_{self._next:03d}"
 
+    def register_external_batch(
+        self,
+        n_requests: int,
+        created_at: str,
+        results: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Seed a batch as if created out-of-band (e.g. a paid batch whose
+        state-file marker was lost). Lets adoption tests find it via list().
+        """
+        batch_id = self.new_batch_id()
+        cids = [f"q{i}" for i in range(n_requests)]
+        self.batches[batch_id] = {
+            "requests": [{"custom_id": c} for c in cids],
+            "polls_remaining": 0,
+            "results": results or [_succeeded_row(c, f"answer for {c}") for c in cids],
+            "created_at": created_at,
+        }
+        self.poll_counts[batch_id] = 0
+        self.create_order.append(batch_id)
+        return batch_id
 
-def _message_batch_json(batch_id: str, ended: bool) -> dict[str, Any]:
+
+def _request_counts(n: int, ended: bool) -> dict[str, int]:
+    """request_counts whose total equals n (the request count). Adoption keys
+    on the total, and the poll heartbeat renders these, so they must be real.
+    """
+    if ended:
+        return {"processing": 0, "succeeded": n, "errored": 0, "canceled": 0, "expired": 0}
+    return {"processing": n, "succeeded": 0, "errored": 0, "canceled": 0, "expired": 0}
+
+
+def _message_batch_json(
+    batch_id: str,
+    ended: bool,
+    n_requests: int = 1,
+    created_at: str = "2026-06-10T00:00:00Z",
+) -> dict[str, Any]:
     """A MessageBatch envelope the SDK can parse."""
     return {
         "id": batch_id,
         "type": "message_batch",
         "processing_status": "ended" if ended else "in_progress",
-        "request_counts": {
-            "processing": 0 if ended else 1,
-            "succeeded": 1 if ended else 0,
-            "errored": 0,
-            "canceled": 0,
-            "expired": 0,
-        },
-        "created_at": "2026-06-10T00:00:00Z",
+        "request_counts": _request_counts(n_requests, ended),
+        "created_at": created_at,
         "expires_at": "2026-06-11T00:00:00Z",
         "ended_at": "2026-06-10T00:05:00Z" if ended else None,
         "archived_at": None,
@@ -120,13 +154,39 @@ def make_handler(state: FakeBatchesState):
                     "requests": payload.get("requests", []),
                     "polls_remaining": state.default_polls_until_ended,
                     "results": results,
+                    "created_at": "2026-06-10T00:00:00Z",
                 }
                 state.poll_counts[batch_id] = 0
-                self._send(200, json.dumps(_message_batch_json(batch_id, ended=state.default_polls_until_ended == 0)).encode())
+                state.create_order.append(batch_id)
+                self._send(
+                    200,
+                    json.dumps(
+                        _message_batch_json(
+                            batch_id,
+                            ended=state.default_polls_until_ended == 0,
+                            n_requests=len(custom_ids),
+                        )
+                    ).encode(),
+                )
                 return
             self._send(404, b'{"error":"not found"}')
 
         def do_GET(self) -> None:
+            # list batches (newest first), used by the adoption path
+            if self.path.startswith("/v1/messages/batches?") or self.path == "/v1/messages/batches":
+                data = []
+                for bid in reversed(state.create_order):
+                    rec = state.batches[bid]
+                    data.append(
+                        _message_batch_json(
+                            bid,
+                            ended=rec["polls_remaining"] == 0,
+                            n_requests=len(rec["requests"]),
+                            created_at=rec.get("created_at", "2026-06-10T00:00:00Z"),
+                        )
+                    )
+                self._send(200, json.dumps({"data": data, "has_more": False, "first_id": None, "last_id": None}).encode())
+                return
             # results stream
             if self.path.endswith("/results"):
                 batch_id = self.path.split("/v1/messages/batches/")[1].rsplit("/results", 1)[0]
@@ -138,8 +198,9 @@ def make_handler(state: FakeBatchesState):
             if self.path.startswith("/v1/messages/batches/"):
                 batch_id = self.path.split("/v1/messages/batches/")[1]
                 rec = state.batches.get(batch_id)
-                if rec is None:
-                    self._send(404, b'{"error":"not found"}')
+                # Simulate stale state: a recorded id the API no longer knows.
+                if rec is None or batch_id in state.gone_batch_ids:
+                    self._send(404, b'{"type":"error","error":{"type":"not_found_error","message":"not found"}}')
                     return
                 state.poll_counts[batch_id] = state.poll_counts.get(batch_id, 0) + 1
                 if rec["polls_remaining"] > 0:
@@ -147,7 +208,15 @@ def make_handler(state: FakeBatchesState):
                     ended = False
                 else:
                     ended = True
-                self._send(200, json.dumps(_message_batch_json(batch_id, ended=ended)).encode())
+                self._send(
+                    200,
+                    json.dumps(
+                        _message_batch_json(
+                            batch_id, ended=ended, n_requests=len(rec["requests"]),
+                            created_at=rec.get("created_at", "2026-06-10T00:00:00Z"),
+                        )
+                    ).encode(),
+                )
                 return
             self._send(404, b'{"error":"not found"}')
 
@@ -187,3 +256,15 @@ class FakeBatchesServer:
 
     def errored_row(self, custom_id: str) -> dict[str, Any]:
         return _errored_row(custom_id)
+
+    def register_external_batch(
+        self,
+        n_requests: int,
+        created_at: str,
+        results: list[dict[str, Any]] | None = None,
+    ) -> str:
+        return self.state.register_external_batch(n_requests, created_at, results)
+
+    def mark_gone(self, batch_id: str) -> None:
+        """Make a previously-created batch_id 404 on retrieve (stale state)."""
+        self.state.gone_batch_ids.add(batch_id)

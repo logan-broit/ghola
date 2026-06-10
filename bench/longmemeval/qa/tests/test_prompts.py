@@ -81,9 +81,22 @@ def test_is_abstention_matches_upstream_rule():
     assert is_abstention("e47becba") is False
 
 
-def test_parse_judge_label_substring_rule():
+def test_parse_judge_label_leading_token_rule():
+    # Leading-token check (stricter than upstream's bare substring): the reply
+    # must START with "yes". Our judge isn't max_tokens-capped to ~10, so
+    # adaptive thinking could surface a preamble containing "yes" inside a "no".
     assert parse_judge_label("yes") is True
     assert parse_judge_label("Yes.") is True
     assert parse_judge_label("YES, correct") is True
     assert parse_judge_label("no") is False
     assert parse_judge_label("No, the response is wrong.") is False
+    # The crux: a "no" verdict that merely mentions "yes" must parse as False.
+    assert parse_judge_label("No, because yes would require the date.") is False
+    # Leading punctuation/whitespace is stripped before the token check.
+    assert parse_judge_label(" no") is False
+    assert parse_judge_label("**Yes**") is True
+    assert parse_judge_label('"yes"') is True
+    assert parse_judge_label("  Yes, the response matches.") is True
+    # Empty / unparseable -> not "yes" -> False.
+    assert parse_judge_label("") is False
+    assert parse_judge_label("maybe") is False

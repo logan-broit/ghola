@@ -15,6 +15,7 @@ import pytest
 
 from lme_qa.batch import (
     BatchDriver,
+    fingerprint,
     judge_request,
     reader_request,
 )
@@ -156,3 +157,177 @@ def test_end_to_end_run_two_questions(server, tmp_path):
     assert len(results) == 2
     assert all(r.status == "succeeded" for r in results)
     assert {r.text for r in results} == {"answer for q1", "answer for q2"}
+
+
+# --- Issue 6: fingerprint folds in request params ---------------------------
+
+
+def test_fingerprint_changes_when_params_change():
+    # Same custom_id set, different bodies (e.g. changed K / prompt) -> the
+    # fingerprint must differ so resume does NOT reuse the stale batch.
+    a = fingerprint([reader_request("q1", "SYS", "user text A")])
+    b = fingerprint([reader_request("q1", "SYS", "user text B")])
+    assert a != b
+
+
+def test_fingerprint_stable_for_identical_work():
+    a = fingerprint([reader_request("q1", "SYS", "same"), reader_request("q2", "SYS", "x")])
+    b = fingerprint([reader_request("q1", "SYS", "same"), reader_request("q2", "SYS", "x")])
+    assert a == b
+
+
+def test_same_ids_changed_params_resubmits(server, tmp_path):
+    state = tmp_path / "state.json"
+    d = BatchDriver(_client(server), state)
+    d.submit("reader", [reader_request("q1", "SYS", "u1")])
+    # Identical question id but a different rendered prompt -> resubmit.
+    d.submit("reader", [reader_request("q1", "SYS", "u1-CHANGED")])
+    assert len(server.created_payloads) == 2
+
+
+# --- Issue 1: orphaned-paid-batch window ------------------------------------
+
+
+def test_pending_marker_written_before_create(server, tmp_path):
+    # The state file must hold a {pending: true} marker with the request count
+    # and created_after timestamp the instant before create() is called, so a
+    # crash mid-submit leaves a trail to adopt from.
+    state = tmp_path / "state.json"
+    captured: dict = {}
+
+    real_create = server.state  # not used; we hook the driver instead
+
+    d = BatchDriver(_client(server), state)
+    # Hook: capture the state file contents at create() time.
+    orig = d._client.messages.batches.create
+
+    def spy_create(*a, **k):
+        captured["at_create"] = json.loads(state.read_text())
+        return orig(*a, **k)
+
+    d._client.messages.batches.create = spy_create
+    d.submit("reader", [reader_request("q1", "SYS", "u1")])
+
+    marker = captured["at_create"]["reader"]
+    assert marker.get("pending") is True
+    assert marker.get("n_requests") == 1
+    assert "created_after" in marker
+    assert "batch_id" not in marker  # not yet known
+
+    # After submit returns, the marker is replaced with the real record.
+    final = json.loads(state.read_text())["reader"]
+    assert final.get("pending") is not True
+    assert "batch_id" in final
+
+
+def test_adopts_orphaned_batch_on_pending_marker(server, tmp_path, capsys):
+    # Simulate a crash between create() and the state rewrite: the state file
+    # has only a pending marker, but a paid batch exists matching it. Resume
+    # must adopt it (NOT resubmit) and warn loudly.
+    state = tmp_path / "state.json"
+    reqs = [reader_request("q1", "SYS", "u1")]
+    fp = fingerprint(reqs)
+
+    orphan = server.register_external_batch(n_requests=1, created_at="2026-06-10T00:00:01Z")
+    state.write_text(json.dumps({
+        "reader": {
+            "pending": True,
+            "fingerprint": fp,
+            "n_requests": 1,
+            "created_after": "2026-06-10T00:00:00Z",
+        }
+    }))
+
+    created_before = len(server.created_payloads)
+    d = BatchDriver(_client(server), state)
+    batch_id = d.submit("reader", reqs)
+    assert batch_id == orphan
+    assert len(server.created_payloads) == created_before  # adopted, not resubmitted
+    err = capsys.readouterr().err
+    assert "adopt" in err.lower()
+    # The state file now records the adopted batch as a committed (non-pending)
+    # record.
+    saved = json.loads(state.read_text())["reader"]
+    assert saved["batch_id"] == orphan
+    assert saved.get("pending") is not True
+
+
+def test_pending_marker_no_match_resubmits_with_warning(server, tmp_path, capsys):
+    # Pending marker but no batch matches (none created after the timestamp /
+    # wrong count) -> resubmit, and warn that no orphan was found.
+    state = tmp_path / "state.json"
+    reqs = [reader_request("q1", "SYS", "u1")]
+    fp = fingerprint(reqs)
+    state.write_text(json.dumps({
+        "reader": {
+            "pending": True,
+            "fingerprint": fp,
+            "n_requests": 1,
+            "created_after": "2030-01-01T00:00:00Z",  # in the future, nothing after it
+        }
+    }))
+    d = BatchDriver(_client(server), state)
+    d.submit("reader", reqs)
+    assert len(server.created_payloads) == 1  # resubmitted
+    err = capsys.readouterr().err
+    assert "warning" in err.lower() or "no" in err.lower()
+
+
+def test_adopt_override_skips_create(server, tmp_path):
+    # Manual --adopt: caller passes a batch_id; submit must use it verbatim and
+    # never call create().
+    state = tmp_path / "state.json"
+    orphan = server.register_external_batch(n_requests=1, created_at="2026-06-10T00:00:01Z")
+    d = BatchDriver(_client(server), state)
+    batch_id = d.submit("reader", [reader_request("q1", "SYS", "u1")], adopt=orphan)
+    assert batch_id == orphan
+    assert len(server.created_payloads) == 0
+    saved = json.loads(state.read_text())["reader"]
+    assert saved["batch_id"] == orphan
+
+
+# --- Issue 2: stale state 404 self-heals ------------------------------------
+
+
+def test_stale_batch_id_404_resubmits(server, tmp_path, capsys):
+    # A committed state record whose batch_id the API no longer knows must
+    # self-heal: drop the stale entry, warn loudly, resubmit.
+    state = tmp_path / "state.json"
+    reqs = [reader_request("q1", "SYS", "u1")]
+    d = BatchDriver(_client(server), state)
+    old_id = d.submit("reader", reqs)
+    server.mark_gone(old_id)  # API forgets it
+
+    # run() begins with retrieve on the recorded id -> 404 -> resubmit + collect.
+    d2 = BatchDriver(_client(server), state)
+    results = d2.run("reader", reqs, interval_s=0)
+    assert {r.custom_id for r in results} == {"q1"}
+    assert len(server.created_payloads) == 2  # resubmitted after the 404
+    err = capsys.readouterr().err
+    assert old_id in err
+    assert "no longer exists" in err.lower() or "resubmit" in err.lower()
+
+
+# --- Issue 3: poll heartbeat + 24h wall-clock bound -------------------------
+
+
+def test_poll_emits_heartbeat(server, tmp_path, capsys):
+    server.state.default_polls_until_ended = 2
+    d = BatchDriver(_client(server), tmp_path / "state.json")
+    bid = d.submit("reader", [reader_request("q1", "SYS", "u1")])
+    d.poll(bid, interval_s=0)
+    err = capsys.readouterr().err
+    # Heartbeat renders request_counts: succeeded / errored / processing.
+    assert "succeeded" in err.lower()
+    assert "processing" in err.lower()
+
+
+def test_poll_raises_past_wall_clock_bound(server, tmp_path):
+    # A batch that never ends, with a tiny max-wall-clock, must raise (not spin
+    # forever) and name the batch_id.
+    server.state.default_polls_until_ended = 10_000
+    d = BatchDriver(_client(server), tmp_path / "state.json")
+    bid = d.submit("reader", [reader_request("q1", "SYS", "u1")])
+    with pytest.raises(TimeoutError) as ei:
+        d.poll(bid, interval_s=0, max_wall_clock_s=0)
+    assert bid in str(ei.value)

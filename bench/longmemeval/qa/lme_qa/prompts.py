@@ -108,9 +108,15 @@ def is_abstention(question_id: str) -> bool:
 def parse_judge_label(eval_response: str) -> bool:
     """Map a judge response to a correct/incorrect boolean.
 
-    Verbatim upstream rule (``label = 'yes' in eval_response.lower()``). Note
-    this is a substring test, not an exact match — upstream caps the judge at a
-    few output tokens so the reply is essentially "yes"/"no"; the same rule
-    holds for our short final-answer-only judge replies.
+    Deliberately STRICTER than upstream's ``'yes' in eval_response.lower()``
+    substring test. Upstream caps the judge at a handful of output tokens so the
+    reply is essentially "yes"/"no" and a bare substring match is safe. Our
+    judge is NOT max_tokens-capped to ~10, and adaptive thinking can surface a
+    visible preamble — a "no" verdict that reasons "...yes would require the
+    date..." would be mis-scored as correct under the substring rule. So we
+    check the LEADING token instead: strip leading non-alphanumeric punctuation
+    and whitespace (markdown ``**``, quotes, etc.), then require the answer to
+    start with "yes".
     """
-    return "yes" in eval_response.lower()
+    stripped = eval_response.strip().lower().lstrip("\"'*`_#>-—– \t")
+    return stripped.startswith("yes")

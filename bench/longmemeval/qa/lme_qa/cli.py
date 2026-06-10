@@ -11,11 +11,12 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import aggregate, context, prompts
-from .batch import BatchDriver, judge_request, reader_request
+from .batch import MODEL, BatchDriver, judge_request, reader_request
 
 
 def _require_api_key() -> None:
@@ -35,18 +36,37 @@ def _client() -> Any:
 
 
 def _load_dataset(path: Path) -> dict[str, dict[str, Any]]:
-    """Load the LongMemEval dataset JSON into a question_id -> entry map."""
+    """Load the LongMemEval dataset JSON into a question_id -> entry map.
+
+    Raises a clear error naming the offending entry index if any record is
+    missing ``question_id`` — a malformed dataset should fail loudly with a
+    pointer, not KeyError deep in a dict comprehension.
+    """
     data = json.loads(path.read_text())
-    return {e["question_id"]: e for e in data}
+    out: dict[str, dict[str, Any]] = {}
+    for i, e in enumerate(data):
+        if "question_id" not in e:
+            raise ValueError(
+                f"{path}: dataset entry at index {i} is missing 'question_id'"
+            )
+        out[e["question_id"]] = e
+    return out
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load a JSONL file, reporting the file + line number of a bad JSON line."""
     out: list[dict[str, Any]] = []
     with path.open() as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, start=1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 out.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{path}: line {lineno}: invalid JSON: {exc}"
+                ) from exc
     return out
 
 
@@ -77,6 +97,13 @@ def run_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--k", type=int, default=10, help="top-K sessions for context (default 10)")
     ap.add_argument("--state", type=Path, default=None, help="batch state file (default alongside --out)")
     ap.add_argument("--fresh", action="store_true", help="ignore state; submit a new batch")
+    ap.add_argument(
+        "--adopt",
+        type=str,
+        default=None,
+        help="manually adopt an existing batch_id instead of submitting "
+        "(use to recover an orphaned paid batch the auto-adoption missed)",
+    )
     ap.add_argument("--poll-interval", type=int, default=60, help="seconds between batch polls")
     args = ap.parse_args(argv)
 
@@ -87,6 +114,11 @@ def run_main(argv: list[str] | None = None) -> int:
 
     requests: list[dict[str, Any]] = []
     meta: dict[str, dict[str, Any]] = {}
+    # Tally context-build diagnostics across all questions so a retrieve backend
+    # emitting stale/cross-question session ids (or pathologically long sessions)
+    # surfaces as one stderr line rather than vanishing per-question.
+    total_unknown = 0
+    total_truncated = 0
     for line in run_lines:
         qid = line["question_id"]
         entry = by_qid.get(qid)
@@ -94,6 +126,8 @@ def run_main(argv: list[str] | None = None) -> int:
             print(f"warning: {qid} not in dataset; skipping", file=sys.stderr)
             continue
         built = context.build_context(entry, line, k=args.k)
+        total_unknown += len(built.unknown_session_ids)
+        total_truncated += len(built.truncated_session_ids)
         user_text = prompts.build_reader_prompt(
             entry["question"], entry["question_date"], built.text
         )
@@ -103,8 +137,17 @@ def run_main(argv: list[str] | None = None) -> int:
     if not requests:
         sys.exit("error: no questions to read (dataset/run mismatch?)")
 
+    print(
+        f"reader: built {len(requests)} requests "
+        f"({total_unknown} unknown session ids dropped, "
+        f"{total_truncated} sessions truncated)",
+        file=sys.stderr,
+    )
+
     driver = BatchDriver(_client(), state_path)
-    results = driver.run("reader", requests, fresh=args.fresh, interval_s=args.poll_interval)
+    results = driver.run(
+        "reader", requests, fresh=args.fresh, interval_s=args.poll_interval, adopt=args.adopt
+    )
 
     rows: list[dict[str, Any]] = []
     n_failed = 0
@@ -145,6 +188,13 @@ def judge_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report", required=True, type=Path, help="markdown report output")
     ap.add_argument("--state", type=Path, default=None, help="batch state file (default alongside --out)")
     ap.add_argument("--fresh", action="store_true", help="ignore state; submit a new batch")
+    ap.add_argument(
+        "--adopt",
+        type=str,
+        default=None,
+        help="manually adopt an existing batch_id instead of submitting "
+        "(use to recover an orphaned paid batch the auto-adoption missed)",
+    )
     ap.add_argument("--poll-interval", type=int, default=60, help="seconds between batch polls")
     args = ap.parse_args(argv)
 
@@ -155,12 +205,18 @@ def judge_main(argv: list[str] | None = None) -> int:
 
     requests: list[dict[str, Any]] = []
     meta: dict[str, dict[str, Any]] = {}
+    # A reader item that did not succeed produced an empty hypothesis; the judge
+    # will score it wrong (defensible — no answer). Count it so the report can
+    # footnote the loss rather than hide it inside a depressed accuracy.
+    reader_failures = 0
     for ans in answers:
         qid = ans["question_id"]
         entry = by_qid.get(qid)
         if entry is None:
             print(f"warning: {qid} not in dataset; skipping", file=sys.stderr)
             continue
+        if ans.get("status", "succeeded") != "succeeded":
+            reader_failures += 1
         task = entry["question_type"]
         abst = prompts.is_abstention(qid)
         prompt = prompts.get_anscheck_prompt(
@@ -177,12 +233,17 @@ def judge_main(argv: list[str] | None = None) -> int:
         sys.exit("error: no answers to judge")
 
     driver = BatchDriver(_client(), state_path)
-    results = driver.run("judge", requests, fresh=args.fresh, interval_s=args.poll_interval)
+    results = driver.run(
+        "judge", requests, fresh=args.fresh, interval_s=args.poll_interval, adopt=args.adopt
+    )
 
     rows: list[dict[str, Any]] = []
     judgments: list[aggregate.Judgment] = []
     total_in = total_out = 0
+    judge_failures = 0
     for r in results:
+        if r.status != "succeeded":
+            judge_failures += 1
         label = prompts.parse_judge_label(r.text) if r.status == "succeeded" else False
         m = meta.get(r.custom_id, {})
         qtype = m.get("question_type", "")
@@ -211,8 +272,20 @@ def judge_main(argv: list[str] | None = None) -> int:
         )
 
     _write_jsonl(args.out, rows)
-    report = aggregate.aggregate(judgments, total_in, total_out)
-    md = aggregate.render_markdown(report, title="QA accuracy (LongMemEval-S)")
+    report = aggregate.aggregate(
+        judgments,
+        total_in,
+        total_out,
+        reader_failures=reader_failures,
+        judge_failures=judge_failures,
+    )
+    md = aggregate.render_markdown(
+        report,
+        title="QA accuracy (LongMemEval-S)",
+        model=MODEL,
+        k=None,
+        date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+    )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(md)
     print(

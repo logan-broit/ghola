@@ -83,3 +83,61 @@ def test_render_markdown_has_table_and_overall():
     assert "100 input, 10 output" in md
     # Markdown table header present.
     assert "| Question type | N | Accuracy |" in md
+
+
+# --- Issue 4: failure counts threaded into the report ----------------------
+
+
+def test_failure_counts_carried_through():
+    r = aggregate(
+        [_j("a", "multi-session", False, True)],
+        reader_failures=3,
+        judge_failures=1,
+    )
+    assert r.reader_failures == 3
+    assert r.judge_failures == 1
+
+
+def test_render_markdown_renders_failure_footnote():
+    r = aggregate(
+        [_j("a", "multi-session", False, False)],
+        reader_failures=3,
+        judge_failures=1,
+    )
+    md = render_markdown(r)
+    assert "3 reader failure" in md
+    assert "judge failure" in md
+    assert "counted incorrect" in md
+
+
+def test_render_markdown_no_failure_footnote_when_clean():
+    r = aggregate([_j("a", "multi-session", False, True)])
+    md = render_markdown(r)
+    assert "reader failure" not in md
+    assert "judge failure" not in md
+
+
+# --- Issue 5: provenance footer ---------------------------------------------
+
+
+def test_render_markdown_provenance_footer():
+    r = aggregate([_j("a", "multi-session", False, True)])
+    md = render_markdown(
+        r,
+        title="QA accuracy",
+        model="claude-opus-4-8",
+        k=10,
+        date="2026-06-10",
+    )
+    assert "claude-opus-4-8" in md
+    assert "K=10" in md or "K = 10" in md
+    assert "2026-06-10" in md
+    # n is rendered too (the denominator).
+    assert "n=1" in md or "n = 1" in md
+
+
+def test_render_markdown_no_provenance_when_unspecified():
+    # Backward-compatible: omitting provenance args renders no provenance line.
+    r = aggregate([_j("a", "multi-session", False, True)])
+    md = render_markdown(r)
+    assert "claude-opus-4-8" not in md

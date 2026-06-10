@@ -55,6 +55,13 @@ class Report:
     abstention: Bucket
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    # Pipeline-failure counts, surfaced so the denominator isn't silently
+    # inflated by non-succeeded items. A reader item that errored becomes an
+    # empty hypothesis and is judged wrong (defensible — it produced no answer);
+    # a judge item that errored is labeled False. Both are counted in `overall`
+    # as incorrect, so these counts make the loss VISIBLE rather than hidden.
+    reader_failures: int = 0
+    judge_failures: int = 0
     _type_order: list[str] = field(default_factory=list)
 
 
@@ -67,6 +74,8 @@ def aggregate(
     judgments: Iterable[Judgment],
     total_input_tokens: int = 0,
     total_output_tokens: int = 0,
+    reader_failures: int = 0,
+    judge_failures: int = 0,
 ) -> Report:
     """Aggregate judgments into overall + per-type + abstention buckets."""
     judgments = list(judgments)
@@ -93,6 +102,8 @@ def aggregate(
         abstention=_bucket(abstention_labels),
         total_input_tokens=total_input_tokens,
         total_output_tokens=total_output_tokens,
+        reader_failures=reader_failures,
+        judge_failures=judge_failures,
         _type_order=type_order,
     )
 
@@ -101,8 +112,19 @@ def _pct(b: Bucket) -> str:
     return f"{b.accuracy * 100:.1f}%"
 
 
-def render_markdown(report: Report, title: str = "QA accuracy") -> str:
-    """Render the report as a markdown section ready for docs/benchmarks.md."""
+def render_markdown(
+    report: Report,
+    title: str = "QA accuracy",
+    model: str | None = None,
+    k: int | None = None,
+    date: str | None = None,
+) -> str:
+    """Render the report as a markdown section ready for docs/benchmarks.md.
+
+    ``model`` / ``k`` / ``date`` are provenance, passed in from the CLI (not
+    hard-coded here) so the published number always records which model, top-K,
+    sample size, and UTC date produced it.
+    """
     lines: list[str] = []
     lines.append(f"## {title}")
     lines.append("")
@@ -111,6 +133,17 @@ def render_markdown(report: Report, title: str = "QA accuracy") -> str:
         f"({report.overall.correct}/{report.overall.n})"
     )
     lines.append("")
+    # Failure footnote: makes the silent denominator loss visible. Reader/judge
+    # failures are already counted as incorrect in `overall`; spell that out so
+    # a depressed accuracy isn't mistaken for a pure capability result.
+    if report.reader_failures or report.judge_failures:
+        parts: list[str] = []
+        if report.reader_failures:
+            parts.append(f"{report.reader_failures} reader failures (counted incorrect)")
+        if report.judge_failures:
+            parts.append(f"{report.judge_failures} judge failures")
+        lines.append(f"_{', '.join(parts)}._")
+        lines.append("")
     lines.append("| Question type | N | Accuracy |")
     lines.append("|---|---|---|")
     # Sort question types for a stable, readable table.
@@ -134,4 +167,16 @@ def render_markdown(report: Report, title: str = "QA accuracy") -> str:
             f"_Judge token usage: {report.total_input_tokens} input, "
             f"{report.total_output_tokens} output._"
         )
+    # Provenance footer: model / top-K / sample size / UTC date, when supplied.
+    prov: list[str] = []
+    if model is not None:
+        prov.append(f"model={model}")
+    if k is not None:
+        prov.append(f"K={k}")
+    prov.append(f"n={report.overall.n}")
+    if date is not None:
+        prov.append(f"{date} (UTC)")
+    if model is not None or k is not None or date is not None:
+        lines.append("")
+        lines.append(f"_{', '.join(prov)}._")
     return "\n".join(lines) + "\n"
