@@ -113,9 +113,12 @@ lme-qa-judge \
 | `max_session_chars` | `24000` | per-session character cap in `context.build_context` — generous (p99 of real sessions is ~20.7k chars); only bounds a runaway session |
 | reader `max_tokens` | `8000` | adaptive-thinking tokens count toward output, so the reader gets headroom |
 | judge `max_tokens` | `2048` | the judge answers "yes"/"no" only |
-| `--state` | alongside `--out` | JSON file recording each stage's batch_id + request fingerprint |
-| `--fresh` | off | ignore state and submit a new batch |
-| `--adopt <batch_id>` | off | take an existing batch_id verbatim instead of submitting — recovers an orphaned paid batch the auto-adoption missed |
+| `--state` | alongside `--out` | JSON file recording each stage's batch_id + request fingerprint (batches backend only) |
+| `--fresh` | off | ignore state and submit a new batch (batches backend only) |
+| `--adopt <batch_id>` | off | take an existing batch_id verbatim instead of submitting — recovers an orphaned paid batch the auto-adoption missed (batches backend only) |
+| `--backend` | `batches` | execution backend: `batches` (needs an API key) or `claude-code` (subscription, no key — see below) |
+| `--parallel` | `2` | claude-code backend: concurrent `claude -p` calls (keep low) |
+| `--timeout-s` | `300` | claude-code backend: per-call wall-clock timeout |
 
 **Model surface:** `claude-opus-4-8`, adaptive thinking (`{"type":
 "adaptive"}`), NO `temperature`/`top_p`/`top_k` (they 400 on Opus 4.8), no
@@ -141,6 +144,64 @@ are ported verbatim from upstream LongMemEval
 (`get_anscheck_prompt`). `_abs` questions are scored with the abstention
 prompt and aggregated into their base `question_type` bucket (upstream
 behavior); the report adds a supplementary answerable/abstention split.
+
+### Running without an API key (Claude Code backend)
+
+No `ANTHROPIC_API_KEY`? Run both stages through Claude Code's headless mode
+against a subscription instead of the Batches API. Pass
+`--backend claude-code` — the same two commands, no key needed:
+
+```sh
+# reader (no ANTHROPIC_API_KEY required):
+lme-qa-run \
+  --dataset ~/longmemeval-ghola/data/longmemeval_s_cleaned.json \
+  --run     ~/longmemeval-ghola/results/ghola_v2_s_<ts>.jsonl \
+  --out     answers.jsonl --k 10 \
+  --backend claude-code --parallel 2
+
+# judge:
+lme-qa-judge \
+  --dataset ~/longmemeval-ghola/data/longmemeval_s_cleaned.json \
+  --answers answers.jsonl \
+  --out     judgments.jsonl --report report.md \
+  --backend claude-code --parallel 2
+```
+
+The backend drives one `claude -p ... --output-format json` subprocess per
+question (model still pinned to `claude-opus-4-8`). `LME_QA_CLAUDE_BIN`
+overrides the binary path (default: `claude` on `PATH`).
+
+**Subscription usage windows are the real constraint.** The 500-question
+reader pass is *millions* of input tokens (each question carries a
+top-10-session context), so a full run will span multiple subscription usage
+windows. That is expected, not an error: when a window is exhausted the run
+stops submitting, finishes in-flight calls, saves progress, and tells you to
+re-run after the window resets. Resume is **per-question** — each completed
+answer/judgment row is appended (and fsync'd) to `--out` as it lands, and a
+re-run skips question_ids already recorded as succeeded (prior failures are
+retried). So just re-run the same command after the window resets; it picks up
+where it left off. **Run it in tmux** (`tmux new-session -d -s lme-qa ...`) so
+a dropped terminal doesn't kill a multi-hour, multi-window job.
+
+**Keep `--parallel` low (2).** The bottleneck is the usage window, not local
+concurrency — flooding it with parallel calls just exhausts the window faster
+with no throughput gain (and risks tripping rate limits sooner).
+
+**Isolation flags (why MCP / tools / plugins are stripped).** A bare
+`claude -p` session loads the operator's MCP servers (e.g. ghola) and plugins,
+which would let the reader reach memory and tools the benchmark must *not*
+give it — silently contaminating the result. Every call therefore passes
+`--tools ""`, `--strict-mcp-config`, `--no-session-persistence`, and a full
+`--system-prompt` replacement, and the runner asserts isolation from the CLI's
+init event: it warns loudly if a *connected* MCP server or a *fireable* tool
+shows up. (One benign exception: claude 2.1.170 injects an `LSP` tool that
+`--tools ""` does not strip; it cannot fire on a non-interactive `-p` prompt,
+so it is allowed and does not trip the warning.) If you see an isolation
+warning, the number from that run is not trustworthy — fix the leak and re-run.
+
+`--state` / `--fresh` / `--adopt` are **batches-only** (they manage the
+Batches API's batch lifecycle); the claude-code backend resumes from the
+`--out` file itself, so those flags are ignored on that path.
 
 ## Internal vs upstream
 

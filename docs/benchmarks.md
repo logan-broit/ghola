@@ -91,6 +91,7 @@ configuration, but no QA-accuracy numbers have been produced yet.
 | Reader context | top-10 retrieved sessions per question (matches the published R@10) |
 | Abstention (`_abs`) | handled per upstream protocol (abstention judge prompt; bucketed into the base question_type) |
 | Dataset | LongMemEval-S, 500 questions |
+| Access path | the Batches API **or** Claude Code headless mode (`claude -p`) with MCP/tools/plugins stripped via isolation flags; both pin `claude-opus-4-8`. The report footer records which path produced the number (`via batches` / `via claude-code`). |
 
 Stated plainly:
 
@@ -104,6 +105,12 @@ Stated plainly:
 - The reader and judge both run as Opus 4.8 (operator decision); a
   different judge model would produce different accuracy on the same
   answers.
+- Claude Code headless mode is a **different serving harness** than the
+  raw Batches API: the model is the same (`claude-opus-4-8`), but the
+  wrapper around it differs. The report footer records the access path
+  (`via batches` / `via claude-code`) so any run is auditable, and the
+  claude-code path strips MCP servers, tools, and plugins so the reader
+  cannot reach context the benchmark withholds.
 
 ## Running the harness
 
