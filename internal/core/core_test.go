@@ -186,6 +186,19 @@ type fakeChapterhouse struct {
 	shareID     string
 	forgetCount int
 	err         error
+
+	// multiErr / semErr let recall-degradation tests fail one
+	// chapterhouse tier independently of the other (the shared `err`
+	// field above fails everything at once, which the happy-path tests
+	// don't touch). When set they take precedence over `err` for that
+	// method.
+	multiErr error
+	semErr   error
+	// semBlockUntilCtxDone makes QuerySemantic block until its context
+	// is cancelled, then return ctx.Err(). Drives the per-tier timeout
+	// test without a fixed sleep — the tier unblocks the instant
+	// TierTimeout fires.
+	semBlockUntilCtxDone bool
 }
 
 func newFakeChapterhouse() *fakeChapterhouse {
@@ -206,6 +219,9 @@ func (f *fakeChapterhouse) IngestEpisodic(_ context.Context, s core.Session, eve
 // contract ghola.client implements.
 func (f *fakeChapterhouse) QueryEpisodicMulti(_ context.Context, q core.EpisodicMultiQuery) (core.EpisodicMultiResult, error) {
 	f.multiQueries = append(f.multiQueries, q)
+	if f.multiErr != nil {
+		return core.EpisodicMultiResult{}, f.multiErr
+	}
 	if f.err != nil {
 		return core.EpisodicMultiResult{}, f.err
 	}
@@ -246,8 +262,15 @@ func (f *fakeChapterhouse) ForgetEpisodic(_ context.Context, uid string, ids []s
 func (f *fakeChapterhouse) AddSessionWorkspace(_ context.Context, _ core.AddSessionWorkspaceInput) (bool, error) {
 	return true, f.err
 }
-func (f *fakeChapterhouse) QuerySemantic(_ context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
+func (f *fakeChapterhouse) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	f.semQueries = append(f.semQueries, q)
+	if f.semBlockUntilCtxDone {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if f.semErr != nil {
+		return nil, f.semErr
+	}
 	return f.semResp, f.err
 }
 
@@ -1427,6 +1450,96 @@ func TestRecall_ResolvesOpenSessionForSietchTier(t *testing.T) {
 		"working-tier vector search scoped to the resolved open session")
 	assert.Contains(t, s.searchFTSSessions, "sess-open",
 		"working-tier FTS search scoped to the resolved open session")
+}
+
+// TestRecall_EmbedFailure_DegradesToLexical: when the embedder is down
+// the lexical tiers (FTS) need no embedding, so recall must degrade to
+// FTS-only instead of hard-failing. The multi call still fires but with
+// an empty QueryEmbedding and rankings limited to ["vector","fts"]
+// (session_vector needs an embedding and is dropped).
+func TestRecall_EmbedFailure_DegradesToLexical(t *testing.T) {
+	c, _, ch, emb := newCore()
+	emb.err = errors.New("guild down")
+	ch.kwResp = []core.RecallHit{{Tier: "keyword", Score: 0.5, ID: "k1"}}
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err, "embedder downtime must not fail the whole recall")
+	assert.Contains(t, out.Degraded, "embed")
+	require.Len(t, ch.multiQueries, 1)
+	assert.Empty(t, ch.multiQueries[0].QueryEmbedding,
+		"multi call must run with no embedding when embed failed")
+	assert.ElementsMatch(t, []string{"vector", "fts"}, ch.multiQueries[0].Rankings,
+		"session_vector ranking dropped without an embedding")
+}
+
+// TestRecall_TierFailure_Degrades: one tier failing must not sink the
+// recall. The episodic multi call errors, the semantic tier succeeds —
+// recall returns the semantic hits and reports "episodic" as degraded.
+func TestRecall_TierFailure_Degrades(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.multiErr = errors.New("episodic 503")
+	ch.semResp = []core.RecallHit{{Tier: "semantic", Score: 0.7, ID: "m1"}}
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err, "one tier failing must not fail the recall")
+	require.NotEmpty(t, out.Hits, "surviving semantic hits must come through")
+	assert.Equal(t, "m1", out.Hits[0].ID)
+	assert.Equal(t, []string{"episodic"}, out.Degraded)
+}
+
+// TestRecall_AllTiersFail_Errors: if every attempted tier fails there
+// are no surviving hits, so recall must surface an error that names the
+// all-fail condition and wraps an underlying tier error.
+func TestRecall_AllTiersFail_Errors(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.multiErr = errors.New("episodic 503")
+	ch.semErr = errors.New("semantic 503")
+	// No sietch session — only the two chapterhouse tiers are attempted.
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "all", "error must name the all-fail condition")
+	assert.ErrorContains(t, err, "503", "error must wrap an underlying tier error")
+}
+
+// TestRecall_TierTimeout: a tier that exceeds TierTimeout is dropped
+// and reported degraded — it must not stall or fail the recall. The
+// semantic tier blocks until its context is cancelled; the episodic
+// tier returns instantly. Recall must come back well under a second
+// with episodic hits and "semantic" degraded.
+func TestRecall_TierTimeout(t *testing.T) {
+	c, _, ch, _ := newCore()
+	c.TierTimeout = 10 * time.Millisecond
+	ch.episResp = []core.RecallHit{{Tier: "episodic", Score: 0.7, ID: "e1"}}
+	ch.semBlockUntilCtxDone = true
+
+	start := time.Now()
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	elapsed := time.Since(start)
+	require.NoError(t, err, "a slow tier must not fail the recall")
+	assert.Less(t, elapsed, time.Second, "recall must not block on the slow tier")
+	assert.Contains(t, out.Degraded, "semantic")
+	ids := make([]string, len(out.Hits))
+	for i, h := range out.Hits {
+		ids[i] = h.ID
+	}
+	assert.Contains(t, ids, "e1", "episodic hits must still surface")
 }
 
 func TestForget_AcrossTiers(t *testing.T) {

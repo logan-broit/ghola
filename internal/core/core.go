@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/logan-broit/ghola/internal/truthsayer"
 )
@@ -51,6 +51,11 @@ type Core struct {
 	// RerankTimeout caps the truthsayer round-trip. Failures (timeout,
 	// 5xx, transport) degrade to RRF-only with a warn log.
 	RerankTimeout time.Duration
+	// TierTimeout caps each recall tier's round-trip independently.
+	// A tier that exceeds it (or errors) is dropped from the fan-out
+	// and reported in RecallResult.Degraded — one slow tier must not
+	// stall or fail the whole recall.
+	TierTimeout time.Duration
 }
 
 // New builds a Core with sensible defaults.
@@ -64,6 +69,7 @@ func New(s SietchStore, ch ChapterhouseClient, emb Embedder) *Core {
 		RerankTopK:    50,
 		RerankWeight:  0.5,
 		RerankTimeout: 30 * time.Second,
+		TierTimeout:   10 * time.Second,
 	}
 }
 
@@ -408,6 +414,7 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		recallStart = time.Now()
 	}
 
+	var degraded []string
 	var emb []float32
 	if in.QueryText != "" {
 		var embStart time.Time
@@ -419,24 +426,36 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			timings["embed"] = ms(time.Since(embStart))
 		}
 		if err != nil {
-			return RecallResult{}, fmt.Errorf("embed query (user=%q workspace=%q): %w", in.UserID, in.Workspace, err)
+			// Lexical tiers don't need the query embedding; degrade
+			// to FTS-only instead of failing the whole recall.
+			slog.WarnContext(ctx, "query embed failed; lexical-only recall",
+				"err", err.Error())
+			degraded = append(degraded, "embed")
+		} else {
+			emb = e
 		}
-		emb = e
 	}
 
-	// Per-tier fan-out, parallelized via errgroup. Each tier writes to
-	// its own captured slice — no shared state, no mutex needed. The
-	// errgroup-derived context cancels in-flight tiers if any one
-	// returns an error, so we don't waste compute on results that will
-	// be discarded. Sietch's two sub-queries (vector + FTS) write to
-	// separate slices and merge after Wait so we don't race on a single
-	// append target.
+	// Per-tier fan-out, parallelized via sync.WaitGroup. The tiers are
+	// independent: each goroutine wraps its call in its own
+	// context.WithTimeout(ctx, c.TierTimeout) and writes ONLY its own
+	// captured hit slice, duration, and error variable. No shared
+	// mutable state crosses goroutines, and wg.Wait() establishes a
+	// happens-before edge for every read below — safe under -race.
 	//
-	// Ordering after Wait is irrelevant: RRF + dedup-by-key are
-	// order-independent, and exemplar selection picks the highest raw
-	// score across tiers. The sequential order the previous version had
-	// (sietch → episodic → keyword → session-vector → semantic) was an
-	// accident of code layout, not a behavioral contract.
+	// Degrade-and-report, not cancel-on-first-error: a tier that times
+	// out or errors is dropped from the fan-out and its name is appended
+	// to `degraded` after Wait. The surviving tiers' hits still fuse and
+	// return. Only when EVERY attempted tier failed (failed == attempted,
+	// attempted > 0) do we error — there are no hits to return. This is
+	// the deliberate inverse of the old errgroup contract, where the
+	// first tier error cancelled the rest and sank the whole recall;
+	// one slow or down tier must not take recall with it.
+	//
+	// Ordering after Wait is irrelevant to RRF: dedup-by-key and fusion
+	// are order-independent, and exemplar selection picks the highest
+	// raw score across tiers. The degraded-tier list IS order-stable
+	// (fixed check order below) so callers get deterministic JSON.
 	var (
 		sietchVectorHits  []RecallHit
 		sietchFTSHits     []RecallHit
@@ -458,37 +477,57 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		sietchFTSDur     time.Duration
 		episodicMultiDur time.Duration
 		semanticDur      time.Duration
+
+		// Per-tier errors. Each goroutine writes only its own; read
+		// after Wait. sietch vector + FTS land in the episodic / sietch
+		// degrade buckets below via the fixed check order.
+		sietchVectorErr error
+		sietchFTSErr    error
+		episodicErr     error
+		semanticErr     error
 	)
 
 	var fanoutStart time.Time
 	if in.IncludeTimings {
 		fanoutStart = time.Now()
 	}
-	g, gctx := errgroup.WithContext(ctx)
+
+	var wg sync.WaitGroup
+	run := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
+	// attempted counts the tiers actually fanned out (gates passed), so
+	// the all-fail check below distinguishes "every tier we tried died"
+	// from "no tier was eligible" (attempted == 0, not an error).
+	attempted := 0
 
 	if in.IncludeSietch && in.SessionID != "" {
 		if len(emb) > 0 {
-			g.Go(func() error {
+			attempted++
+			run(func() {
+				tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+				defer cancel()
 				s := time.Now()
-				h, err := c.Sietch.SearchVector(gctx, in.SessionID, emb, in.Limit)
+				h, err := c.Sietch.SearchVector(tctx, in.SessionID, emb, in.Limit)
 				sietchVectorDur = time.Since(s)
 				if err != nil {
-					return fmt.Errorf("sietch vector (session=%q): %w", in.SessionID, err)
+					sietchVectorErr = fmt.Errorf("sietch vector (session=%q): %w", in.SessionID, err)
+					return
 				}
 				sietchVectorHits = h
-				return nil
 			})
 		}
 		if in.QueryText != "" {
-			g.Go(func() error {
+			attempted++
+			run(func() {
+				tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+				defer cancel()
 				s := time.Now()
-				h, err := c.Sietch.SearchFTS(gctx, in.SessionID, in.QueryText, in.Limit)
+				h, err := c.Sietch.SearchFTS(tctx, in.SessionID, in.QueryText, in.Limit)
 				sietchFTSDur = time.Since(s)
 				if err != nil {
-					return fmt.Errorf("sietch fts (session=%q): %w", in.SessionID, err)
+					sietchFTSErr = fmt.Errorf("sietch fts (session=%q): %w", in.SessionID, err)
+					return
 				}
 				sietchFTSHits = h
-				return nil
 			})
 		}
 	}
@@ -504,9 +543,8 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		//     is meaningless.
 		//   - "session_vector" requires an embedding; without one the
 		//     pooled-vector cosine has nothing to score against.
-		// One round-trip drives all requested tiers (errgroup is
-		// preserved so the semantic tier still runs in parallel with
-		// the multi call).
+		// One round-trip drives all requested tiers; it runs in parallel
+		// with the semantic call.
 		rankings := make([]string, 0, 3)
 		rankings = append(rankings, "vector")
 		if in.QueryText != "" {
@@ -516,9 +554,12 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			rankings = append(rankings, "session_vector")
 		}
 
-		g.Go(func() error {
+		attempted++
+		run(func() {
+			tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+			defer cancel()
 			s := time.Now()
-			res, err := c.Chapterhouse.QueryEpisodicMulti(gctx, EpisodicMultiQuery{
+			res, err := c.Chapterhouse.QueryEpisodicMulti(tctx, EpisodicMultiQuery{
 				UserID:         in.UserID,
 				WorkspaceID:    in.Workspace,
 				QueryText:      in.QueryText,
@@ -531,7 +572,8 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			})
 			episodicMultiDur = time.Since(s)
 			if err != nil {
-				return fmt.Errorf("episodic multi (user=%q workspace=%q): %w", in.UserID, in.Workspace, err)
+				episodicErr = fmt.Errorf("episodic multi (user=%q workspace=%q): %w", in.UserID, in.Workspace, err)
+				return
 			}
 			// Map each requested ranking sub-list back onto the
 			// per-tier hit slot the post-fan-out RRF logic already
@@ -551,14 +593,16 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			if res.Primitives != nil {
 				primitivesHits = *res.Primitives
 			}
-			return nil
 		})
 	}
 
 	if in.IncludeSemant {
-		g.Go(func() error {
+		attempted++
+		run(func() {
+			tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
+			defer cancel()
 			s := time.Now()
-			h, err := c.Chapterhouse.QuerySemantic(gctx, SemanticQuery{
+			h, err := c.Chapterhouse.QuerySemantic(tctx, SemanticQuery{
 				Workspace:      in.Workspace,
 				QueryText:      in.QueryText,
 				QueryEmbedding: emb,
@@ -566,16 +610,45 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			})
 			semanticDur = time.Since(s)
 			if err != nil {
-				return fmt.Errorf("semantic: %w", err)
+				semanticErr = fmt.Errorf("semantic: %w", err)
+				return
 			}
 			semanticHits = h
-			return nil
 		})
 	}
 
-	if err := g.Wait(); err != nil {
-		return RecallResult{}, err
+	wg.Wait()
+
+	// Tally tier failures in a fixed order so RecallResult.Degraded is
+	// stable JSON for callers. sietch's two sub-queries collapse into
+	// "sietch_vector" / "sietch_fts" degrade entries; the episodic multi
+	// call is one "episodic" entry; semantic is one "semantic" entry.
+	checks := []struct {
+		name string
+		err  error
+	}{
+		{"sietch_vector", sietchVectorErr},
+		{"sietch_fts", sietchFTSErr},
+		{"episodic", episodicErr},
+		{"semantic", semanticErr},
 	}
+	var firstErr error
+	failed := 0
+	for _, ck := range checks {
+		if ck.err == nil {
+			continue
+		}
+		failed++
+		degraded = append(degraded, ck.name)
+		if firstErr == nil {
+			firstErr = ck.err
+		}
+		slog.WarnContext(ctx, "recall tier failed; degrading", "tier", ck.name, "err", ck.err.Error())
+	}
+	if attempted > 0 && failed == attempted {
+		return RecallResult{}, fmt.Errorf("recall: all %d tiers failed: %w", attempted, firstErr)
+	}
+
 	if in.IncludeTimings {
 		timings["fanout_total"] = ms(time.Since(fanoutStart))
 		if sietchVectorDur > 0 {
@@ -735,7 +808,7 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	if in.IncludeTimings {
 		timings["total"] = ms(time.Since(recallStart))
 	}
-	return RecallResult{Hits: hits, TierCounts: counts, Timings: timings}, nil
+	return RecallResult{Hits: hits, TierCounts: counts, Timings: timings, Degraded: degraded}, nil
 }
 
 // ms converts a duration to milliseconds with sub-ms precision (3 decimals).

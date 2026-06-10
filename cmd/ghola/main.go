@@ -6,18 +6,19 @@
 //
 // Configuration is environment-variable driven:
 //
-//   GHOLA_ADDR                listen address            (127.0.0.1:7421)
-//   GHOLA_SESSIONS_DIR        sietch root               (~/.ghola/sessions)
-//   GHOLA_LOOPBACK_ONLY       reject non-loopback       (true)
-//   CHAPTERHOUSE_URL          chapterhouse API base     (http://localhost:8080)
-//   CHAPTERHOUSE_API_KEY      per-user Bearer key       (required in prod)
-//   EMBEDDING_URL             embeddings service base   (http://localhost:8082)
-//   EMBEDDING_MODEL           embedding model name      (qwen3-embedding)
-//   TRUTHSAYER_URL            reranker service base     (empty disables rerank)
-//   RERANK_TOPK               candidate pool sent to reranker (50)
-//   RERANK_WEIGHT             reranker share of fused score [0,1] (0.5; re-sweep after PR-D, PR-E)
-//   RRF_K                     RRF fusion constant       (60)
-//   ENCODING_INTERVAL         sietch -> episodic tick cadence (5m)
+//	GHOLA_ADDR                listen address            (127.0.0.1:7421)
+//	GHOLA_SESSIONS_DIR        sietch root               (~/.ghola/sessions)
+//	GHOLA_LOOPBACK_ONLY       reject non-loopback       (true)
+//	CHAPTERHOUSE_URL          chapterhouse API base     (http://localhost:8080)
+//	CHAPTERHOUSE_API_KEY      per-user Bearer key       (required in prod)
+//	EMBEDDING_URL             embeddings service base   (http://localhost:8082)
+//	EMBEDDING_MODEL           embedding model name      (qwen3-embedding)
+//	TRUTHSAYER_URL            reranker service base     (empty disables rerank)
+//	RERANK_TOPK               candidate pool sent to reranker (50)
+//	RERANK_WEIGHT             reranker share of fused score [0,1] (0.5; re-sweep after PR-D, PR-E)
+//	RRF_K                     RRF fusion constant       (60)
+//	GHOLA_TIER_TIMEOUT_MS     per-recall-tier timeout in ms (10000)
+//	ENCODING_INTERVAL         sietch -> episodic tick cadence (5m)
 package main
 
 import (
@@ -134,6 +135,13 @@ func run() error {
 		}
 		c.RerankWeight = w
 	}
+	if v := os.Getenv("GHOLA_TIER_TIMEOUT_MS"); v != "" {
+		msVal, err := strconv.Atoi(v)
+		if err != nil || msVal <= 0 {
+			return fmt.Errorf("parse GHOLA_TIER_TIMEOUT_MS: must be positive integer (milliseconds), got %q", v)
+		}
+		c.TierTimeout = time.Duration(msVal) * time.Millisecond
+	}
 	srv := ghttp.NewServer(c, logger)
 	srv.LoopbackOnly = loopbackOnly
 	if defaultUser := os.Getenv("AUTH_DEFAULT_USER"); defaultUser != "" {
@@ -198,7 +206,6 @@ func run() error {
 	}
 	return nil
 }
-
 
 // absPath is kept for future use (e.g. relative session dirs via a
 // --sessions-dir flag); not wired yet but easier than re-adding
