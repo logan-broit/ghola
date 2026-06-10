@@ -1429,6 +1429,39 @@ func TestInputValidation_MissingIDs(t *testing.T) {
 }
 
 // Sanity: embedder failures surface.
+// TestBackfillEmbeddings_FillsAll: the backfill pass drains every
+// event that needs an embedding, calling SetEmbedding for each.
+func TestBackfillEmbeddings_FillsAll(t *testing.T) {
+	c, s, _, _ := newCore()
+	s.needEmbedding["sess"] = []core.Event{
+		{ID: "e1", SessionID: "sess", UserID: "u1", Text: strPtr("a")},
+		{ID: "e2", SessionID: "sess", UserID: "u1", Text: strPtr("b")},
+	}
+
+	n, err := c.BackfillEmbeddings(context.Background(), "sess")
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	require.Len(t, s.setEmbeddings, 2)
+	assert.Equal(t, "e1", s.setEmbeddings[0].EventID)
+	assert.Equal(t, "e2", s.setEmbeddings[1].EventID)
+}
+
+// TestBackfillEmbeddings_EmbedderStillDown: if the embedder errors
+// mid-pass nothing is written; the events stay in the backlog for the
+// next tick.
+func TestBackfillEmbeddings_EmbedderStillDown(t *testing.T) {
+	c, s, _, emb := newCore()
+	emb.err = errors.New("guild still down")
+	s.needEmbedding["sess"] = []core.Event{
+		{ID: "e1", SessionID: "sess", UserID: "u1", Text: strPtr("a")},
+	}
+
+	n, err := c.BackfillEmbeddings(context.Background(), "sess")
+	require.Error(t, err)
+	assert.Equal(t, 0, n)
+	assert.Empty(t, s.setEmbeddings, "no embedding written when the embedder is down")
+}
+
 // TestRecord_EmbedderDown_StoresWithoutEmbedding: a record must never
 // be lost because the embedder is unreachable. Record degrades to a
 // no-embedding write; BackfillEmbeddings fills it in on recovery.

@@ -260,6 +260,40 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 	return stored, nil
 }
 
+// BackfillEmbeddings embeds events recorded while the embedder was
+// down (Record degrades to no-embedding rather than losing the write).
+// Returns the number backfilled. Called by the encoding worker before
+// each Consolidate pass; safe to call any time.
+func (c *Core) BackfillEmbeddings(ctx context.Context, sessionID string) (int, error) {
+	if sessionID == "" {
+		return 0, ErrMissingSessionID
+	}
+	const batch = 64
+	total := 0
+	for {
+		evs, err := c.Sietch.EventsNeedingEmbedding(ctx, sessionID, batch)
+		if err != nil {
+			return total, fmt.Errorf("events needing embedding (session=%q): %w", sessionID, err)
+		}
+		if len(evs) == 0 {
+			return total, nil
+		}
+		for _, ev := range evs {
+			emb, err := c.Embedder.Embed(ctx, *ev.Text)
+			if err != nil {
+				return total, fmt.Errorf("backfill embed (session=%q event=%q): %w", sessionID, ev.ID, err)
+			}
+			if err := c.Sietch.SetEmbedding(ctx, sessionID, ev.ID, emb); err != nil {
+				return total, fmt.Errorf("set embedding (event=%q): %w", ev.ID, err)
+			}
+			total++
+		}
+		if len(evs) < batch {
+			return total, nil
+		}
+	}
+}
+
 // Branch starts a new child event from an existing parent and moves
 // the session's current pointer to the new node.
 func (c *Core) Branch(ctx context.Context, in RecordInput) (Event, error) {
