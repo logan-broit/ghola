@@ -77,12 +77,18 @@ var ErrValidation = errors.New("validation")
 var (
 	ErrMissingSessionID = fmt.Errorf("%w: session_id required", ErrValidation)
 	ErrMissingUserID    = fmt.Errorf("%w: user_id required", ErrValidation)
+	// ErrMissingWorkspace is retained as the legacy workspace-required
+	// sentinel. No code path returns it any more — both SessionStart and
+	// Recall now accept a cwd anchor and fail with ErrMissingWorkspaceOrCwd
+	// — but it stays exported so external callers' errors.Is checks keep
+	// compiling. Both wrap ErrValidation, so boundary 400-mapping is
+	// unaffected either way.
 	ErrMissingWorkspace = fmt.Errorf("%w: workspace required", ErrValidation)
-	// ErrMissingWorkspaceOrCwd: SessionStart needs at least one anchor
-	// for workspace scoping. Symmetric with ErrMissingWorkspace on the
-	// recall path; together they enforce "every chapterhouse-bound
-	// query carries a workspace, every ingested session is scoped to
-	// one."
+	// ErrMissingWorkspaceOrCwd: SessionStart and Recall each need at
+	// least one anchor for workspace scoping — an explicit workspace or
+	// a cwd to derive one from. Together they enforce "every
+	// chapterhouse-bound query carries a workspace, every ingested
+	// session is scoped to one."
 	ErrMissingWorkspaceOrCwd = fmt.Errorf("%w: workspace_id or cwd required", ErrValidation)
 )
 
@@ -140,9 +146,28 @@ func (c *Core) resolveImplicitSession(ctx context.Context, in RecordInput) (stri
 	}
 	workspaceID := WorkspaceForCwd(*in.Cwd).String()
 
-	sessions, err := c.Sietch.ListSessions(ctx, in.UserID)
+	if sid, ok, err := c.findOpenSession(ctx, in.UserID, workspaceID); err != nil {
+		return "", err
+	} else if ok {
+		return sid, nil
+	}
+
+	sess, err := c.SessionStart(ctx, SessionStartInput{
+		UserID: in.UserID,
+		Cwd:    in.Cwd,
+	})
 	if err != nil {
-		return "", fmt.Errorf("list sessions (user=%q): %w", in.UserID, err)
+		return "", fmt.Errorf("auto session_start: %w", err)
+	}
+	return sess.ID, nil
+}
+
+// findOpenSession returns the most-recent un-ended session for
+// (userID, workspaceID), or ok=false when there is none.
+func (c *Core) findOpenSession(ctx context.Context, userID, workspaceID string) (string, bool, error) {
+	sessions, err := c.Sietch.ListSessions(ctx, userID)
+	if err != nil {
+		return "", false, fmt.Errorf("list sessions (user=%q): %w", userID, err)
 	}
 	var best *Session
 	for i := range sessions {
@@ -154,18 +179,10 @@ func (c *Core) resolveImplicitSession(ctx context.Context, in RecordInput) (stri
 			best = s
 		}
 	}
-	if best != nil {
-		return best.ID, nil
+	if best == nil {
+		return "", false, nil
 	}
-
-	sess, err := c.SessionStart(ctx, SessionStartInput{
-		UserID: in.UserID,
-		Cwd:    in.Cwd,
-	})
-	if err != nil {
-		return "", fmt.Errorf("auto session_start: %w", err)
-	}
-	return sess.ID, nil
+	return best.ID, true, nil
 }
 
 // SessionEnd finalizes the session — flushes any remaining events to
@@ -341,8 +358,15 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	if in.UserID == "" {
 		return RecallResult{}, ErrMissingUserID
 	}
+	// Workspace resolution mirrors Record: explicit wins, else derive
+	// from cwd. The `*in.Cwd != ""` guard catches the pointer-to-empty
+	// case so we don't collapse every empty-cwd recall onto a single
+	// bogus WorkspaceForCwd("") id.
+	if in.Workspace == "" && in.Cwd != nil && *in.Cwd != "" {
+		in.Workspace = WorkspaceForCwd(*in.Cwd).String()
+	}
 	if in.Workspace == "" {
-		return RecallResult{}, ErrMissingWorkspace
+		return RecallResult{}, ErrMissingWorkspaceOrCwd
 	}
 	if in.Limit <= 0 {
 		in.Limit = 10
@@ -353,6 +377,16 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		in.IncludeSietch = true
 		in.IncludeEpisode = true
 		in.IncludeSemant = true
+	}
+
+	// The MCP agent rarely knows a session id. When the working tier is
+	// requested without one, scope it to the most-recent open session
+	// in this workspace — the same session Record would append to.
+	// A miss or error just means no working-tier hits, not a failure.
+	if in.IncludeSietch && in.SessionID == "" {
+		if sid, ok, err := c.findOpenSession(ctx, in.UserID, in.Workspace); err == nil && ok {
+			in.SessionID = sid
+		}
 	}
 
 	// Per-stage wall-clock timings, opt-in via in.IncludeTimings.
@@ -418,12 +452,12 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		// non-nil empty → flag was on but no in-set boosts surfaced (the
 		// seeded set has no associations among themselves) — RRF treats
 		// this as a tier with zero entries, a clean no-op.
-		primitivesHits    []RecallHit
+		primitivesHits []RecallHit
 
-		sietchVectorDur   time.Duration
-		sietchFTSDur      time.Duration
-		episodicMultiDur  time.Duration
-		semanticDur       time.Duration
+		sietchVectorDur  time.Duration
+		sietchFTSDur     time.Duration
+		episodicMultiDur time.Duration
+		semanticDur      time.Duration
 	)
 
 	var fanoutStart time.Time

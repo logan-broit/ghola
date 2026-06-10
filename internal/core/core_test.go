@@ -25,13 +25,16 @@ import (
 // ---------------------------------------------------------------------
 
 type fakeSietch struct {
-	opened   []core.Session
-	closed   []string
-	ended    map[string]time.Time
-	events   []core.Event
-	current  map[string]string
-	bookmarks []struct{ SessionID, EventID, Label string }
-	softForget []struct{ SessionID string; IDs []string }
+	opened     []core.Session
+	closed     []string
+	ended      map[string]time.Time
+	events     []core.Event
+	current    map[string]string
+	bookmarks  []struct{ SessionID, EventID, Label string }
+	softForget []struct {
+		SessionID string
+		IDs       []string
+	}
 
 	watermarks map[string]string
 	pending    map[string][]core.Event
@@ -46,6 +49,12 @@ type fakeSietch struct {
 	ftsHits    map[string][]core.RecallHit
 	sessions   []core.Session
 
+	// searchVectorSessions / searchFTSSessions capture the session id
+	// each working-tier sub-query was invoked with — tests assert the
+	// implicit open-session resolution scoped the call correctly.
+	searchVectorSessions []string
+	searchFTSSessions    []string
+
 	// metadata returned by GetSession, keyed by session id. Tests that
 	// care about ended_at / cwd / etc. populate this directly.
 	sessionRows map[string]core.Session
@@ -53,9 +62,9 @@ type fakeSietch struct {
 
 func newFakeSietch() *fakeSietch {
 	return &fakeSietch{
-		current:     map[string]string{},
-		watermarks:  map[string]string{},
-		pending:     map[string][]core.Event{},
+		current:       map[string]string{},
+		watermarks:    map[string]string{},
+		pending:       map[string][]core.Event{},
 		vectorHits:    map[string][]core.RecallHit{},
 		ftsHits:       map[string][]core.RecallHit{},
 		ended:         map[string]time.Time{},
@@ -104,16 +113,21 @@ func (f *fakeSietch) CurrentEvent(_ context.Context, sid string) (string, error)
 	return f.current[sid], nil
 }
 func (f *fakeSietch) SearchVector(_ context.Context, sid string, _ []float32, _ int) ([]core.RecallHit, error) {
+	f.searchVectorSessions = append(f.searchVectorSessions, sid)
 	return f.vectorHits[sid], nil
 }
 func (f *fakeSietch) SearchFTS(_ context.Context, sid, _ string, _ int) ([]core.RecallHit, error) {
+	f.searchFTSSessions = append(f.searchFTSSessions, sid)
 	return f.ftsHits[sid], nil
 }
 func (f *fakeSietch) ListSessions(_ context.Context, _ string) ([]core.Session, error) {
 	return f.sessions, nil
 }
 func (f *fakeSietch) SoftForget(_ context.Context, sid string, ids []string) error {
-	f.softForget = append(f.softForget, struct{ SessionID string; IDs []string }{sid, ids})
+	f.softForget = append(f.softForget, struct {
+		SessionID string
+		IDs       []string
+	}{sid, ids})
 	return nil
 }
 func (f *fakeSietch) Watermark(_ context.Context, sid string) (string, error) {
@@ -135,23 +149,29 @@ func (f *fakeSietch) SetEmbedding(_ context.Context, sid, eid string, _ []float3
 }
 
 type fakeChapterhouse struct {
-	ingests []struct{ Sess core.Session; Events []core.Event }
+	ingests []struct {
+		Sess   core.Session
+		Events []core.Event
+	}
 	// multiQueries records every QueryEpisodicMulti call — the only
 	// event-grain entry point core.Recall uses post-A6.
 	multiQueries []core.EpisodicMultiQuery
 	semQueries   []core.SemanticQuery
 	shares       []core.ShareInput
-	forgets      []struct{ UserID string; IDs []string }
+	forgets      []struct {
+		UserID string
+		IDs    []string
+	}
 
 	inserted, updated int
 	// Per-tier canned responses keyed by the multi-ranking sub-list
 	// they populate (vector → Vector, fts → FTS, session_vector →
 	// SessionVector). Tests set these directly; QueryEpisodicMulti
 	// projects them onto the response based on q.Rankings.
-	episResp    []core.RecallHit
-	kwResp      []core.RecallHit
-	svResp      []core.RecallHit
-	semResp     []core.RecallHit
+	episResp []core.RecallHit
+	kwResp   []core.RecallHit
+	svResp   []core.RecallHit
+	semResp  []core.RecallHit
 	// primResp drives the 4th sub-list (Primitives). Three-state
 	// semantics mirror the wire (chapterhouse.QueryEpisodicMultiResponse):
 	//   - nil → primitives field absent on the response (flag off, OR
@@ -162,7 +182,7 @@ type fakeChapterhouse struct {
 	// QueryEpisodicMulti only surfaces this when q.Primitives=true — so
 	// tests that set primResp without flipping the flag still pin the
 	// "off → no primitives sub-list" property.
-	primResp *[]core.RecallHit
+	primResp    *[]core.RecallHit
 	shareID     string
 	forgetCount int
 	err         error
@@ -173,7 +193,10 @@ func newFakeChapterhouse() *fakeChapterhouse {
 }
 
 func (f *fakeChapterhouse) IngestEpisodic(_ context.Context, s core.Session, events []core.Event) (int, int, error) {
-	f.ingests = append(f.ingests, struct{ Sess core.Session; Events []core.Event }{s, events})
+	f.ingests = append(f.ingests, struct {
+		Sess   core.Session
+		Events []core.Event
+	}{s, events})
 	return f.inserted, f.updated, f.err
 }
 
@@ -214,7 +237,10 @@ func (f *fakeChapterhouse) ShareEpisodic(_ context.Context, s core.ShareInput) (
 	return f.shareID, f.err
 }
 func (f *fakeChapterhouse) ForgetEpisodic(_ context.Context, uid string, ids []string) (int, error) {
-	f.forgets = append(f.forgets, struct{ UserID string; IDs []string }{uid, ids})
+	f.forgets = append(f.forgets, struct {
+		UserID string
+		IDs    []string
+	}{uid, ids})
 	return f.forgetCount, f.err
 }
 func (f *fakeChapterhouse) AddSessionWorkspace(_ context.Context, _ core.AddSessionWorkspaceInput) (bool, error) {
@@ -740,11 +766,12 @@ func TestRecall_RRFFavorsCrossTierAgreement(t *testing.T) {
 // agreement on top of dense agreement compounds further.
 //
 // Layout (event-grain after the dedup-by-grain fix):
-//   evt-fts:   only the keyword tier matches (literal phrase that
-//              didn't embed well — proper noun, code identifier).
-//   evt-dense: only the dense episodic tier matches.
-//   evt-both:  matches in dense AND keyword (same event_id surfaced
-//              by both tiers — cross-tier agreement compounds RRF).
+//
+//	evt-fts:   only the keyword tier matches (literal phrase that
+//	           didn't embed well — proper noun, code identifier).
+//	evt-dense: only the dense episodic tier matches.
+//	evt-both:  matches in dense AND keyword (same event_id surfaced
+//	           by both tiers — cross-tier agreement compounds RRF).
 func TestRecall_KeywordTierParticipatesInRRF(t *testing.T) {
 	c, s, ch, _ := newCore()
 	sidFTS := "s-fts"
@@ -791,15 +818,16 @@ func TestRecall_KeywordTierParticipatesInRRF(t *testing.T) {
 // Recall output.
 //
 // Layout:
-//   sid-sv-only:  matches only on episodic.sessions.l1_embedding
-//                 (paraphrase-style query the per-event vector misses).
-//   sid-ep-only:  matches only on the per-event dense tier.
-//   sid-both:     matches in both tiers — surfaces as TWO hits because
-//                 the session-vector tier produces session-grain output
-//                 and the per-event tier produces event-grain output.
-//                 They are not the same "document"; collapsing them
-//                 erases the per-event identity, which is what dedup-
-//                 by-grain prevents.
+//
+//	sid-sv-only:  matches only on episodic.sessions.l1_embedding
+//	              (paraphrase-style query the per-event vector misses).
+//	sid-ep-only:  matches only on the per-event dense tier.
+//	sid-both:     matches in both tiers — surfaces as TWO hits because
+//	              the session-vector tier produces session-grain output
+//	              and the per-event tier produces event-grain output.
+//	              They are not the same "document"; collapsing them
+//	              erases the per-event identity, which is what dedup-
+//	              by-grain prevents.
 func TestRecall_SessionVectorTierParticipatesInRRF(t *testing.T) {
 	c, _, ch, _ := newCore()
 	sidSVOnly := "s-sv-only"
@@ -1324,6 +1352,83 @@ func TestRecall_RerankFallsBackToContentWhenSessionChunkEmpty(t *testing.T) {
 	assert.Equal(t, "the meeting is at 3pm", first["text"], "fallback to exemplar Content")
 }
 
+// TestRecall_CwdDerivesWorkspace: an MCP agent rarely knows the
+// workspace UUID, but it always knows cwd. When Workspace is empty and
+// Cwd is set, Recall must derive the workspace via WorkspaceForCwd —
+// the same mapping Record uses — and scope the chapterhouse tiers to it.
+func TestRecall_CwdDerivesWorkspace(t *testing.T) {
+	c, _, ch, _ := newCore()
+	cwd := "/tmp/proj"
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Cwd:       strPtr(cwd),
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.multiQueries, 1)
+	assert.Equal(t, core.WorkspaceForCwd(cwd).String(), ch.multiQueries[0].WorkspaceID,
+		"workspace derived from cwd reaches the chapterhouse query")
+}
+
+// TestRecall_NoWorkspaceNoCwd_Errors: neither an explicit workspace nor
+// a cwd to derive one from -> validation error so the boundary returns
+// 400 instead of an unscoped recall.
+func TestRecall_NoWorkspaceNoCwd_Errors(t *testing.T) {
+	c, _, _, _ := newCore()
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		QueryText: "kubernetes",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+}
+
+// TestRecall_CwdPointerToEmptyDoesNotDerive: a non-nil pointer to ""
+// must NOT derive WorkspaceForCwd("") — that would collapse every
+// empty-cwd recall to a single bogus workspace. Mirrors Record's guard.
+func TestRecall_CwdPointerToEmptyDoesNotDerive(t *testing.T) {
+	c, _, _, _ := newCore()
+	empty := ""
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:    "u1",
+		Cwd:       &empty,
+		QueryText: "kubernetes",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+}
+
+// TestRecall_ResolvesOpenSessionForSietchTier: the working tier needs a
+// session id, but the MCP agent rarely has one. When IncludeSietch is
+// requested without a session_id, Recall must scope it to the most-
+// recent open session in the derived workspace — the same session
+// Record would append to — and drive SearchVector/SearchFTS with it.
+func TestRecall_ResolvesOpenSessionForSietchTier(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	ws := core.WorkspaceForCwd(cwd).String()
+	s.sessions = []core.Session{{
+		ID:          "sess-open",
+		UserID:      "u1",
+		WorkspaceID: ws,
+		StartedAt:   time.Unix(1_700_000_000, 0).UTC(),
+		// EndedAt nil -> still open
+	}}
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID:        "u1",
+		Cwd:           strPtr(cwd),
+		QueryText:     "kubernetes",
+		IncludeSietch: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, s.searchVectorSessions, "sess-open",
+		"working-tier vector search scoped to the resolved open session")
+	assert.Contains(t, s.searchFTSSessions, "sess-open",
+		"working-tier FTS search scoped to the resolved open session")
+}
+
 func TestForget_AcrossTiers(t *testing.T) {
 	c, s, ch, _ := newCore()
 	ch.forgetCount = 2
@@ -1393,7 +1498,6 @@ func TestConsolidate_NoopWhenEmpty(t *testing.T) {
 	assert.Equal(t, 0, n)
 	assert.Empty(t, ch.ingests)
 }
-
 
 // A minimal validation sweep so the input-guard branches are covered
 // without a bespoke test per operation.
