@@ -81,3 +81,20 @@ jobs:
       # Skip the integration test (test_cluster_endpoint.py); it needs a
       # live Postgres with the chapterhouse schemas — out of scope here.
       - run: pytest tests -q -m "not integration"
+
+  python-qa:
+    name: pytest (lme-qa)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bench/longmemeval/qa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No torch here — the QA stage is the anthropic SDK plus pure-stdlib
+      # context/prompt/aggregation logic. The SDK-boundary tests run a real
+      # anthropic client against a stdlib http.server fake; no network egress.
+      - run: pip install -e '.[dev]'
+      - run: pytest tests -q

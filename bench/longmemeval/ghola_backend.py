@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -431,6 +432,16 @@ class GholaV2Backend(MemoryBackend):
             # MCP) leave this off to keep the response body lean.
             "include_timings": True,
         })
+        # Fail loud on degraded recall. core.Recall now degrades tier-by-tier
+        # (a stage timing out or erroring drops its contribution) instead of
+        # failing the whole request; the response carries a `degraded` list of
+        # stage names, omitted when empty. A silently-degraded recall lowers
+        # benchmark scores with no signal, so abort the run naming the stages
+        # and the offending question/query. GHOLA_ALLOW_DEGRADED=1 downgrades
+        # this to a single loud stderr warning (debug escape hatch only — a
+        # scored run must never set it).
+        _check_degraded(out, getattr(self, "_current_question_id", None), query)
+
         hits = out.get("hits", []) if isinstance(out, dict) else []
         # Stash per-recall timings (server-side per-stage wall-clock, ms)
         # so stages/retrieve.py can write them into the result JSONL for
@@ -654,6 +665,41 @@ class GholaV2Backend(MemoryBackend):
             except Exception:
                 return resp.text
         raise RuntimeError(f"ghola {path} retried out")
+
+
+def _check_degraded(out: Any, question_id: str | None, query: str) -> None:
+    """Abort (or warn) when a recall response reports degraded stages.
+
+    `out` is the parsed /v1/recall JSON. RecallResult carries `degraded`
+    (a list of stage names) only when a tier degraded; the field is omitted
+    when recall ran clean, so an absent/empty value is the happy path. A
+    degraded recall during a scored run silently lowers R@k, hence the loud
+    failure. GHOLA_ALLOW_DEGRADED=1 swaps the RuntimeError for a one-line
+    stderr warning so the degradation can be inspected without aborting.
+    """
+    if not isinstance(out, dict):
+        return
+    degraded = out.get("degraded")
+    if not degraded:
+        return
+    stages = ", ".join(str(s) for s in degraded)
+    where = question_id or "<no question in scope>"
+    detail = (
+        f"recall degraded (stages: {stages}) on question {where} "
+        f"query={query[:120]!r}"
+    )
+    if os.environ.get("GHOLA_ALLOW_DEGRADED") == "1":
+        print(
+            f"WARNING: {detail} -- continuing because GHOLA_ALLOW_DEGRADED=1; "
+            f"scores from this run are NOT trustworthy",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    raise RuntimeError(
+        f"{detail}. A degraded recall lowers benchmark scores with no "
+        f"signal; set GHOLA_ALLOW_DEGRADED=1 to override (debug only)."
+    )
 
 
 def _raw_event(role: str, text: str, timestamp: str) -> dict:
