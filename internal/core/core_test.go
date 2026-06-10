@@ -36,6 +36,12 @@ type fakeSietch struct {
 	watermarks map[string]string
 	pending    map[string][]core.Event
 
+	// needEmbedding is the canned EventsNeedingEmbedding result per
+	// session; setEmbeddings records the (sessionID,eventID) backfills
+	// BackfillEmbeddings drives.
+	needEmbedding map[string][]core.Event
+	setEmbeddings []struct{ SessionID, EventID string }
+
 	vectorHits map[string][]core.RecallHit
 	ftsHits    map[string][]core.RecallHit
 	sessions   []core.Session
@@ -50,10 +56,11 @@ func newFakeSietch() *fakeSietch {
 		current:     map[string]string{},
 		watermarks:  map[string]string{},
 		pending:     map[string][]core.Event{},
-		vectorHits:  map[string][]core.RecallHit{},
-		ftsHits:     map[string][]core.RecallHit{},
-		ended:       map[string]time.Time{},
-		sessionRows: map[string]core.Session{},
+		vectorHits:    map[string][]core.RecallHit{},
+		ftsHits:       map[string][]core.RecallHit{},
+		ended:         map[string]time.Time{},
+		sessionRows:   map[string]core.Session{},
+		needEmbedding: map[string][]core.Event{},
 	}
 }
 
@@ -118,6 +125,13 @@ func (f *fakeSietch) SetWatermark(_ context.Context, sid, eid string) error {
 }
 func (f *fakeSietch) PendingEvents(_ context.Context, sid, _ string) ([]core.Event, error) {
 	return f.pending[sid], nil
+}
+func (f *fakeSietch) EventsNeedingEmbedding(_ context.Context, sid string, _ int) ([]core.Event, error) {
+	return f.needEmbedding[sid], nil
+}
+func (f *fakeSietch) SetEmbedding(_ context.Context, sid, eid string, _ []float32) error {
+	f.setEmbeddings = append(f.setEmbeddings, struct{ SessionID, EventID string }{sid, eid})
+	return nil
 }
 
 type fakeChapterhouse struct {

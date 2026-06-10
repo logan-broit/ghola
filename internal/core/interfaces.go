@@ -48,6 +48,15 @@ type SietchStore interface {
 	// PendingEvents returns events created after `afterEventID` so
 	// Consolidate/SessionEnd can ship them to chapterhouse.
 	PendingEvents(ctx context.Context, sessionID, afterEventID string) ([]Event, error)
+
+	// EventsNeedingEmbedding returns active events with text but no
+	// embedding — those recorded while the embedder was unreachable
+	// (Record degrades rather than losing the write). BackfillEmbeddings
+	// drains this set; only ID/SessionID/UserID/Text are populated.
+	EventsNeedingEmbedding(ctx context.Context, sessionID string, limit int) ([]Event, error)
+	// SetEmbedding backfills one event's embedding. State-guarded so a
+	// concurrent forget is not resurrected by a late backfill.
+	SetEmbedding(ctx context.Context, sessionID, eventID string, emb []float32) error
 }
 
 // ChapterhouseClient wraps the /v1 REST surface. Implementation in
