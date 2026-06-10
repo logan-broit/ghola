@@ -73,6 +73,72 @@ escape hatch only; numbers from such a run are not trustworthy.
 > `~/longmemeval-ghola/backends/ghola_v2.py` from this file — the harness
 > imports that copy, not this one.
 
+## QA-accuracy stage (`qa/`)
+
+`qa/` is a self-contained Python package (`lme-qa`) that turns ghola's
+retrieve results into an end-to-end QA-accuracy number, using Claude Opus
+4.8 as both reader and judge. It is **separate from R@k**: retrieval R@k and
+QA accuracy are different metrics and must not be cross-compared.
+
+```sh
+# Install (Python >=3.12; needs the anthropic SDK):
+pip install -e 'bench/longmemeval/qa[dev]'
+export ANTHROPIC_API_KEY=sk-ant-...        # both stages require it
+```
+
+Run order — retrieve first (with the degraded guard active), then read,
+then judge:
+
+```sh
+# 0. retrieve (see above) -> results/ghola_v2_s_<ts>.jsonl
+
+# 1. reader: build context from the top-10 retrieved sessions per question
+#    and answer via one Opus 4.8 Batches run.
+lme-qa-run \
+  --dataset ~/longmemeval-ghola/data/longmemeval_s_cleaned.json \
+  --run     ~/longmemeval-ghola/results/ghola_v2_s_<ts>.jsonl \
+  --out     answers.jsonl --k 10
+
+# 2. judge: score answers against gold with the upstream LongMemEval judge
+#    prompts via a second Opus 4.8 Batches run; writes a per-category report.
+lme-qa-judge \
+  --dataset ~/longmemeval-ghola/data/longmemeval_s_cleaned.json \
+  --answers answers.jsonl \
+  --out     judgments.jsonl --report report.md
+```
+
+| Knob | Default | What |
+|---|---|---|
+| `--k` | `10` | top-K retrieved sessions used to build reader context (matches the published R@10) |
+| `max_session_chars` | `24000` | per-session character cap in `context.build_context` — generous (p99 of real sessions is ~20.7k chars); only bounds a runaway session |
+| reader `max_tokens` | `8000` | adaptive-thinking tokens count toward output, so the reader gets headroom |
+| judge `max_tokens` | `2048` | the judge answers "yes"/"no" only |
+| `--state` | alongside `--out` | JSON file recording each stage's batch_id + request fingerprint |
+| `--fresh` | off | ignore state and submit a new batch |
+
+**Model surface:** `claude-opus-4-8`, adaptive thinking (`{"type":
+"adaptive"}`), NO `temperature`/`top_p`/`top_k` (they 400 on Opus 4.8), no
+assistant prefills.
+
+**Resume semantics:** each stage persists its batch_id + a fingerprint of
+the request set (the sorted custom_ids) to the state file. Re-running an
+interrupted job resumes by polling the in-flight batch instead of
+resubmitting; a changed question set (fingerprint mismatch) or `--fresh`
+forces a new submission. Batch submissions are billed at the 50% batch
+price.
+
+**Cost ballpark:** 500 questions, batched Opus 4.8 — roughly **$10-40**
+per full run depending on context size (the reader's top-10-session context
+dominates input tokens). Two batches per run (reader + judge); the judge is
+cheap by comparison.
+
+The judge prompts and the per-question-type + abstention selection logic
+are ported verbatim from upstream LongMemEval
+[`evaluate_qa.py`](https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py)
+(`get_anscheck_prompt`). `_abs` questions are scored with the abstention
+prompt and aggregated into their base `question_type` bucket (upstream
+behavior); the report adds a supplementary answerable/abstention split.
+
 ## Internal vs upstream
 
 `seeding-eval/` at the repo root is the **internal** sweep harness — a

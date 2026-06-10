@@ -21,3 +21,9 @@ lme-qa-judge = "lme_qa.cli:judge_main"
 
 [tool.setuptools]
 packages = ["lme_qa"]
+
+[tool.pytest.ini_options]
+# Put the package root on sys.path so `from tests.fake_batches_server import ...`
+# resolves (the tests/ helper module is imported as a package member).
+pythonpath = ["."]
+testpaths = ["tests"]
