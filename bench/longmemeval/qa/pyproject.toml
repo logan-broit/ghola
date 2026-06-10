@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lme-qa"
+version = "0.1.0"
+description = "Reader+judge QA-accuracy stage for LongMemEval-S on top of ghola retrieve results"
+requires-python = ">=3.12"
+# anthropic is the only runtime dep: the Batches API client for the
+# Opus 4.8 reader+judge submissions. Context building, prompt rendering,
+# and aggregation are pure stdlib.
+dependencies = ["anthropic>=0.69"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+lme-qa-run = "lme_qa.cli:run_main"
+lme-qa-judge = "lme_qa.cli:judge_main"
+
+[tool.setuptools]
+packages = ["lme_qa"]
