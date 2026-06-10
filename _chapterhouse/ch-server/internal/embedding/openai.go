@@ -1,45 +1,27 @@
 package embedding
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"time"
+
+	ghola "github.com/logan-broit/ghola/pkg/embedding"
 )
 
 // OpenAIProvider generates embeddings using any OpenAI-compatible API.
 // Works with Together.ai, vLLM, OpenAI, and other compatible services.
+//
+// It is a thin adapter over the canonical github.com/logan-broit/ghola
+// pkg/embedding client (shared with the ghola service). The adapter
+// owns ch-server's caller contracts — the ErrEmptyInput / ErrBatchTooLarge
+// sentinels and the maxBatch hard cap — which the shared client
+// deliberately does not impose; everything below those guards delegates
+// to the shared client.
 type OpenAIProvider struct {
-	baseURL    string
-	model      string
-	apiKey     string
+	client     *ghola.Client
 	dimensions int
 	maxBatch   int
-	client     *http.Client
 	name       string
-}
-
-type openaiEmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
-}
-
-type openaiEmbedResponse struct {
-	Object string `json:"object"`
-	Data   []struct {
-		Object    string    `json:"object"`
-		Embedding []float32 `json:"embedding"`
-		Index     int       `json:"index"`
-	} `json:"data"`
-	Model string `json:"model"`
-	Usage struct {
-		PromptTokens int `json:"prompt_tokens"`
-		TotalTokens  int `json:"total_tokens"`
-	} `json:"usage"`
 }
 
 // NewOpenAIProvider creates a new OpenAI-compatible embedding provider.
@@ -49,24 +31,25 @@ func NewOpenAIProvider(cfg Config, apiKey string) *OpenAIProvider {
 	}
 
 	return &OpenAIProvider{
-		baseURL:    cfg.URL,
-		model:      cfg.Model,
-		apiKey:     apiKey,
+		// Timeout 60s + Retries 1 preserve this provider's prior effective
+		// behavior: it hard-coded a 60s http.Client and made exactly one
+		// request (EmbeddingConfig.Timeout never reached it, and there was
+		// no retry loop). MaxBatch is mirrored into the shared client's
+		// chunk size, but the adapter's own maxBatch cap below rejects
+		// oversize batches before any chunking can occur — so the shared
+		// client sees only single-chunk requests.
+		client: ghola.New(ghola.Config{
+			BaseURL:    cfg.URL,
+			Model:      cfg.Model,
+			APIKey:     apiKey,
+			Dimensions: cfg.Dimensions,
+			MaxBatch:   cfg.MaxBatch,
+			Timeout:    60 * time.Second,
+			Retries:    1,
+		}),
 		dimensions: cfg.Dimensions,
 		maxBatch:   cfg.MaxBatch,
 		name:       "openai",
-		client: &http.Client{
-			Timeout: 60 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-				DialContext: (&net.Dialer{
-					Timeout:   10 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-			},
-		},
 	}
 }
 
@@ -98,59 +81,7 @@ func (p *OpenAIProvider) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 		return nil, fmt.Errorf("%w: got %d, max %d", ErrBatchTooLarge, len(texts), p.maxBatch)
 	}
 
-	reqBody := openaiEmbedRequest{
-		Model: p.model,
-		Input: texts,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		p.baseURL+"/v1/embeddings", bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrProviderUnavailable, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("embedding API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result openaiEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	// Ensure embeddings are in correct order
-	embeddings := make([][]float32, len(texts))
-	for _, item := range result.Data {
-		if item.Index < len(embeddings) {
-			embeddings[item.Index] = item.Embedding
-		}
-	}
-
-	// Verify all embeddings were received
-	for i, emb := range embeddings {
-		if emb == nil {
-			return nil, fmt.Errorf("missing embedding at index %d", i)
-		}
-	}
-
-	return embeddings, nil
+	return p.client.EmbedBatch(ctx, texts)
 }
 
 // Dimensions returns the embedding dimension size.

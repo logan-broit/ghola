@@ -7,12 +7,18 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
+	github.com/logan-broit/ghola v0.0.0-00010101000000-000000000000
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	golang.org/x/crypto v0.48.0
 	golang.org/x/sync v0.20.0
 )
+
+// ghola's pkg/embedding is the canonical shared embeddings client; the
+// path-relative replace resolves it in-checkout (CI runs ch-server with
+// GOWORK=off, so the require+replace is what makes the build work there).
+replace github.com/logan-broit/ghola => ../..
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
