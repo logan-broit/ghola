@@ -238,9 +238,16 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 	if len(ev.Embedding) == 0 && ev.Text != nil && *ev.Text != "" {
 		emb, err := c.Embedder.Embed(ctx, *ev.Text)
 		if err != nil {
-			return Event{}, fmt.Errorf("embed (session=%q): %w", ev.SessionID, err)
+			// Never lose a write because the embedder is down. The
+			// event lands in sietch without an embedding; the encoding
+			// worker's backfill pass (BackfillEmbeddings) fills it in
+			// when the embedder recovers, and Consolidate holds it
+			// back from chapterhouse until then.
+			slog.WarnContext(ctx, "embed failed; recording without embedding",
+				"session_id", ev.SessionID, "err", err.Error())
+		} else {
+			ev.Embedding = emb
 		}
-		ev.Embedding = emb
 	}
 
 	stored, err := c.Sietch.RecordEvent(ctx, ev)

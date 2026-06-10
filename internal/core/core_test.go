@@ -1390,13 +1390,19 @@ func TestInputValidation_MissingIDs(t *testing.T) {
 }
 
 // Sanity: embedder failures surface.
-func TestRecord_EmbedderErrorPropagates(t *testing.T) {
-	c, _, _, emb := newCore()
+// TestRecord_EmbedderDown_StoresWithoutEmbedding: a record must never
+// be lost because the embedder is unreachable. Record degrades to a
+// no-embedding write; BackfillEmbeddings fills it in on recovery.
+func TestRecord_EmbedderDown_StoresWithoutEmbedding(t *testing.T) {
+	c, s, _, emb := newCore()
 	emb.err = errors.New("guild down")
-	_, err := c.Record(context.Background(), core.RecordInput{
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
 		SessionID: "sess", UserID: "u1",
 		Event: core.Event{Type: "user", Text: strPtr("needs embedding")},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "embed")
+	require.NoError(t, err, "embedder downtime must not fail the write")
+	require.Len(t, s.events, 1)
+	assert.Empty(t, s.events[0].Embedding, "event lands without an embedding")
+	assert.Equal(t, ev.ID, s.current["sess"], "current pointer still advances")
 }
