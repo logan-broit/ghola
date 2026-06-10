@@ -134,6 +134,14 @@ func (w *Worker) Tick(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
+		if n, err := w.core.BackfillEmbeddings(ctx, id); err != nil {
+			// Embedder still down (or partial) — warn and fall through:
+			// Consolidate ships whatever embedded prefix exists.
+			w.logger.Warn("embedding backfill incomplete",
+				"session_id", id, "backfilled", n, "error", err.Error())
+		} else if n > 0 {
+			w.logger.Info("backfilled embeddings", "session_id", id, "count", n)
+		}
 		n, err := w.core.Consolidate(ctx, id)
 		if err != nil {
 			w.logger.Warn("consolidate failed",
