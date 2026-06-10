@@ -57,20 +57,27 @@ type Core struct {
 	// and reported in RecallResult.Degraded — one slow tier must not
 	// stall or fail the whole recall.
 	TierTimeout time.Duration
+	// SietchRetention is how long an ended, fully-drained session's
+	// sietch file is kept before GC deletes it. The file is a
+	// redundant local cache once consolidation has shipped everything;
+	// the buffer exists so a consolidation bug can be debugged against
+	// the original. 0 disables GC entirely.
+	SietchRetention time.Duration
 }
 
 // New builds a Core with sensible defaults.
 func New(s SietchStore, ch ChapterhouseClient, emb Embedder) *Core {
 	return &Core{
-		Sietch:        s,
-		Chapterhouse:  ch,
-		Embedder:      emb,
-		Now:           func() time.Time { return time.Now().UTC() },
-		RRFK:          60,
-		RerankTopK:    50,
-		RerankWeight:  0.5,
-		RerankTimeout: 30 * time.Second,
-		TierTimeout:   10 * time.Second,
+		Sietch:          s,
+		Chapterhouse:    ch,
+		Embedder:        emb,
+		Now:             func() time.Time { return time.Now().UTC() },
+		RRFK:            60,
+		RerankTopK:      50,
+		RerankWeight:    0.5,
+		RerankTimeout:   30 * time.Second,
+		TierTimeout:     10 * time.Second,
+		SietchRetention: 7 * 24 * time.Hour,
 	}
 }
 
@@ -1090,6 +1097,50 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 		return 0, fmt.Errorf("advance watermark: %w", err)
 	}
 	return len(pending), nil
+}
+
+// GCSession deletes the session's sietch file once it is a redundant
+// local cache: ended longer ago than SietchRetention, fully
+// consolidated (nothing past the watermark), and nothing awaiting
+// embedding backfill. The backfill check is belt-and-suspenders — an
+// un-embedded event is also unconsolidated — guarding any future
+// watermark change. Returns true when the file was removed.
+func (c *Core) GCSession(ctx context.Context, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, ErrMissingSessionID
+	}
+	if c.SietchRetention <= 0 {
+		return false, nil
+	}
+	sess, err := c.Sietch.GetSession(ctx, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("gc get session (session=%q): %w", sessionID, err)
+	}
+	if sess.EndedAt == nil || c.Now().Sub(*sess.EndedAt) < c.SietchRetention {
+		return false, nil
+	}
+	watermark, err := c.Sietch.Watermark(ctx, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("gc watermark: %w", err)
+	}
+	pending, err := c.Sietch.PendingEvents(ctx, sessionID, watermark)
+	if err != nil {
+		return false, fmt.Errorf("gc pending: %w", err)
+	}
+	if len(pending) > 0 {
+		return false, nil
+	}
+	need, err := c.Sietch.EventsNeedingEmbedding(ctx, sessionID, 1)
+	if err != nil {
+		return false, fmt.Errorf("gc needs-embedding: %w", err)
+	}
+	if len(need) > 0 {
+		return false, nil
+	}
+	if err := c.Sietch.RemoveSession(ctx, sessionID); err != nil {
+		return false, fmt.Errorf("gc remove (session=%q): %w", sessionID, err)
+	}
+	return true, nil
 }
 
 // needsEmbedding reports whether an event should carry an embedding
