@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
@@ -155,10 +155,16 @@ func (c *Client) embedOnce(ctx context.Context, inputs []string) ([][]float32, e
 			continue // transport error — retry
 		}
 		vecs, derr := decodeBatch(resp, len(inputs))
-		resp.Body.Close()
 		if derr == nil {
+			resp.Body.Close()
 			return vecs, nil
 		}
+		// Error outcome: decodeBatch read only a capped slice of the body
+		// (4xx/5xx) or stopped at the first decode error. Drain to EOF
+		// before Close so the keep-alive connection is reusable on the
+		// next retry — connection reuse requires both EOF and Close.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 		lastErr = derr
 		if !isRetryable(resp.StatusCode) {
 			return nil, lastErr
@@ -191,7 +197,7 @@ func backoff(n int) time.Duration {
 	for i := 1; i < n; i++ {
 		base *= 5
 	}
-	jitter := time.Duration(rand.Int63n(int64(base / 4)))
+	jitter := time.Duration(rand.Int64N(int64(base / 4)))
 	return base + jitter
 }
 

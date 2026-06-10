@@ -18,6 +18,8 @@ require (
 // ghola's pkg/embedding is the canonical shared embeddings client; the
 // path-relative replace resolves it in-checkout (CI runs ch-server with
 // GOWORK=off, so the require+replace is what makes the build work there).
+// Splitting the repo would require tagging and publishing pkg/embedding
+// and rewriting this require/replace pair.
 replace github.com/logan-broit/ghola => ../..
 
 require (

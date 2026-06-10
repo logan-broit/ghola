@@ -17,6 +17,11 @@ import (
 // sentinels and the maxBatch hard cap — which the shared client
 // deliberately does not impose; everything below those guards delegates
 // to the shared client.
+//
+// The old provider's custom transport tunings (MaxIdleConnsPerHost,
+// IdleConnTimeout, dial timeouts) were dropped in favor of the shared
+// client's default transport; revisit via a Config transport hook if pool
+// tuning becomes necessary.
 type OpenAIProvider struct {
 	client     *ghola.Client
 	dimensions int

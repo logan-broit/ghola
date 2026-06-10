@@ -60,6 +60,29 @@ func TestEmbed_HappyPath(t *testing.T) {
 	}
 }
 
+// TestEmbed_EmptyDataIsError pins which error wins when the server returns
+// a 200 with an empty data array for a single-text Embed: decodeBatch sizes
+// the output to the input count and reports the unfilled slot, so the error
+// must name the missing embedding (not the higher-level "no embedding"
+// guard in Embed, which only fires when decodeBatch returns zero vectors
+// without error).
+func TestEmbed_EmptyDataIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	c := embedding.New(embedding.Config{BaseURL: srv.URL, Model: "test"})
+	_, err := c.Embed(context.Background(), "x")
+	if err == nil {
+		t.Fatal("expected error on empty data array")
+	}
+	if !strings.Contains(err.Error(), "missing embedding") {
+		t.Errorf("error = %q, want it to mention the missing embedding", err.Error())
+	}
+}
+
 // TestEmbed_RetriesOn503 pins that a 503 is retried and a subsequent
 // success is returned; the request count proves the retry happened.
 func TestEmbed_RetriesOn503(t *testing.T) {
