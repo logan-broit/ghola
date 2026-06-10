@@ -1,8 +1,22 @@
 """CLI entry points: lme-qa-run (reader) and lme-qa-judge (judge).
 
-Both read ANTHROPIC_API_KEY from the environment and error early if it is
-unset. The two stages persist their batch ids to a state file so an
-interrupted run resumes by polling the in-flight batch.
+Two execution backends select via ``--backend`` (default ``batches``):
+
+  - ``batches``: submit one Anthropic Batches API batch per stage as Opus 4.8;
+    reads ANTHROPIC_API_KEY and persists each stage's batch_id to a state file
+    so an interrupted run resumes by polling the in-flight batch.
+  - ``claude-code``: drive headless ``claude -p`` once per question through the
+    operator's Claude Code subscription (no API key). Resume is per-question:
+    each completed answer/judgment row is appended to ``--out`` the moment it
+    lands (durable before the stage finishes) and re-running skips question_ids
+    already succeeded (failures are retried). The output is append-only — never
+    rewritten — so stale errored rows from a prior run are left in place and
+    superseded last-wins by question_id on load (every reader dedups).
+
+The reader/judge prompt content is shared across both backends (built once from
+prompts.py) so the two paths are directly comparable — the model is identical
+(``claude-opus-4-8``); only the serving harness differs, and the report footer
+records which path produced the number.
 """
 
 from __future__ import annotations
@@ -10,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,14 +32,41 @@ from typing import Any
 
 from . import aggregate, context, prompts
 from .batch import MODEL, BatchDriver, judge_request, reader_request
+from .cc import CCRequest, CCRunner, UsageLimitExhausted
+
+# The two execution backends; ``batches`` stays the default so existing
+# invocations and the key-bearing path are unchanged.
+BACKENDS = ("batches", "claude-code")
 
 
 def _require_api_key() -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit(
             "error: ANTHROPIC_API_KEY is not set. Export it before running "
-            "(the reader and judge submit Batches API requests as Opus 4.8)."
+            "(the reader and judge submit Batches API requests as Opus 4.8). "
+            "no API key? use --backend claude-code"
         )
+
+
+def _claude_bin() -> str:
+    """The claude binary name/path; env LME_QA_CLAUDE_BIN overrides (also the
+    test seam). Defaults to ``claude`` on PATH.
+    """
+    return os.environ.get("LME_QA_CLAUDE_BIN", "claude")
+
+
+def _require_claude_bin() -> str:
+    """Verify the claude binary is runnable for the cc backend, or error
+    clearly. Returns the resolved binary to invoke.
+    """
+    binary = _claude_bin()
+    if shutil.which(binary) is None:
+        sys.exit(
+            f"error: claude-code backend selected but the claude binary "
+            f"'{binary}' was not found on PATH. Install Claude Code (or set "
+            f"LME_QA_CLAUDE_BIN to its path)."
+        )
+    return binary
 
 
 def _client() -> Any:
@@ -70,11 +112,65 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _dedup_last_wins(rows: list[dict[str, Any]], key: str = "question_id") -> list[dict[str, Any]]:
+    """Collapse rows to one-per-``key``, last occurrence wins, order preserved.
+
+    The cc backend's output is append-only (never truncate-rewritten), so a qid
+    that failed then succeeded on a later run appears twice — the earlier failed
+    row superseded by the later succeeded one. Every reader of such a file must
+    take the LAST row per qid; ``status`` then reflects the final outcome. Rows
+    without ``key`` are passed through unchanged (no qid to dedup on).
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    no_key: list[dict[str, Any]] = []
+    for row in rows:
+        k = row.get(key)
+        if k is None:
+            no_key.append(row)
+        else:
+            latest[k] = row  # last wins
+    return no_key + list(latest.values())
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as fh:
         for row in rows:
             fh.write(json.dumps(row) + "\n")
+
+
+def _append_jsonl_row(path: Path, row: dict[str, Any]) -> None:
+    """Append one row to a JSONL file and flush to disk immediately.
+
+    The cc backend persists each completed row as it lands so a crash (or a
+    usage-window exhaustion) mid-run loses nothing — the next run resumes from
+    what is on disk. We open in append mode and never rewrite the file, so a
+    pre-existing partial file is extended, not clobbered.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def _completed_ids(path: Path) -> set[str]:
+    """question_ids whose LATEST row in ``path`` has status=="succeeded".
+
+    Used by the cc backend to skip done questions on resume. Last-wins by qid:
+    the file is append-only, so a qid that failed then succeeded on a re-run has
+    its succeeded row last and is counted done; a qid whose latest row is
+    non-succeeded (errored/empty) is NOT counted, so it is retried. A
+    missing/empty file yields an empty set.
+    """
+    if not path.exists():
+        return set()
+    latest: dict[str, dict[str, Any]] = {}
+    for row in _load_jsonl(path):
+        qid = row.get("question_id")
+        if qid:
+            latest[qid] = row  # last row wins
+    return {qid for qid, row in latest.items() if row.get("status") == "succeeded"}
 
 
 def _default_state(out_path: Path) -> Path:
@@ -104,15 +200,42 @@ def run_main(argv: list[str] | None = None) -> int:
         help="manually adopt an existing batch_id instead of submitting "
         "(use to recover an orphaned paid batch the auto-adoption missed)",
     )
-    ap.add_argument("--poll-interval", type=int, default=60, help="seconds between batch polls")
+    ap.add_argument("--poll-interval", type=int, default=60, help="seconds between batch polls (batches backend)")
+    ap.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="batches",
+        help="execution backend: batches (Anthropic Batches API, needs a key) "
+        "or claude-code (headless claude -p via subscription, per-question resume)",
+    )
+    ap.add_argument(
+        "--parallel",
+        type=int,
+        default=2,
+        help="claude-code backend: concurrent claude -p calls (keep low; default 2)",
+    )
+    ap.add_argument(
+        "--timeout-s",
+        type=int,
+        default=300,
+        help="claude-code backend: per-call timeout in seconds (default 300)",
+    )
     args = ap.parse_args(argv)
 
-    _require_api_key()
+    # Backend selection gates which credential is required: batches needs a key;
+    # claude-code needs the claude binary (no key — subscription auth).
+    if args.backend == "claude-code":
+        claude_bin = _require_claude_bin()
+    else:
+        _require_api_key()
     by_qid = _load_dataset(args.dataset)
     run_lines = _load_jsonl(args.run)
     state_path = args.state or _default_state(args.out)
 
-    requests: list[dict[str, Any]] = []
+    # Build the (qid, system, user_text) per question ONCE. The system + user
+    # split is identical for both backends (prompts.READER_SYSTEM + the rendered
+    # user prompt) so the two paths answer the same content.
+    built_prompts: list[tuple[str, str, str]] = []
     meta: dict[str, dict[str, Any]] = {}
     # Tally context-build diagnostics across all questions so a retrieve backend
     # emitting stale/cross-question session ids (or pathologically long sessions)
@@ -131,42 +254,59 @@ def run_main(argv: list[str] | None = None) -> int:
         user_text = prompts.build_reader_prompt(
             entry["question"], entry["question_date"], built.text
         )
-        requests.append(reader_request(qid, prompts.READER_SYSTEM, user_text))
+        built_prompts.append((qid, prompts.READER_SYSTEM, user_text))
         meta[qid] = {"question_type": entry["question_type"]}
 
-    if not requests:
+    if not built_prompts:
         sys.exit("error: no questions to read (dataset/run mismatch?)")
 
     print(
-        f"reader: built {len(requests)} requests "
+        f"reader: built {len(built_prompts)} requests "
         f"({total_unknown} unknown session ids dropped, "
         f"{total_truncated} sessions truncated)",
         file=sys.stderr,
     )
 
+    def _reader_row(r: Any) -> dict[str, Any]:
+        # K is a reader-stage parameter; persist it so the judge stage can stamp
+        # it into the report's provenance footer.
+        return {
+            "question_id": r.custom_id,
+            "question_type": meta.get(r.custom_id, {}).get("question_type", ""),
+            "k": args.k,
+            "hypothesis": r.text,
+            "status": r.status,
+            "error": r.error,
+            "usage": {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens},
+        }
+
+    if args.backend == "claude-code":
+        rows, exhausted = _cc_run_with_resume(
+            out_path=args.out,
+            built_prompts=built_prompts,
+            claude_bin=claude_bin,
+            row_of=_reader_row,
+            label="reader",
+            parallel=args.parallel,
+            timeout_s=args.timeout_s,
+        )
+        n_failed = sum(1 for r in rows if r.get("status") != "succeeded")
+        print(
+            f"reader: {len(rows)} answers in {args.out} "
+            f"({n_failed} non-succeeded)"
+            + ("; run cut short by usage limit" if exhausted else ""),
+            file=sys.stderr,
+        )
+        return 0
+
+    requests = [reader_request(qid, sys_p, usr) for qid, sys_p, usr in built_prompts]
     driver = BatchDriver(_client(), state_path)
     results = driver.run(
         "reader", requests, fresh=args.fresh, interval_s=args.poll_interval, adopt=args.adopt
     )
 
-    rows: list[dict[str, Any]] = []
-    n_failed = 0
-    for r in results:
-        if r.status != "succeeded":
-            n_failed += 1
-        rows.append(
-            {
-                "question_id": r.custom_id,
-                "question_type": meta.get(r.custom_id, {}).get("question_type", ""),
-                # K is a reader-stage parameter; persist it so the judge stage
-                # can stamp it into the report's provenance footer.
-                "k": args.k,
-                "hypothesis": r.text,
-                "status": r.status,
-                "error": r.error,
-                "usage": {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens},
-            }
-        )
+    rows = [_reader_row(r) for r in results]
+    n_failed = sum(1 for r in results if r.status != "succeeded")
     _write_jsonl(args.out, rows)
     print(
         f"reader: wrote {len(rows)} answers to {args.out} "
@@ -174,6 +314,85 @@ def run_main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _cc_run_with_resume(
+    out_path: Path,
+    built_prompts: list[tuple[str, str, str]],
+    claude_bin: str,
+    row_of: Any,
+    label: str,
+    parallel: int,
+    timeout_s: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Run a stage through the claude-code backend with per-question resume.
+
+    Skips question_ids already recorded with status=="succeeded" in ``out_path``
+    (prior failures ARE retried). The output is APPEND-ONLY: each fresh result
+    row is built + appended + flushed + fsync'd the moment its future lands (via
+    CCRunner's ``on_result`` callback, which runs on this thread), so a crash or
+    usage-window exhaustion mid-run loses nothing — every completed row is
+    already durable. We never truncate-rewrite the file (a crash mid-rewrite
+    could lose previously-succeeded rows); stale errored/duplicate rows left
+    behind by a prior run are harmless because every reader of this file applies
+    last-wins dedup by question_id (``_completed_ids`` here, and the judge's
+    answer load). Returns (all_rows, exhausted) where ``all_rows`` is the
+    preserved + freshly-run rows and ``exhausted`` is True if a usage limit cut
+    the run short (partial progress is on disk either way).
+
+    ``row_of`` maps a CCResult to the stage's persisted row dict (so reader and
+    judge keep their own shapes); the preserved rows are reused verbatim.
+    """
+    done = _completed_ids(out_path)
+    preserved: list[dict[str, Any]] = []
+    if out_path.exists():
+        # The succeeded rows we're skipping (last-wins per qid so a
+        # failed-then-succeeded pair resolves to the succeeded one); these are
+        # returned for aggregation but NOT rewritten to disk — they are already
+        # there. Non-done qids' stale rows stay on disk, superseded last-wins by
+        # the fresh append.
+        latest = {r["question_id"]: r for r in _dedup_last_wins(_load_jsonl(out_path))}
+        preserved = [latest[qid] for qid in done if qid in latest]
+
+    todo = [
+        CCRequest(qid, system, user_text)
+        for qid, system, user_text in built_prompts
+        if qid not in done
+    ]
+    if done:
+        print(
+            f"{label}: resuming — {len(done)} already succeeded, "
+            f"{len(todo)} to run",
+            file=sys.stderr,
+        )
+
+    runner = CCRunner(claude_bin=claude_bin, parallel=parallel, timeout_s=timeout_s)
+    exhausted = False
+    fresh_rows: list[dict[str, Any]] = []
+
+    def _persist(result: Any) -> None:
+        # Invoked on the main thread per landed result (see CCRunner.run): build
+        # the row and append+flush+fsync it immediately so it survives a crash.
+        row = row_of(result)
+        fresh_rows.append(row)
+        _append_jsonl_row(out_path, row)
+
+    try:
+        runner.run(todo, label=label, on_result=_persist)
+    except UsageLimitExhausted:
+        # Rows that landed before the limit were already persisted by _persist
+        # (called per-result inside run); the exception only stops NEW
+        # submissions. fresh_rows already holds exactly what hit disk.
+        exhausted = True
+        print(
+            f"{label}: subscription usage window exhausted "
+            f"({len(fresh_rows)} completed this run); progress saved to "
+            f"{out_path}. Re-run the same command after the window resets to "
+            f"continue (already-succeeded questions are skipped).",
+            file=sys.stderr,
+        )
+
+    return preserved + fresh_rows, exhausted
 
 
 # --- judge ------------------------------------------------------------------
@@ -198,15 +417,45 @@ def judge_main(argv: list[str] | None = None) -> int:
         help="manually adopt an existing batch_id instead of submitting "
         "(use to recover an orphaned paid batch the auto-adoption missed)",
     )
-    ap.add_argument("--poll-interval", type=int, default=60, help="seconds between batch polls")
+    ap.add_argument("--poll-interval", type=int, default=60, help="seconds between batch polls (batches backend)")
+    ap.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="batches",
+        help="execution backend: batches (Anthropic Batches API, needs a key) "
+        "or claude-code (headless claude -p via subscription, per-question resume)",
+    )
+    ap.add_argument(
+        "--parallel",
+        type=int,
+        default=2,
+        help="claude-code backend: concurrent claude -p calls (keep low; default 2)",
+    )
+    ap.add_argument(
+        "--timeout-s",
+        type=int,
+        default=300,
+        help="claude-code backend: per-call timeout in seconds (default 300)",
+    )
     args = ap.parse_args(argv)
 
-    _require_api_key()
+    if args.backend == "claude-code":
+        claude_bin = _require_claude_bin()
+    else:
+        _require_api_key()
     by_qid = _load_dataset(args.dataset)
-    answers = _load_jsonl(args.answers)
+    # The cc backend appends to answers.jsonl (never rewrites), so a qid that
+    # failed then succeeded on a re-run appears twice — take the last row per
+    # qid (last-wins) so the judge scores the final hypothesis once, not a stale
+    # failed row and not both. The batches path writes one row per qid, so the
+    # dedup is a no-op there.
+    answers = _dedup_last_wins(_load_jsonl(args.answers))
     state_path = args.state or _default_state(args.out)
 
-    requests: list[dict[str, Any]] = []
+    # Build the judge prompt per answer ONCE (the same prompt content for both
+    # backends — the judge is a single user turn, no system prompt). meta carries
+    # the question_type + abstention flag each row needs.
+    built_prompts: list[tuple[str, str, str]] = []
     meta: dict[str, dict[str, Any]] = {}
     # A reader item that did not succeed produced an empty hypothesis; the judge
     # will score it wrong (defensible — no answer). Count it so the report can
@@ -229,52 +478,69 @@ def judge_main(argv: list[str] | None = None) -> int:
             ans.get("hypothesis", ""),
             abstention=abst,
         )
-        requests.append(judge_request(qid, prompt))
+        # The judge has no system prompt; the cc backend still needs one (the
+        # isolation flag requires a full system-prompt replacement), so pass a
+        # neutral instruction that does not bias the verdict. The batches path
+        # ignores this slot (judge_request takes only the user prompt).
+        built_prompts.append((qid, prompts.JUDGE_SYSTEM, prompt))
         meta[qid] = {"question_type": task, "is_abstention": abst}
 
-    if not requests:
+    if not built_prompts:
         sys.exit("error: no answers to judge")
 
-    driver = BatchDriver(_client(), state_path)
-    results = driver.run(
-        "judge", requests, fresh=args.fresh, interval_s=args.poll_interval, adopt=args.adopt
-    )
+    def _judge_row(r: Any) -> dict[str, Any]:
+        label = prompts.parse_judge_label(r.text) if r.status == "succeeded" else False
+        m = meta.get(r.custom_id, {})
+        return {
+            "question_id": r.custom_id,
+            "question_type": m.get("question_type", ""),
+            "is_abstention": bool(m.get("is_abstention", False)),
+            "judge_text": r.text,
+            "label": label,
+            "status": r.status,
+            "error": r.error,
+            "usage": {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens},
+        }
 
-    rows: list[dict[str, Any]] = []
+    if args.backend == "claude-code":
+        rows, _exhausted = _cc_run_with_resume(
+            out_path=args.out,
+            built_prompts=built_prompts,
+            claude_bin=claude_bin,
+            row_of=_judge_row,
+            label="judge",
+            parallel=args.parallel,
+            timeout_s=args.timeout_s,
+        )
+    else:
+        requests = [judge_request(qid, usr) for qid, _sys, usr in built_prompts]
+        driver = BatchDriver(_client(), state_path)
+        results = driver.run(
+            "judge", requests, fresh=args.fresh, interval_s=args.poll_interval, adopt=args.adopt
+        )
+        rows = [_judge_row(r) for r in results]
+        _write_jsonl(args.out, rows)
+
+    # Aggregate from the persisted rows (works uniformly for both backends and,
+    # for the cc path, folds in preserved-on-resume rows).
     judgments: list[aggregate.Judgment] = []
     total_in = total_out = 0
     judge_failures = 0
-    for r in results:
-        if r.status != "succeeded":
+    for row in rows:
+        if row.get("status") != "succeeded":
             judge_failures += 1
-        label = prompts.parse_judge_label(r.text) if r.status == "succeeded" else False
-        m = meta.get(r.custom_id, {})
-        qtype = m.get("question_type", "")
-        abst = bool(m.get("is_abstention", False))
-        total_in += r.input_tokens
-        total_out += r.output_tokens
-        rows.append(
-            {
-                "question_id": r.custom_id,
-                "question_type": qtype,
-                "is_abstention": abst,
-                "judge_text": r.text,
-                "label": label,
-                "status": r.status,
-                "error": r.error,
-                "usage": {"input_tokens": r.input_tokens, "output_tokens": r.output_tokens},
-            }
-        )
+        usage = row.get("usage", {})
+        total_in += usage.get("input_tokens", 0) or 0
+        total_out += usage.get("output_tokens", 0) or 0
         judgments.append(
             aggregate.Judgment(
-                question_id=r.custom_id,
-                question_type=qtype,
-                is_abstention=abst,
-                label=label,
+                question_id=row["question_id"],
+                question_type=row.get("question_type", ""),
+                is_abstention=bool(row.get("is_abstention", False)),
+                label=bool(row.get("label", False)),
             )
         )
 
-    _write_jsonl(args.out, rows)
     report = aggregate.aggregate(
         judgments,
         total_in,
@@ -292,6 +558,9 @@ def judge_main(argv: list[str] | None = None) -> int:
         model=MODEL,
         k=answers_k,
         date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        # Provenance: which serving harness produced the number. The judge's own
+        # --backend flag is authoritative for the judge stage's path.
+        access=args.backend,
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(md)

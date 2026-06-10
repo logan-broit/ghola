@@ -53,6 +53,21 @@ def build_reader_prompt(question: str, question_date: str, context: str) -> str:
 
 # --- Judge (ported verbatim from upstream evaluate_qa.py) -------------------
 
+# The judge is a single user turn upstream — no system prompt. The Batches
+# backend honors that (judge_request sends only the user message). The
+# claude-code backend, however, MUST pass --system-prompt to fully replace the
+# default Claude Code system prompt (part of the isolation flag set); a missing
+# or default system prompt would let the harness's own instructions bleed into
+# the judge. JUDGE_SYSTEM is that neutral replacement: it does not add any
+# scoring criteria beyond "follow the instructions in the message", so the
+# verbatim upstream judge template in the user turn remains the sole authority
+# on what counts as correct. Keep it content-neutral — anything evaluative here
+# would diverge the cc judge from the batches judge and from upstream.
+JUDGE_SYSTEM = (
+    "Follow the instructions in the message exactly. Answer only as the "
+    "instructions direct."
+)
+
 # Tasks that share upstream's default "contains the correct answer" template.
 # Kept as a tuple so the membership test matches upstream's `task in [...]`.
 _DEFAULT_TEMPLATE_TASKS = (

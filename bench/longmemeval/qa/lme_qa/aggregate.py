@@ -118,12 +118,16 @@ def render_markdown(
     model: str | None = None,
     k: int | None = None,
     date: str | None = None,
+    access: str | None = None,
 ) -> str:
     """Render the report as a markdown section ready for docs/benchmarks.md.
 
-    ``model`` / ``k`` / ``date`` are provenance, passed in from the CLI (not
-    hard-coded here) so the published number always records which model, top-K,
-    sample size, and UTC date produced it.
+    ``model`` / ``k`` / ``date`` / ``access`` are provenance, passed in from the
+    CLI (not hard-coded here) so the published number always records which
+    model, top-K, sample size, UTC date, and execution path (the Batches API vs
+    Claude Code headless mode) produced it. The model is identical either way;
+    ``access`` records which serving harness wrapped it, making the path
+    auditable.
     """
     lines: list[str] = []
     lines.append(f"## {title}")
@@ -174,9 +178,13 @@ def render_markdown(
     if k is not None:
         prov.append(f"K={k}")
     prov.append(f"n={report.overall.n}")
+    # Execution path (e.g. "via batches" / "via claude-code"): the model is the
+    # same, but the serving harness differs — record it so the path is auditable.
+    if access is not None:
+        prov.append(f"via {access}")
     if date is not None:
         prov.append(f"{date} (UTC)")
-    if model is not None or k is not None or date is not None:
+    if model is not None or k is not None or date is not None or access is not None:
         lines.append("")
         lines.append(f"_{', '.join(prov)}._")
     return "\n".join(lines) + "\n"
