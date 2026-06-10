@@ -19,6 +19,7 @@
 //	RRF_K                     RRF fusion constant       (60)
 //	GHOLA_TIER_TIMEOUT_MS     per-recall-tier timeout in ms (10000)
 //	ENCODING_INTERVAL         sietch -> episodic tick cadence (5m)
+//	GHOLA_SIETCH_RETENTION    keep drained session files this long (7d; 0 disables GC)
 package main
 
 import (
@@ -142,6 +143,10 @@ func run() error {
 		}
 		c.TierTimeout = time.Duration(msVal) * time.Millisecond
 	}
+	// Retention window for drained session files. Unset keeps the
+	// New() default (7d); an explicit 0 disables GC (GCSession
+	// short-circuits on SietchRetention <= 0).
+	c.SietchRetention = envcfg.Duration("GHOLA_SIETCH_RETENTION", c.SietchRetention)
 	srv := ghttp.NewServer(c, logger)
 	srv.LoopbackOnly = loopbackOnly
 	if defaultUser := os.Getenv("AUTH_DEFAULT_USER"); defaultUser != "" {

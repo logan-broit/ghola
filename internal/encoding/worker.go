@@ -153,6 +153,17 @@ func (w *Worker) Tick(ctx context.Context) error {
 				"session_id", id, "flushed", n)
 		}
 		total += n
+
+		// GC the session's sietch file once it is ended, fully drained,
+		// and past the retention window. Runs after Consolidate so this
+		// same tick's flush is reflected in the watermark the GC checks.
+		// A failure is logged and skipped — the file just gets another
+		// shot next tick; it must not abort the pass.
+		if removed, err := w.core.GCSession(ctx, id); err != nil {
+			w.logger.Warn("sietch gc failed", "session_id", id, "error", err.Error())
+		} else if removed {
+			w.logger.Info("sietch session removed", "session_id", id)
+		}
 	}
 	if total > 0 {
 		w.logger.Info("pipeline A tick complete", "flushed_total", total)
