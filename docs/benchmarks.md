@@ -72,6 +72,38 @@ Caveats, stated plainly:
   changes the embeddings — re-validate before comparing against these
   numbers.
 
+## QA accuracy (methodology pinned; first run pending)
+
+The numbers above are **retrieval** metrics (R@k over evidence sessions).
+End-to-end QA accuracy is a separate, additional metric: it measures
+whether a reader, given the retrieved context, produces an answer a judge
+scores as correct. The stage is implemented in
+[`bench/longmemeval/qa/`](../bench/longmemeval/qa/) (the `lme-qa` package);
+the methodology is pinned here so the first run is reported against a fixed
+configuration, but no QA-accuracy numbers have been produced yet.
+
+| Knob | Value |
+|---|---|
+| Reader | `claude-opus-4-8`, adaptive thinking, Batches API |
+| Judge | `claude-opus-4-8`, adaptive thinking, Batches API |
+| Judge prompts | upstream [LongMemEval](https://github.com/xiaowu0162/LongMemEval) `evaluate_qa.py` (`get_anscheck_prompt`), ported verbatim |
+| Reader context | top-10 retrieved sessions per question (matches the published R@10) |
+| Abstention (`_abs`) | handled per upstream protocol (abstention judge prompt; bucketed into the base question_type) |
+| Dataset | LongMemEval-S, 500 questions |
+
+Stated plainly:
+
+- QA accuracy depends on the **reader** and the **judge** as much as on
+  retrieval. A perfect retriever still loses points if the reader
+  misreads the context or the judge scores strictly. Numbers will be
+  reported only with all three (reader, judge, retrieval config) pinned.
+- Retrieval R@k and QA accuracy are **different metrics and must not be
+  cross-compared** — neither against each other nor against another
+  system's number measured with a different reader/judge.
+- The reader and judge both run as Opus 4.8 (operator decision); a
+  different judge model would produce different accuracy on the same
+  answers.
+
 ## Running the harness
 
 The ghola backend adapter lives in this repo at
