@@ -158,6 +158,9 @@ def run_main(argv: list[str] | None = None) -> int:
             {
                 "question_id": r.custom_id,
                 "question_type": meta.get(r.custom_id, {}).get("question_type", ""),
+                # K is a reader-stage parameter; persist it so the judge stage
+                # can stamp it into the report's provenance footer.
+                "k": args.k,
                 "hypothesis": r.text,
                 "status": r.status,
                 "error": r.error,
@@ -279,11 +282,15 @@ def judge_main(argv: list[str] | None = None) -> int:
         reader_failures=reader_failures,
         judge_failures=judge_failures,
     )
+    # K travels with the answers file (reader-stage parameter); only stamp it
+    # when every answer agrees — mixed-K answer files get no K claim.
+    k_values = {ans.get("k") for ans in answers if ans.get("k") is not None}
+    answers_k = k_values.pop() if len(k_values) == 1 else None
     md = aggregate.render_markdown(
         report,
         title="QA accuracy (LongMemEval-S)",
         model=MODEL,
-        k=None,
+        k=answers_k,
         date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)

@@ -186,6 +186,8 @@ def test_report_has_provenance_footer(server_env, dataset_file, run_file, tmp_pa
     md = report.read_text()
     assert "claude-opus-4-8" in md
     assert "n=2" in md
+    # K round-trips reader -> answers.jsonl -> judge -> report footer.
+    assert "K=10" in md
     # A UTC date line (YYYY-MM-DD ... UTC) is present.
     assert "UTC" in md
 
