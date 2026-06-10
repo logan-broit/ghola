@@ -87,6 +87,7 @@ configuration, but no QA-accuracy numbers have been produced yet.
 | Reader | `claude-opus-4-8`, adaptive thinking, Batches API |
 | Judge | `claude-opus-4-8`, adaptive thinking, Batches API |
 | Judge prompts | upstream [LongMemEval](https://github.com/xiaowu0162/LongMemEval) `evaluate_qa.py` (`get_anscheck_prompt`), ported verbatim |
+| Judge verdict parsing | leading-token `yes` check — deliberately stricter than upstream's substring rule, since our judge is not `max_tokens`-capped to 10 and may emit visible preamble |
 | Reader context | top-10 retrieved sessions per question (matches the published R@10) |
 | Abstention (`_abs`) | handled per upstream protocol (abstention judge prompt; bucketed into the base question_type) |
 | Dataset | LongMemEval-S, 500 questions |

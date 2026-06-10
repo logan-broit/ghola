@@ -115,17 +115,20 @@ lme-qa-judge \
 | judge `max_tokens` | `2048` | the judge answers "yes"/"no" only |
 | `--state` | alongside `--out` | JSON file recording each stage's batch_id + request fingerprint |
 | `--fresh` | off | ignore state and submit a new batch |
+| `--adopt <batch_id>` | off | take an existing batch_id verbatim instead of submitting — recovers an orphaned paid batch the auto-adoption missed |
 
 **Model surface:** `claude-opus-4-8`, adaptive thinking (`{"type":
 "adaptive"}`), NO `temperature`/`top_p`/`top_k` (they 400 on Opus 4.8), no
 assistant prefills.
 
 **Resume semantics:** each stage persists its batch_id + a fingerprint of
-the request set (the sorted custom_ids) to the state file. Re-running an
-interrupted job resumes by polling the in-flight batch instead of
-resubmitting; a changed question set (fingerprint mismatch) or `--fresh`
-forces a new submission. Batch submissions are billed at the 50% batch
-price.
+the request set (custom_ids plus the full request params, so a changed K /
+prompt / context forces a fresh submission — resume means identical work).
+Re-running an interrupted job resumes by polling the in-flight batch
+instead of resubmitting. A crash mid-submit leaves a pending marker; the
+next run tries to adopt the orphaned batch (loud warning), and `--adopt`
+is the manual override. `--fresh` always forces a new submission. Batch
+submissions are billed at the 50% batch price.
 
 **Cost ballpark:** 500 questions, batched Opus 4.8 — roughly **$10-40**
 per full run depending on context size (the reader's top-10-session context
