@@ -104,11 +104,15 @@ func tools() []toolSpec {
 			Tool: mcppkg.NewTool("recall",
 				mcppkg.WithDescription(
 					"Hybrid query across working (sietch) + episodic + semantic; "+
-						"returns score-ranked hits with tier attribution."),
+						"returns score-ranked hits with tier attribution. "+
+						"Partial-failure tolerant: a degraded field lists any "+
+						"tiers that were skipped."),
 				mcppkg.WithString("user_id",
 					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
 				mcppkg.WithString("workspace",
-					mcppkg.Description("Workspace id (uuid). Required.")),
+					mcppkg.Description("Workspace id (uuid). Optional when cwd is provided — the workspace is derived from cwd.")),
+				mcppkg.WithString("cwd",
+					mcppkg.Description("Current project directory. The workspace is derived from it when workspace is omitted — same mapping record uses.")),
 				mcppkg.WithString("session_id",
 					mcppkg.Description("Optional. Scopes the working-tier (sietch) hits.")),
 				mcppkg.WithString("query_text"),

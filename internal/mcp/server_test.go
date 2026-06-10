@@ -168,6 +168,30 @@ func TestProxy_TranslatesRecordCall(t *testing.T) {
 	assert.IsType(t, map[string]any{}, fg.calls[0].Body["event"])
 }
 
+// TestProxy_RecallForwardsCwd pins the B4 surface: an MCP agent rarely
+// knows the workspace UUID but always knows cwd, so the recall tool
+// accepts cwd and the bridge must forward it verbatim in the proxied
+// JSON body (core derives the workspace from it server-side).
+func TestProxy_RecallForwardsCwd(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	fg.response["/v1/recall"] = `{"hits":[],"tier_counts":{}}`
+
+	s := newClient(t, hs.URL)
+
+	callTool(t, s, "recall", map[string]any{
+		"user_id":    "u1",
+		"cwd":        "/tmp/proj",
+		"query_text": "kubernetes",
+	})
+
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	require.Len(t, fg.calls, 1)
+	assert.Equal(t, "/v1/recall", fg.calls[0].Path)
+	assert.Equal(t, "/tmp/proj", fg.calls[0].Body["cwd"],
+		"recall must forward cwd so core can derive the workspace")
+}
+
 // TestProxy_SurfacesDaemonError returns an MCP error result when
 // the daemon HTTP call fails (401 / 500 / ...).
 func TestProxy_SurfacesDaemonError(t *testing.T) {
