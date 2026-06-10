@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -646,7 +647,7 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		slog.WarnContext(ctx, "recall tier failed; degrading", "tier", ck.name, "err", ck.err.Error())
 	}
 	if attempted > 0 && failed == attempted {
-		return RecallResult{}, fmt.Errorf("recall: all %d tiers failed: %w", attempted, firstErr)
+		return RecallResult{}, fmt.Errorf("recall: all %d tiers failed (%s): %w", attempted, strings.Join(degraded, ", "), firstErr)
 	}
 
 	if in.IncludeTimings {

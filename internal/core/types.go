@@ -175,6 +175,9 @@ type RecallResult struct {
 	// ("embed", "sietch_vector", "sietch_fts", "episodic", "semantic").
 	// Empty/omitted means every attempted stage succeeded. Hits are
 	// still valid when set — they just come from the surviving tiers.
+	// "episodic" covers the single multi-ranking round-trip — its
+	// vector, keyword, session_vector and primitives sub-lists fail
+	// together.
 	Degraded []string `json:"degraded,omitempty"`
 }
 

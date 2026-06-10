@@ -184,15 +184,19 @@ func TestEventsNeedingEmbedding_RoundTrip(t *testing.T) {
 	// e3: nil text (e.g. a tool-output-only event) -> nothing to embed.
 	e3 := mkEvent(sess, "", nil)
 	e3.Text = nil
+	// e4: non-nil but empty-string text, no embedding -> still nothing to
+	// embed. Pins the `text != ''` clause in EventsNeedingEmbedding's SQL
+	// against accidental removal (a nil-only guard would wrongly return e4).
+	e4 := mkEvent(sess, "", nil)
 
-	for _, e := range []core.Event{e1, e2, e3} {
+	for _, e := range []core.Event{e1, e2, e3, e4} {
 		_, err := s.RecordEvent(context.Background(), e)
 		require.NoError(t, err)
 	}
 
 	need, err := s.EventsNeedingEmbedding(context.Background(), sess.ID, 0)
 	require.NoError(t, err)
-	require.Len(t, need, 1)
+	require.Len(t, need, 1, "only e1 needs embedding; e4's empty-string text must be excluded")
 	assert.Equal(t, e1.ID, need[0].ID)
 	assert.Equal(t, sess.ID, need[0].SessionID)
 	assert.Equal(t, "u1", need[0].UserID)
