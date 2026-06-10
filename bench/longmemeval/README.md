@@ -55,6 +55,23 @@ top of a flat vector query (legacy comparison path; needs
 | `TEMPORAL_FILTER` | `0` | `1` enables a date-window post-filter (negative-result experiment, off by default) |
 | `RERANK_DATASET` | `s` | LongMemEval split label, used when the adapter needs to pull haystack text |
 | `INCLUDE_SEMANT` | `1` | `0` drops the semantic mneme tier from Stage 1 |
+| `GHOLA_ALLOW_DEGRADED` | _(unset)_ | `1` downgrades a degraded-recall abort to a stderr warning (debug only — see below) |
+
+## Degraded-recall guard
+
+`core.Recall` degrades tier-by-tier: if a stage (e.g. semantic, rerank)
+times out or errors, recall drops that stage's contribution and returns
+what it has, with the dropped stage names in a `degraded` field on the
+response (omitted when recall ran clean). During a scored run a silently
+degraded recall lowers R@k with no signal, so the adapter raises a
+`RuntimeError` naming the degraded stages and the offending question/query
+the moment it sees a non-empty `degraded`. Set `GHOLA_ALLOW_DEGRADED=1` to
+downgrade the abort to a single loud stderr warning and continue — debug
+escape hatch only; numbers from such a run are not trustworthy.
+
+> After merging changes to `ghola_backend.py`, refresh the deployed copy at
+> `~/longmemeval-ghola/backends/ghola_v2.py` from this file — the harness
+> imports that copy, not this one.
 
 ## Internal vs upstream
 
