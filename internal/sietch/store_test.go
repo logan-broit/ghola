@@ -327,6 +327,25 @@ func TestGetSession_ReturnsRow(t *testing.T) {
 	assert.Nil(t, got.EndedAt, "fresh session must have ended_at = nil")
 }
 
+// TestGetSession_MissingRowIsErrSessionNotFound: opening a conn for a
+// never-OpenSession'd id makes conn() create a schema-only .sqlite
+// file (create-on-open) with no `session` row — the orphan a recall
+// for a GC'd session leaves behind. GetSession and Watermark both Scan
+// that missing row, so both must surface core.ErrSessionNotFound rather
+// than a raw sql.ErrNoRows the worker can't classify.
+func TestGetSession_MissingRowIsErrSessionNotFound(t *testing.T) {
+	s := newTestStore(t)
+	orphan := core.NewID() // never OpenSession'd
+
+	_, err := s.GetSession(context.Background(), orphan)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrSessionNotFound)
+
+	_, err = s.Watermark(context.Background(), orphan)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrSessionNotFound)
+}
+
 func TestOpenSession_PersistsWorkspaceID(t *testing.T) {
 	s := newTestStore(t)
 	sess := core.Session{

@@ -142,17 +142,20 @@ func (w *Worker) Tick(ctx context.Context) error {
 		} else if n > 0 {
 			w.logger.Info("backfilled embeddings", "session_id", id, "count", n)
 		}
-		n, err := w.core.Consolidate(ctx, id)
-		if err != nil {
+		// Consolidate failure must not skip GC: a schema-only orphan
+		// (recreated by create-on-open after a prior GC) fails
+		// Consolidate every tick — but GC is exactly what reaps it. Warn
+		// and fall through to GC rather than `continue`.
+		if n, err := w.core.Consolidate(ctx, id); err != nil {
 			w.logger.Warn("consolidate failed",
 				"session_id", id, "error", err.Error())
-			continue
+		} else {
+			if n > 0 {
+				w.logger.Info("consolidated session",
+					"session_id", id, "flushed", n)
+			}
+			total += n
 		}
-		if n > 0 {
-			w.logger.Info("consolidated session",
-				"session_id", id, "flushed", n)
-		}
-		total += n
 
 		// GC the session's sietch file once it is ended, fully drained,
 		// and past the retention window. Runs after Consolidate so this

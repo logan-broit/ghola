@@ -106,6 +106,12 @@ var (
 	ErrMissingWorkspaceOrCwd = fmt.Errorf("%w: workspace_id or cwd required", ErrValidation)
 )
 
+// ErrSessionNotFound marks a sietch store whose file exists but holds
+// no session row — typically a file recreated by conn()'s
+// create-on-open after GC. Callers distinguish it from real failures:
+// GCSession treats it as an orphan to remove.
+var ErrSessionNotFound = errors.New("session not found")
+
 // SessionStart provisions a new sietch file + inserts the session row.
 func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session, error) {
 	if in.UserID == "" {
@@ -1113,6 +1119,14 @@ func (c *Core) GCSession(ctx context.Context, sessionID string) (bool, error) {
 		return false, nil
 	}
 	sess, err := c.Sietch.GetSession(ctx, sessionID)
+	if errors.Is(err, ErrSessionNotFound) {
+		// Schema-only orphan (file recreated by create-on-open after
+		// GC): nothing to consolidate, nothing to keep — remove it.
+		if rmErr := c.Sietch.RemoveSession(ctx, sessionID); rmErr != nil {
+			return false, fmt.Errorf("gc remove orphan (session=%q): %w", sessionID, rmErr)
+		}
+		return true, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("gc get session (session=%q): %w", sessionID, err)
 	}
@@ -1130,7 +1144,7 @@ func (c *Core) GCSession(ctx context.Context, sessionID string) (bool, error) {
 	if len(pending) > 0 {
 		return false, nil
 	}
-	need, err := c.Sietch.EventsNeedingEmbedding(ctx, sessionID, 1)
+	need, err := c.Sietch.EventsNeedingEmbedding(ctx, sessionID, 1) // existence probe; limit 1
 	if err != nil {
 		return false, fmt.Errorf("gc needs-embedding: %w", err)
 	}

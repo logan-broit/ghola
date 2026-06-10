@@ -508,6 +508,11 @@ func (s *Store) readSessionRow(ctx context.Context, sessionID string) (core.Sess
 		FROM session WHERE id = ?
 	`, sessionID).Scan(&id, &uid, &started, &ended, &lastEvent, &eventCount,
 		&summary, &workspaceID, &cwd, &gitBranch, &agentKind, &sourceDevice)
+	if errors.Is(err, sql.ErrNoRows) {
+		// File exists (conn() create-on-open) but no session row — an
+		// orphan. Surface a typed sentinel so GCSession can recognize it.
+		return core.Session{}, fmt.Errorf("%w (session=%q)", core.ErrSessionNotFound, sessionID)
+	}
 	if err != nil {
 		return core.Session{}, err
 	}
@@ -563,6 +568,10 @@ func (s *Store) Watermark(ctx context.Context, sessionID string) (string, error)
 	err = db.QueryRowContext(ctx,
 		`SELECT watermark_event_id FROM session WHERE id = ?`, sessionID,
 	).Scan(&w)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Same orphan case as readSessionRow: schema-only file, no row.
+		return "", fmt.Errorf("%w (session=%q)", core.ErrSessionNotFound, sessionID)
+	}
 	if err != nil {
 		return "", err
 	}

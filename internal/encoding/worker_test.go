@@ -371,6 +371,54 @@ func TestWorker_TickGCsDrainedSession(t *testing.T) {
 		"recently-ended session must be kept")
 }
 
+// TestWorker_TickGCsOrphanFile: a schema-only sietch file (no session
+// row — what conn()'s create-on-open leaves behind when a recall names
+// a GC'd session id) is enumerated by ActiveSessionIDs every tick.
+// Consolidate fails on it (Watermark can't find the row), but GC must
+// still run and remove the orphan — the per-session sequence may not
+// bail on the Consolidate failure. A healthy session in the same tick
+// is still consolidated, proving the pass isn't aborted.
+func TestWorker_TickGCsOrphanFile(t *testing.T) {
+	store, err := sietch.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ch := &recordingChapterhouse{}
+	c := core.New(store, ch, nullEmbedder{})
+	now := time.Unix(1_700_000_000, 0).UTC()
+	c.Now = func() time.Time { return now }
+
+	// A healthy session with one pending event — must still ship.
+	healthy := seedEvents(t, c, 1)
+
+	// Create a schema-only orphan: GetSession on a never-opened id makes
+	// conn() write the schema with no session row. Ignore the (expected)
+	// ErrSessionNotFound; we only want the file on disk.
+	orphan := core.NewID()
+	_, _ = store.GetSession(context.Background(), orphan)
+
+	ids, err := store.ActiveSessionIDs(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, ids, orphan, "orphan file must be enumerated")
+
+	w := encoding.NewWorker(c,
+		func(ctx context.Context) ([]string, error) {
+			return store.ActiveSessionIDs(ctx)
+		},
+		time.Hour, quietLogger())
+
+	require.NoError(t, w.Tick(context.Background()))
+
+	ids, err = store.ActiveSessionIDs(context.Background())
+	require.NoError(t, err)
+	assert.NotContains(t, ids, orphan,
+		"orphan must be GC'd even though Consolidate failed on it")
+	assert.Contains(t, ids, healthy,
+		"healthy session must remain (not yet ended/past retention)")
+	assert.Equal(t, int32(1), ch.ingestCalls.Load(),
+		"healthy session still shipped — the pass was not aborted")
+}
+
 func TestWorker_PerSessionErrorDoesNotAbortTick(t *testing.T) {
 	// A broken Core that fails on one session but succeeds on others —
 	// simplest way to prove resilience is a SessionSource that

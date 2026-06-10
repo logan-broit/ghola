@@ -59,6 +59,10 @@ type fakeSietch struct {
 	// care about ended_at / cwd / etc. populate this directly.
 	sessionRows map[string]core.Session
 
+	// getSessionErr lets a test force GetSession to fail for a given id
+	// (e.g. returning core.ErrSessionNotFound for the orphan-GC path).
+	getSessionErr map[string]error
+
 	// removeSessions records the ids passed to RemoveSession so GC
 	// tests can assert whether (and which) sessions were dropped.
 	removeSessions []string
@@ -74,6 +78,7 @@ func newFakeSietch() *fakeSietch {
 		ended:         map[string]time.Time{},
 		sessionRows:   map[string]core.Session{},
 		needEmbedding: map[string][]core.Event{},
+		getSessionErr: map[string]error{},
 	}
 }
 
@@ -96,6 +101,9 @@ func (f *fakeSietch) MarkEnded(_ context.Context, id string, t time.Time) error 
 	return nil
 }
 func (f *fakeSietch) GetSession(_ context.Context, id string) (core.Session, error) {
+	if err := f.getSessionErr[id]; err != nil {
+		return core.Session{}, err
+	}
 	if row, ok := f.sessionRows[id]; ok {
 		return row, nil
 	}
@@ -1784,4 +1792,20 @@ func TestGCSession_DisabledWhenRetentionZero(t *testing.T) {
 	// Retention-zero short-circuits before any store call, so nothing
 	// is removed regardless of the session's eligibility.
 	assert.Empty(t, s.removeSessions)
+}
+
+// TestGCSession_RemovesOrphanFile: a sietch file with no session row
+// (recreated by conn()'s create-on-open after GC, e.g. a recall for a
+// GC'd session id) surfaces as core.ErrSessionNotFound from GetSession.
+// GCSession must treat it as an orphan — remove the file and report
+// (true, nil) — not propagate the error and re-log it every tick.
+func TestGCSession_RemovesOrphanFile(t *testing.T) {
+	c, s, _, _ := newCore()
+	id := "orphan-sess"
+	s.getSessionErr[id] = core.ErrSessionNotFound
+
+	removed, err := c.GCSession(context.Background(), id)
+	require.NoError(t, err)
+	assert.True(t, removed, "schema-only orphan -> remove")
+	assert.Equal(t, []string{id}, s.removeSessions)
 }
