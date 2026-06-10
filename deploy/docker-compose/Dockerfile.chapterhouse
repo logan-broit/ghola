@@ -1,17 +1,25 @@
 # Multi-stage build for the chapterhouse api + init + worker binaries.
-# Build context is the ghola monorepo root so we can COPY the
-# _chapterhouse/ch-server subtree.
+# Build context is the ghola monorepo root: ch-server's go.mod replaces
+# github.com/logan-broit/ghola => ../.., so the image must lay out the
+# root module (go.mod + the pkg/ tree it imports) at the same relative
+# path as the repo for the replace directive to resolve.
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src
 RUN apk add --no-cache git
 
-# Copy the ch-server module and build all binaries.
-COPY _chapterhouse/ch-server/go.mod _chapterhouse/ch-server/go.sum ./
-RUN go mod download
+# Root module manifest + the shared packages ch-server imports.
+# pkg/embedding is stdlib-only, so no extra module downloads result.
+COPY go.mod go.sum ./
+COPY pkg/ ./pkg/
 
-COPY _chapterhouse/ch-server/ ./
-RUN CGO_ENABLED=0 go build -o /out/ch-api    ./cmd/api \
+# Copy the ch-server module manifest and warm the module cache.
+COPY _chapterhouse/ch-server/go.mod _chapterhouse/ch-server/go.sum ./_chapterhouse/ch-server/
+RUN cd _chapterhouse/ch-server && go mod download
+
+COPY _chapterhouse/ch-server/ ./_chapterhouse/ch-server/
+RUN cd _chapterhouse/ch-server \
+ && CGO_ENABLED=0 go build -o /out/ch-api    ./cmd/api \
  && CGO_ENABLED=0 go build -o /out/ch-init   ./cmd/init \
  && CGO_ENABLED=0 go build -o /out/ch-worker ./cmd/worker
 
