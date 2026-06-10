@@ -35,7 +35,10 @@ services:
       - --served-model-name=qwen3-embedding
       - --port=8082
       - --host=0.0.0.0
-      - --gpu-memory-utilization=0.03
+      # Fraction of TOTAL device memory vLLM may claim. 0.03 was tuned
+      # for the 96GB RTX PRO 6000 (~2.9GB); the 24GB RTX 3090 needs
+      # ~0.15 for the same budget (fp16 weights + CUDA graphs + fp8 KV).
+      - --gpu-memory-utilization=0.15
       - --max-model-len=8192
       - --dtype=float16
       - --kv-cache-dtype=fp8
