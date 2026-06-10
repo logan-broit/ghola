@@ -94,9 +94,10 @@ type RecordInput struct {
 type RecallInput struct {
 	SessionID string `json:"session_id,omitempty"`
 	UserID    string `json:"user_id"`
-	// Workspace is required: it scopes every chapterhouse-backed tier
-	// (episodic, keyword, session-vector, semantic) via the
-	// session_workspaces join. Empty workspace is rejected — the
+	// Workspace scopes every chapterhouse-backed tier (episodic,
+	// keyword, session-vector, semantic) via the session_workspaces
+	// join. Required unless Cwd is set, in which case it is derived
+	// (see Cwd). A recall with neither is rejected — the
 	// "search everything for this user" mode that 19k-row recalls
 	// implied is structurally bounded around 57% R@5 on full corpora,
 	// so the architectural lever is to scope first.
