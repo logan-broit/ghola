@@ -233,3 +233,39 @@ def test_usage_limit_matcher_still_trips_on_real_limits():
     assert _looks_like_usage_limit("5-hour limit reached; try again later") is True
     assert _looks_like_usage_limit("You've hit your usage limit") is True
     assert _looks_like_usage_limit("rate limit exceeded") is True
+
+
+def test_consecutive_failure_breaker_stops_submitting(tmp_path):
+    # Failure phrasing the marker list does NOT know -> the breaker must
+    # still stop the run after max_consecutive_failures (2026-06-10 lesson:
+    # the real limit message slipped past the markers and 334 calls churned).
+    binpath = write_fake_claude(
+        tmp_path / "bin",
+        {"mode": "nonzero", "stderr": "request failed for mysterious reasons", "exit_code": 1},
+    )
+    runner = _runner(binpath, max_consecutive_failures=3)
+    reqs = [CCRequest(f"q{i}", "SYS", f"u{i}") for i in range(8)]
+    with pytest.raises(UsageLimitExhausted) as ei:
+        runner.run(reqs)
+    assert "consecutive failures" in str(ei.value)
+    # The stop flag flips on the main thread while a worker may already be
+    # mid-call, so up to `parallel` extra invocations can slip through —
+    # bounded at threshold + in-flight, far below the 8 queued requests.
+    assert call_count(tmp_path / "bin") <= 4
+    # The errored rows still landed (and would persist via on_result).
+    assert len(ei.value.results) >= 3
+
+
+def test_error_capture_keeps_tail(tmp_path):
+    # The failure detail lives at the END of claude's output; the stored
+    # error must keep the tail, not the head (2026-06-10: stored heads made
+    # the real limit message unrecoverable from the answer rows).
+    long_msg = "HEADMARK" + ("x" * 800) + "ACTUAL DETAIL AT TAIL"
+    binpath = write_fake_claude(
+        tmp_path / "bin", {"mode": "nonzero", "stderr": long_msg, "exit_code": 1}
+    )
+    runner = _runner(binpath, max_consecutive_failures=0)  # breaker off here
+    res = runner.run([CCRequest("q1", "SYS", "u")])[0]
+    assert res.status == "errored"
+    assert "ACTUAL DETAIL AT TAIL" in res.error
+    assert "HEADMARK" not in res.error

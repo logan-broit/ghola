@@ -160,6 +160,11 @@ class CCRunner:
     timeout_s: int = DEFAULT_TIMEOUT_S
     parallel: int = DEFAULT_PARALLEL
     progress_every: int = 10
+    # Phrasing-independent stop: the 2026-06-10 run proved the marker list
+    # can miss the real limit message (334 calls churned uselessly). N
+    # consecutive errored results — whatever the message — means the window
+    # is exhausted or the failure is systemic; stop submitting either way.
+    max_consecutive_failures: int = 10
     # Set once a usage-limit signal is seen, so queued work short-circuits to a
     # no-op instead of hammering the exhausted window.
     _stopped: bool = field(default=False, init=False)
@@ -255,7 +260,12 @@ class CCRunner:
                 text="",
                 input_tokens=0,
                 output_tokens=0,
-                error=f"exit {proc.returncode}: {detail[:500]}",
+                # Keep the TAIL: claude's JSON event stream puts the failure
+                # detail in the final result element; the head is just the
+                # init event. (The 2026-06-10 run stored heads and the actual
+                # limit message was unrecoverable from the answer rows.)
+                error=f"exit {proc.returncode}: ...{detail[-700:]}" if len(detail) > 700
+                else f"exit {proc.returncode}: {detail}",
             )
 
         return self._parse(req.custom_id, proc.stdout)
@@ -356,6 +366,7 @@ class CCRunner:
         results: list[CCResult] = []
         done = 0
         errored = 0
+        consecutive = 0
         n = len(requests)
         limit_hit: UsageLimitExhausted | None = None
 
@@ -385,6 +396,23 @@ class CCRunner:
                 done += 1
                 if res.status != "succeeded":
                     errored += 1
+                    consecutive += 1
+                    if (
+                        limit_hit is None
+                        and self.max_consecutive_failures
+                        and consecutive >= self.max_consecutive_failures
+                    ):
+                        # Circuit breaker: stop submitting regardless of the
+                        # failure phrasing; in-flight items still drain (and
+                        # persist via on_result) before the raise below.
+                        self._stopped = True
+                        limit_hit = UsageLimitExhausted(
+                            f"{consecutive} consecutive failures; stopping new "
+                            f"submissions (last: {res.error[-200:]})",
+                            results,
+                        )
+                else:
+                    consecutive = 0
                 if self.progress_every and done % self.progress_every == 0:
                     print(
                         f"{label}: {done}/{n} done, {errored} errored",
