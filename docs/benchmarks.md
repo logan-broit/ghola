@@ -61,8 +61,13 @@ the committed `deploy/docker-compose/docker-compose.yml` defaults
 
 Caveats, stated plainly:
 
-- Single run; no variance estimate yet. A 3x rerun is open work — treat
-  the digits after the decimal point accordingly.
+- Variance: re-validated 2026-06-10/11 with three independent retrieval
+  runs against the same corpus and configuration — every metric
+  reproduced identically (R@1 94.0 / R@5 99.4 / R@10 99.6 / MRR 0.962,
+  per-category breakdown included). The pipeline is deterministic;
+  run-to-run variance is nil. The 2026-06 runs also executed on the
+  post-refactor codebase (recall fan-out rewrite, shared embedding
+  client, per-tier timeouts), confirming those changes behavior-neutral.
 - These are retrieval metrics (R@k over evidence sessions), not
   end-to-end QA accuracy. They are not comparable to QA-accuracy numbers
   other systems report on the same benchmark.
