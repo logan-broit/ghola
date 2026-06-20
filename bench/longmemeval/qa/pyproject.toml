@@ -14,11 +14,15 @@ dependencies = ["anthropic>=0.69"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# matplotlib is OPTIONAL: lme-qa-rd's PNG is best-effort. The markdown table is
+# the must-have and ships without it; install '.[plot]' to also get rd-curve.png.
+plot = ["matplotlib>=3.7"]
 
 [project.scripts]
 lme-qa-run = "lme_qa.cli:run_main"
 lme-qa-judge = "lme_qa.cli:judge_main"
 lme-qa-sweep = "lme_qa.sweep:sweep_main"
+lme-qa-rd = "lme_qa.rd_aggregate:rd_main"
 
 [tool.setuptools]
 packages = ["lme_qa"]
