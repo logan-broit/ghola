@@ -95,7 +95,14 @@ def compress(
     """Dispatch to the named compressor. Raises ``KeyError`` on an unknown name
     so a typo in a sweep settings file fails loudly rather than silently
     falling back to ``full``."""
-    fn = REGISTRY[name]
+    try:
+        fn = REGISTRY[name]
+    except KeyError:
+        # Name the bad compressor and list the known ones so a settings typo is
+        # diagnosable from the traceback alone.
+        raise KeyError(
+            f"unknown compressor {name!r}; known: {sorted(REGISTRY)}"
+        ) from None
     return fn(
         sessions,
         query=query,
