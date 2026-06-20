@@ -75,11 +75,102 @@ def _topk_sessions(
     return text
 
 
+def _regroup(
+    sessions: list[context.Session],
+    kept_turns: set[tuple[int, int]],
+) -> list[context.Session]:
+    """Rebuild a session list containing only the kept turns, preserving the
+    original chronological session order and within-session turn order.
+
+    ``kept_turns`` is a set of ``(session_index, turn_index)`` into ``sessions``.
+    Sessions with no kept turn are dropped entirely (no empty date header). A
+    turn is the atomic unit -- it is kept or dropped whole, never split.
+    """
+    out: list[context.Session] = []
+    for si, s in enumerate(sessions):
+        turns = [t for ti, t in enumerate(s.turns) if (si, ti) in kept_turns]
+        if turns:
+            out.append(context.Session(s.session_id, s.date, turns))
+    return out
+
+
+def _extractive_relevance(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    scorer: Optional[Callable[[str, list[tuple[str, str]]], dict[str, float]]] = None,
+) -> str:
+    """Keep the turns most relevant to the query within the budget.
+
+    Flatten sessions to individual turns, score each turn's text against the
+    query via the injected ``scorer`` (default: the truthsayer reranker), then
+    greedily admit turns in descending score order, accumulating the rendered
+    token cost until the next turn would exceed the budget. Kept turns are
+    regrouped under their sessions in the original chronological order before
+    rendering -- the selection is relevance-ranked but the render stays
+    timeline-ordered (matters for temporal-reasoning questions).
+
+    Distinct from topk_sessions (whole-session granularity) and truncate_tokens
+    (relevance-blind byte cut): this is per-turn, relevance-aware selection.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    # Flatten to ((session_index, turn_index), text). The turn id encodes its
+    # position so we can regroup in original order regardless of score order.
+    # The relevance signal is the turn's raw content, not the rendered
+    # "ROLE: content" line -- the ROLE prefix is presentation, and the reranker
+    # should score what was said, not the speaker label.
+    flat: list[tuple[tuple[int, int], str]] = []
+    for si, s in enumerate(sessions):
+        for ti, turn in enumerate(s.turns):
+            flat.append(((si, ti), str(turn.get("content", ""))))
+
+    if not flat:
+        return ""
+
+    # urllib/JSON ids must be strings; map back after scoring.
+    str_id = {f"{si}_{ti}": (si, ti) for (si, ti), _ in flat}
+    items = [(f"{si}_{ti}", text) for (si, ti), text in flat]
+
+    if scorer is None:
+        # Deferred import: keep the pure-function compressors importable without
+        # the scorer's urllib stack, and let tests inject a fake scorer.
+        from .scorer import make_scorer
+
+        scorer = make_scorer("truthsayer")
+
+    raw_scores = scorer(query, items)
+    # Greedy by descending relevance; ties broken by chronological order
+    # (session_index, turn_index) so the result is deterministic.
+    ordered = sorted(
+        str_id.values(),
+        key=lambda key: (-raw_scores.get(f"{key[0]}_{key[1]}", 0.0), key),
+    )
+
+    kept: set[tuple[int, int]] = set()
+    for key in ordered:
+        candidate = kept | {key}
+        text, _ = context.render_sessions(_regroup(sessions, candidate))
+        if tokenizer.count(text) > target_tokens:
+            # Skip this turn but keep trying lower-ranked turns: a smaller turn
+            # may still fit even when a larger higher-ranked one did not.
+            continue
+        kept = candidate
+
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
 # name -> compressor. compress() dispatches here; KeyError on unknown name.
 REGISTRY: dict[str, Callable[..., str]] = {
     "full": _full,
     "truncate_tokens": _truncate_tokens,
     "topk_sessions": _topk_sessions,
+    "extractive_relevance": _extractive_relevance,
 }
 
 
