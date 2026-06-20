@@ -54,6 +54,19 @@ class BuiltContext:
     truncated_session_ids: list[str]
 
 
+@dataclass(frozen=True)
+class SelectionDiagnostics:
+    """Which session ids were used vs dropped during selection.
+
+    The selection step does not render (no truncation happens yet), so unlike
+    ``BuiltContext`` there is no ``truncated_session_ids`` here — truncation is
+    a render-time concern, surfaced by ``render_sessions``.
+    """
+
+    used_session_ids: list[str]
+    unknown_session_ids: list[str]
+
+
 def _sort_key(date: str) -> tuple[int, Any]:
     """Chronological sort key for a haystack date string.
 
@@ -96,18 +109,47 @@ def _render_session(session: Session, max_session_chars: int) -> tuple[str, bool
     return f"{header}\n{body}", truncated
 
 
-def build_context(
+def render_sessions(
+    sessions: list[Session],
+    max_session_chars: int = DEFAULT_MAX_SESSION_CHARS,
+) -> tuple[str, list[str]]:
+    """Render a list of sessions to the canonical reader text.
+
+    Returns ``(text, truncated_session_ids)``. The text is the per-session
+    ``=== Session dated ... ===`` blocks joined by a blank line. This is the
+    single source of truth for the reader's rendering: both ``build_context``
+    and the rate-distortion compressors call it so their output cannot diverge.
+    Sessions are rendered in the order given (callers sort chronologically
+    before calling).
+    """
+    rendered: list[str] = []
+    truncated: list[str] = []
+    for s in sessions:
+        text, was_truncated = _render_session(s, max_session_chars)
+        rendered.append(text)
+        if was_truncated:
+            truncated.append(s.session_id)
+    return "\n\n".join(rendered), truncated
+
+
+def select_sessions(
     entry: dict[str, Any],
     result_line: dict[str, Any],
     k: int = 10,
-    max_session_chars: int = DEFAULT_MAX_SESSION_CHARS,
-) -> BuiltContext:
-    """Assemble reader context for one question.
+) -> tuple[list[Session], SelectionDiagnostics]:
+    """Select the top-``k`` retrieved sessions for one question, sorted.
+
+    Returns the chronologically-sorted ``list[Session]`` (oldest first) plus a
+    ``SelectionDiagnostics`` carrying the used/unknown session ids. This is the
+    selection half of ``build_context``, factored out so the rate-distortion
+    compressors operate on the SAME structured sessions ``build_context`` would
+    have rendered — they re-render via ``render_sessions`` rather than
+    re-parsing rendered text.
 
     ``entry`` is a dataset record (dict with the aligned ``haystack_*`` lists).
     ``result_line`` is the retrieve JSONL line for the same question. We take
     the top-``k`` results (by their ``rank``, ascending), map each onto the
-    haystack, render the matched sessions chronologically, and join them.
+    haystack, and sort the matched sessions chronologically.
 
     A retrieved session_id absent from the haystack is dropped and recorded in
     ``unknown_session_ids`` — this should be empty in practice (verified: the
@@ -149,22 +191,35 @@ def build_context(
         used.append(sid)
         sessions.append(Session(session_id=sid, date=date, turns=turns))
 
-    # Render chronologically by haystack date (oldest first) so the reader sees
+    # Sort chronologically by haystack date (oldest first) so the reader sees
     # the conversation timeline in order — matters for temporal-reasoning and
     # knowledge-update questions where recency disambiguates the answer.
     sessions.sort(key=lambda s: _sort_key(s.date))
 
-    rendered: list[str] = []
-    truncated: list[str] = []
-    for s in sessions:
-        text, was_truncated = _render_session(s, max_session_chars)
-        rendered.append(text)
-        if was_truncated:
-            truncated.append(s.session_id)
-
-    return BuiltContext(
-        text="\n\n".join(rendered),
+    return sessions, SelectionDiagnostics(
         used_session_ids=used,
         unknown_session_ids=unknown,
+    )
+
+
+def build_context(
+    entry: dict[str, Any],
+    result_line: dict[str, Any],
+    k: int = 10,
+    max_session_chars: int = DEFAULT_MAX_SESSION_CHARS,
+) -> BuiltContext:
+    """Assemble reader context for one question.
+
+    Selects the top-``k`` sessions (``select_sessions``) then renders them
+    (``render_sessions``). The split is behavior-preserving: this is the same
+    text the pre-refactor ``build_context`` produced — verified byte-identical
+    by the existing context tests and the Task 6 golden reader-prompt test.
+    """
+    sessions, diag = select_sessions(entry, result_line, k=k)
+    text, truncated = render_sessions(sessions, max_session_chars)
+    return BuiltContext(
+        text=text,
+        used_session_ids=diag.used_session_ids,
+        unknown_session_ids=diag.unknown_session_ids,
         truncated_session_ids=truncated,
     )

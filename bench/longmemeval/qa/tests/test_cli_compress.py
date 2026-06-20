@@ -1,0 +1,170 @@
+"""Reader wiring of the compressor (Task 6), backward-compatible.
+
+Two guarantees this file pins:
+
+  - ``--compressor full`` (the default) builds a reader prompt BYTE-IDENTICAL
+    to the pre-change path (``build_context(...).text`` straight into
+    ``build_reader_prompt``). This is the golden test: the instrument's right
+    edge must reproduce production exactly or the curve's baseline is wrong.
+  - ``--compressor truncate_tokens --budget N`` yields a SHORTER reader prompt
+    (the budget actually bites) and persists ``compressor`` + ``budget`` into
+    each reader row alongside ``k`` for provenance.
+
+Driven through the cc backend against the fake claude binary (no live model).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from lme_qa import cli, context, prompts
+from lme_qa.tokenize import CharRatioTokenizer
+from tests.fake_claude_bin import read_stdin_log, write_fake_claude
+
+
+@pytest.fixture
+def dataset_file(tmp_path, answerable_entry, abstention_entry) -> Path:
+    p = tmp_path / "dataset.json"
+    p.write_text(json.dumps([answerable_entry, abstention_entry]))
+    return p
+
+
+@pytest.fixture
+def run_file(tmp_path, answerable_result_line, abstention_result_line) -> Path:
+    p = tmp_path / "run.jsonl"
+    p.write_text(
+        json.dumps(answerable_result_line) + "\n" + json.dumps(abstention_result_line) + "\n"
+    )
+    return p
+
+
+def _use_fake(monkeypatch, tmp_path, scenario) -> Path:
+    bindir = tmp_path / "bin"
+    binpath = write_fake_claude(bindir, scenario)
+    monkeypatch.setenv("LME_QA_CLAUDE_BIN", str(binpath))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    return bindir
+
+
+def _expected_full_prompt(entry: dict, line: dict, k: int = 10) -> str:
+    """The reader user prompt the PRE-CHANGE path produced: build_context's
+    rendered text straight into build_reader_prompt. The golden reference."""
+    built = context.build_context(entry, line, k=k)
+    return prompts.build_reader_prompt(
+        entry["question"], entry["question_date"], built.text
+    )
+
+
+# --- Task 6: select_sessions exposes the chronologically-sorted Session list
+
+
+def test_select_sessions_matches_build_context_render(
+    answerable_entry, answerable_result_line
+):
+    sessions, diag = context.select_sessions(
+        answerable_entry, answerable_result_line, k=10
+    )
+    # The selected sessions, rendered, equal build_context's text exactly.
+    text, _ = context.render_sessions(sessions)
+    assert text == context.build_context(answerable_entry, answerable_result_line, k=10).text
+    # Diagnostics carry the same used/unknown ids build_context reports.
+    built = context.build_context(answerable_entry, answerable_result_line, k=10)
+    assert diag.used_session_ids == built.used_session_ids
+    assert diag.unknown_session_ids == built.unknown_session_ids
+
+
+# --- Task 6: --compressor full is byte-identical to the pre-change path ------
+
+
+def test_reader_compressor_full_is_byte_identical(
+    monkeypatch, dataset_file, run_file, tmp_path, answerable_entry, answerable_result_line
+):
+    bindir = _use_fake(monkeypatch, tmp_path, {"answer": "an answer"})
+    answers = tmp_path / "answers.jsonl"
+    rc = cli.run_main(
+        [
+            "--dataset", str(dataset_file),
+            "--run", str(run_file),
+            "--out", str(answers),
+            "--k", "10",
+            "--compressor", "full",
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+
+    # The user prompt that reached the binary on stdin must equal the golden
+    # pre-change reader prompt for the answerable question, byte for byte.
+    expected = _expected_full_prompt(answerable_entry, answerable_result_line)
+    stdins = read_stdin_log(bindir)
+    assert expected in stdins, "full compressor reader prompt diverged from pre-change path"
+
+    # Provenance: compressor + budget persisted into each reader row.
+    rows = [json.loads(l) for l in answers.read_text().splitlines() if l.strip()]
+    assert all(r["compressor"] == "full" for r in rows)
+    assert all(r["budget"] is None for r in rows)
+    assert all(r["k"] == 10 for r in rows)
+
+
+def test_reader_default_compressor_is_full(
+    monkeypatch, dataset_file, run_file, tmp_path, answerable_entry, answerable_result_line
+):
+    # No --compressor flag at all: default must be full, byte-identical.
+    bindir = _use_fake(monkeypatch, tmp_path, {"answer": "an answer"})
+    answers = tmp_path / "answers.jsonl"
+    rc = cli.run_main(
+        [
+            "--dataset", str(dataset_file),
+            "--run", str(run_file),
+            "--out", str(answers),
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+    expected = _expected_full_prompt(answerable_entry, answerable_result_line)
+    assert expected in read_stdin_log(bindir)
+    rows = [json.loads(l) for l in answers.read_text().splitlines() if l.strip()]
+    assert all(r["compressor"] == "full" and r["budget"] is None for r in rows)
+
+
+# --- Task 6: --compressor truncate_tokens --budget N shortens the prompt -----
+
+
+def test_reader_truncate_budget_shortens_prompt(
+    monkeypatch, dataset_file, run_file, tmp_path, answerable_entry, answerable_result_line
+):
+    bindir = _use_fake(monkeypatch, tmp_path, {"answer": "an answer"})
+    answers = tmp_path / "answers.jsonl"
+
+    # A budget far below the full context cost so truncation clearly bites.
+    full = _expected_full_prompt(answerable_entry, answerable_result_line)
+    budget = 5  # ~20 chars of context
+
+    rc = cli.run_main(
+        [
+            "--dataset", str(dataset_file),
+            "--run", str(run_file),
+            "--out", str(answers),
+            "--k", "10",
+            "--compressor", "truncate_tokens",
+            "--budget", str(budget),
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+
+    stdins = read_stdin_log(bindir)
+    # The answerable question's prompt is now SHORTER than the full prompt.
+    answerable_stdins = [s for s in stdins if "What degree did I graduate with?" in s]
+    assert answerable_stdins, "answerable prompt not found on stdin"
+    assert all(len(s) < len(full) for s in answerable_stdins)
+
+    rows = [json.loads(l) for l in answers.read_text().splitlines() if l.strip()]
+    assert all(r["compressor"] == "truncate_tokens" for r in rows)
+    assert all(r["budget"] == budget for r in rows)

@@ -209,6 +209,112 @@ warning, the number from that run is not trustworthy — fix the leak and re-run
 Batches API's batch lifecycle); the claude-code backend resumes from the
 `--out` file itself, so those flags are ignored on that path.
 
+## Rate-distortion sweep (P5 instrument)
+
+The reader's accuracy depends on how much context it gets. The
+rate-distortion sweep traces that tradeoff: it varies the distilled-context
+**token budget** (the *rate*) against QA accuracy (the *distortion*, reported
+as the wrong-fraction `1 - accuracy`) and plots the frontier. A **compressor**
+sits between session selection (`context.select_sessions`) and the reader
+prompt: it transforms the selected sessions down to a budget before the prompt
+is built. Four no-new-model baselines ship:
+
+| Compressor | Granularity | What it does |
+|---|---|---|
+| `full` | — | render every selected session; ignores the budget. The right edge of the curve (current production behavior, byte-identical to the pre-P5 path). |
+| `truncate_tokens` | byte | render all sessions, then hard-cut the joined text at the budget. Relevance-blind strawman — cuts mid-session. |
+| `topk_sessions` | session | keep whole sessions in chronological order until the next would exceed the budget; never splits a session. |
+| `extractive_relevance` | turn | score each turn against the query (truthsayer `/v1/rerank` reranker, already up at `:8085`), greedily keep the most relevant turns within the budget, regroup under their sessions in chronological order. Per-turn, relevance-aware. |
+
+The reader takes `--compressor` (default `full`) and `--budget` (approximate
+target tokens; `extractive_relevance` also honors `--scorer`,
+`truthsayer`|`guild`). The budget is **only a control knob** — the plotted
+*rate* axis is the reader's **real `usage.input_tokens`** (Claude's own token
+count), never the budgeting tokenizer's estimate. The operating point you want
+is the **knee of the best curve**: the fewest tokens at which Claude still
+answers correctly.
+
+### Sweep → aggregate flow
+
+```sh
+# settings.json: the (compressor, budget) grid to sweep.
+cat > settings.json <<'JSON'
+[
+  {"compressor": "full",                 "budget": null},
+  {"compressor": "truncate_tokens",      "budget": 4000},
+  {"compressor": "topk_sessions",        "budget": 4000},
+  {"compressor": "extractive_relevance", "budget": 4000},
+  {"compressor": "truncate_tokens",      "budget": 1000},
+  {"compressor": "extractive_relevance", "budget": 1000}
+]
+JSON
+
+# 1. sweep: run the reader+judge once per (compressor, budget, sample) leaf.
+lme-qa-sweep \
+  --dataset ~/longmemeval-ghola/data/longmemeval_s_cleaned.json \
+  --run     ~/longmemeval-ghola/results/ghola_v2_s_<ts>.jsonl \
+  --outdir  sweep/ --settings settings.json \
+  --samples 1 --backend claude-code --parallel 2
+
+# 2. aggregate: join rate (answers) to distortion (judgments) -> the frontier.
+lme-qa-rd --outdir sweep/
+# -> sweep/rd-curve.jsonl, sweep/rd-curve.md, sweep/rd-curve.png (PNG best-effort)
+```
+
+**Leaf layout + resume.** Each `(compressor, budget, sample)` is a *leaf*:
+`sweep/<compressor>__b<budget>/s<i>/{answers,judgments}.jsonl`. A leaf is a
+normal `lme-qa-run` + `lme-qa-judge` invocation pointed at the leaf's own
+`--out`/`--state`, so the **per-question** resume (append-only, last-wins,
+usage-window-aware) operates unchanged within each leaf. The sweep adds only
+**leaf-level** resume on top: a leaf whose `judgments.jsonl` already covers
+every question (last-wins status==succeeded for each) is skipped wholesale on a
+re-run — a second invocation over a finished sweep runs **zero** `claude`
+calls. The sweep is **window-aware** the same way the reader/judge are: a stage
+that runs without bringing its leaf to completion means the subscription usage
+window is exhausted (or the failures are systemic) — the sweep stops, reports
+which leaves remain, and a re-run after the window resets picks up from the
+first unfinished leaf. Run it in tmux (`tmux new-session -d -s lme-qa-sweep
+...`) for the same multi-window reasons as a plain QA run.
+
+**Aggregation.** `lme-qa-rd` walks the leaf tree and, per setting, joins each
+question's real rate (`answers.usage.input_tokens`) to its verdict
+(`judgments.label`), dedups last-wins per qid, averages samples per question
+first, then averages questions to the setting's `mean_rate` + `accuracy`
+(`distortion == 1 - accuracy`). It emits `rd-curve.jsonl` (one row per setting),
+`rd-curve.md` (a table sorted by mean rate, calling out the
+truncate-vs-extractive accuracy gap at the nearest shared budget — the core
+question: does per-turn relevance selection beat a blind byte cut at the same
+budget?), and a best-effort `rd-curve.png`. The PNG needs the optional `[plot]`
+extra (`pip install 'bench/longmemeval/qa[plot]'`); without matplotlib the table
+still ships and the PNG is skipped with a one-line stderr note.
+
+**`--samples` and self-consistency.** `--samples` runs each setting more than
+once (each sample is its own leaf dir) and averages — but it is only meaningful
+if `claude -p` answers are *stochastic*. Run a small pilot before trusting it:
+5 questions at `--samples 3`, then inspect whether the three answers per
+question differ. If they are identical, keep **`--samples 1`** and rely on
+eval-set size (the full LongMemEval-S set) for the curve's resolution rather
+than re-sampling the same deterministic answer. Document the observed variance
+when you publish a curve. The default is `--samples 1`.
+
+> **Self-consistency pilot — observed:** the prior QA-accuracy runs were
+> reproducible across three identical retrieval runs (see the variance caveat
+> retired in `docs/benchmarks.md`), so the reader path showed no run-to-run
+> variance worth re-sampling. Default `--samples 1` accordingly; re-run the
+> 5-question pilot if the model/serving path changes and re-confirm before
+> raising it.
+
+**Stage B (the follow-on).** These four compressors are the *baseline*
+frontier — the no-new-model bar that the next stage exists to beat. Stage B
+adds learned/model-driven compressors (`perplexity_prune`, `llm_distill`); the
+point of committing this baseline curve first is to have a frontier to measure
+that improvement against.
+
+> **Not built here:** the actual measurement run over a real retrieve run (and
+> the committed curve) is operator-run — it needs the live stack + the
+> subscription window and is executed window-aware like the QA runs, not part
+> of this instrument's code.
+
 ## Internal vs upstream
 
 `seeding-eval/` at the repo root is the **internal** sweep harness — a

@@ -10,4 +10,13 @@ Pure-logic modules (context, prompts, aggregate) carry the tested core; the
 SDK boundary lives in batch/cli.
 """
 
-__all__ = ["context", "prompts", "aggregate"]
+__all__ = [
+    "context",
+    "prompts",
+    "aggregate",
+    "tokenize",
+    "compress",
+    "scorer",
+    "sweep",
+    "rd_aggregate",
+]

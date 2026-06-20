@@ -30,9 +30,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import aggregate, context, prompts
+from . import aggregate, compress, context, prompts
+from . import scorer as scorer_mod
 from .batch import MODEL, BatchDriver, judge_request, reader_request
 from .cc import CCRequest, CCRunner, UsageLimitExhausted
+from .tokenize import CharRatioTokenizer
 
 # The two execution backends; ``batches`` stays the default so existing
 # invocations and the key-bearing path are unchanged.
@@ -191,6 +193,29 @@ def run_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run", required=True, type=Path, help="retrieve results JSONL")
     ap.add_argument("--out", required=True, type=Path, help="answers JSONL output")
     ap.add_argument("--k", type=int, default=10, help="top-K sessions for context (default 10)")
+    ap.add_argument(
+        "--compressor",
+        default="full",
+        choices=sorted(compress.REGISTRY),
+        help="context compressor applied to the selected sessions before the "
+        "reader prompt is built (default 'full' = no compression, "
+        "byte-identical to the pre-rate-distortion path)",
+    )
+    ap.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        help="approximate token budget the compressor targets (default none: "
+        "no budget — 'full' ignores it; the other compressors keep everything). "
+        "The plotted rate is the reader's real usage.input_tokens, not this estimate.",
+    )
+    ap.add_argument(
+        "--scorer",
+        default="truthsayer",
+        choices=sorted(scorer_mod._SCORERS),
+        help="relevance scorer for the extractive_relevance compressor "
+        "(truthsayer | guild; default truthsayer). Ignored by other compressors.",
+    )
     ap.add_argument("--state", type=Path, default=None, help="batch state file (default alongside --out)")
     ap.add_argument("--fresh", action="store_true", help="ignore state; submit a new batch")
     ap.add_argument(
@@ -232,27 +257,48 @@ def run_main(argv: list[str] | None = None) -> int:
     run_lines = _load_jsonl(args.run)
     state_path = args.state or _default_state(args.out)
 
+    # The context compressor sits between session selection and the reader
+    # prompt. ``full`` (default) renders every selected session unchanged
+    # (byte-identical to the pre-rate-distortion path); the others transform the
+    # sessions down to ``--budget`` approximate tokens. The tokenizer's count is
+    # only the control knob — the plotted rate is the reader's real
+    # usage.input_tokens. The extractive_relevance compressor needs a relevance
+    # scorer; build it once (env points it at the live stack) and inject so it is
+    # reused across questions rather than reconstructed per call.
+    tokenizer = CharRatioTokenizer()
+    compress_kwargs: dict[str, Any] = {}
+    if args.compressor == "extractive_relevance":
+        from .scorer import make_scorer
+
+        compress_kwargs["scorer"] = make_scorer(args.scorer)
+
     # Build the (qid, system, user_text) per question ONCE. The system + user
     # split is identical for both backends (prompts.READER_SYSTEM + the rendered
     # user prompt) so the two paths answer the same content.
     built_prompts: list[tuple[str, str, str]] = []
     meta: dict[str, dict[str, Any]] = {}
-    # Tally context-build diagnostics across all questions so a retrieve backend
-    # emitting stale/cross-question session ids (or pathologically long sessions)
-    # surfaces as one stderr line rather than vanishing per-question.
+    # Tally context diagnostics across all questions so a retrieve backend
+    # emitting stale/cross-question session ids surfaces as one stderr line
+    # rather than vanishing per-question.
     total_unknown = 0
-    total_truncated = 0
     for line in run_lines:
         qid = line["question_id"]
         entry = by_qid.get(qid)
         if entry is None:
             print(f"warning: {qid} not in dataset; skipping", file=sys.stderr)
             continue
-        built = context.build_context(entry, line, k=args.k)
-        total_unknown += len(built.unknown_session_ids)
-        total_truncated += len(built.truncated_session_ids)
+        sessions, diag = context.select_sessions(entry, line, k=args.k)
+        total_unknown += len(diag.unknown_session_ids)
+        text = compress.compress(
+            args.compressor,
+            sessions,
+            query=entry["question"],
+            target_tokens=args.budget,
+            tokenizer=tokenizer,
+            **compress_kwargs,
+        )
         user_text = prompts.build_reader_prompt(
-            entry["question"], entry["question_date"], built.text
+            entry["question"], entry["question_date"], text
         )
         built_prompts.append((qid, prompts.READER_SYSTEM, user_text))
         meta[qid] = {"question_type": entry["question_type"]}
@@ -262,18 +308,23 @@ def run_main(argv: list[str] | None = None) -> int:
 
     print(
         f"reader: built {len(built_prompts)} requests "
-        f"({total_unknown} unknown session ids dropped, "
-        f"{total_truncated} sessions truncated)",
+        f"(compressor={args.compressor}, budget={args.budget}; "
+        f"{total_unknown} unknown session ids dropped)",
         file=sys.stderr,
     )
 
     def _reader_row(r: Any) -> dict[str, Any]:
         # K is a reader-stage parameter; persist it so the judge stage can stamp
-        # it into the report's provenance footer.
+        # it into the report's provenance footer. compressor + budget are the
+        # rate-distortion setting for this run — persisted alongside K so the
+        # aggregator can group answers by (compressor, budget) without re-deriving
+        # the setting from the leaf directory name.
         return {
             "question_id": r.custom_id,
             "question_type": meta.get(r.custom_id, {}).get("question_type", ""),
             "k": args.k,
+            "compressor": args.compressor,
+            "budget": args.budget,
             "hypothesis": r.text,
             "status": r.status,
             "error": r.error,
