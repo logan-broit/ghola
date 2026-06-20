@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import aggregate, compress, context, prompts
+from . import scorer as scorer_mod
 from .batch import MODEL, BatchDriver, judge_request, reader_request
 from .cc import CCRequest, CCRunner, UsageLimitExhausted
 from .tokenize import CharRatioTokenizer
@@ -211,6 +212,7 @@ def run_main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--scorer",
         default="truthsayer",
+        choices=sorted(scorer_mod._SCORERS),
         help="relevance scorer for the extractive_relevance compressor "
         "(truthsayer | guild; default truthsayer). Ignored by other compressors.",
     )
