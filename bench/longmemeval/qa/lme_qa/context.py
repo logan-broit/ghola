@@ -96,6 +96,29 @@ def _render_session(session: Session, max_session_chars: int) -> tuple[str, bool
     return f"{header}\n{body}", truncated
 
 
+def render_sessions(
+    sessions: list[Session],
+    max_session_chars: int = DEFAULT_MAX_SESSION_CHARS,
+) -> tuple[str, list[str]]:
+    """Render a list of sessions to the canonical reader text.
+
+    Returns ``(text, truncated_session_ids)``. The text is the per-session
+    ``=== Session dated ... ===`` blocks joined by a blank line. This is the
+    single source of truth for the reader's rendering: both ``build_context``
+    and the rate-distortion compressors call it so their output cannot diverge.
+    Sessions are rendered in the order given (callers sort chronologically
+    before calling).
+    """
+    rendered: list[str] = []
+    truncated: list[str] = []
+    for s in sessions:
+        text, was_truncated = _render_session(s, max_session_chars)
+        rendered.append(text)
+        if was_truncated:
+            truncated.append(s.session_id)
+    return "\n\n".join(rendered), truncated
+
+
 def build_context(
     entry: dict[str, Any],
     result_line: dict[str, Any],
@@ -154,16 +177,10 @@ def build_context(
     # knowledge-update questions where recency disambiguates the answer.
     sessions.sort(key=lambda s: _sort_key(s.date))
 
-    rendered: list[str] = []
-    truncated: list[str] = []
-    for s in sessions:
-        text, was_truncated = _render_session(s, max_session_chars)
-        rendered.append(text)
-        if was_truncated:
-            truncated.append(s.session_id)
+    text, truncated = render_sessions(sessions, max_session_chars)
 
     return BuiltContext(
-        text="\n\n".join(rendered),
+        text=text,
         used_session_ids=used,
         unknown_session_ids=unknown,
         truncated_session_ids=truncated,
