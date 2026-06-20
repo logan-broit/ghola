@@ -18,6 +18,7 @@ dev = ["pytest>=8"]
 [project.scripts]
 lme-qa-run = "lme_qa.cli:run_main"
 lme-qa-judge = "lme_qa.cli:judge_main"
+lme-qa-sweep = "lme_qa.sweep:sweep_main"
 
 [tool.setuptools]
 packages = ["lme_qa"]
