@@ -46,10 +46,40 @@ def _truncate_tokens(
     return tokenizer.truncate(text, target_tokens)
 
 
+def _topk_sessions(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+) -> str:
+    """Keep whole sessions in chronological order until the next would exceed
+    the budget; never splits a session (distinct from truncate_tokens, which
+    cuts mid-session). Coarse session-granular relevance via the existing K
+    knob applied as a token budget."""
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    # Accumulate by re-rendering the growing kept prefix so the result is
+    # byte-identical to render_sessions(kept): the "\n\n" join cost between
+    # sessions is counted, not just per-session body lengths.
+    kept: list[context.Session] = []
+    for s in sessions:
+        candidate, _ = context.render_sessions(kept + [s])
+        if tokenizer.count(candidate) > target_tokens:
+            break
+        kept.append(s)
+
+    text, _ = context.render_sessions(kept)
+    return text
+
+
 # name -> compressor. compress() dispatches here; KeyError on unknown name.
 REGISTRY: dict[str, Callable[..., str]] = {
     "full": _full,
     "truncate_tokens": _truncate_tokens,
+    "topk_sessions": _topk_sessions,
 }
 
 
