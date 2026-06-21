@@ -34,7 +34,7 @@ from . import aggregate, compress, context, prompts
 from . import scorer as scorer_mod
 from .batch import MODEL, BatchDriver, judge_request, reader_request
 from .cc import CCRequest, CCRunner, UsageLimitExhausted
-from .tokenize import CharRatioTokenizer
+from .tokenize import CharRatioTokenizer, TiktokenTokenizer, Tokenizer, default_tokenizer
 
 # The two execution backends; ``batches`` stays the default so existing
 # invocations and the key-bearing path are unchanged.
@@ -180,6 +180,32 @@ def _default_state(out_path: Path) -> Path:
     return out_path.with_suffix(out_path.suffix + ".state.json")
 
 
+def _select_rate_tokenizer(choice: str) -> Tokenizer:
+    """Resolve the --rate-tokenizer flag to a tokenizer instance.
+
+    ``auto`` (default) defers to default_tokenizer() (tiktoken if importable,
+    else char-ratio). ``tiktoken`` forces the cl100k impl (errors clearly if the
+    [rate] extra is absent rather than silently falling back — an explicit
+    request should not be downgraded without telling the operator). ``char``
+    forces the dependency-free fallback (used by tests so the unit is stable
+    regardless of whether tiktoken happens to be installed). The SAME returned
+    instance budgets the compressor AND measures the rate, so the two share a
+    unit.
+    """
+    if choice == "tiktoken":
+        try:
+            return TiktokenTokenizer()
+        except ImportError:
+            sys.exit(
+                "error: --rate-tokenizer tiktoken requires the [rate] extra. "
+                "Install it (pip install 'lme-qa[rate]') or use "
+                "--rate-tokenizer char / auto."
+            )
+    if choice == "char":
+        return CharRatioTokenizer()
+    return default_tokenizer()
+
+
 # --- reader -----------------------------------------------------------------
 
 
@@ -207,7 +233,8 @@ def run_main(argv: list[str] | None = None) -> int:
         default=None,
         help="approximate token budget the compressor targets (default none: "
         "no budget — 'full' ignores it; the other compressors keep everything). "
-        "The plotted rate is the reader's real usage.input_tokens, not this estimate.",
+        "The plotted rate is the emitted-context token count (context_tokens), "
+        "measured by the rate tokenizer — not usage.input_tokens.",
     )
     ap.add_argument(
         "--scorer",
@@ -215,6 +242,16 @@ def run_main(argv: list[str] | None = None) -> int:
         choices=sorted(scorer_mod._SCORERS),
         help="relevance scorer for the extractive_relevance compressor "
         "(truthsayer | guild; default truthsayer). Ignored by other compressors.",
+    )
+    ap.add_argument(
+        "--rate-tokenizer",
+        choices=("auto", "tiktoken", "char"),
+        default="auto",
+        help="tokenizer used to BOTH budget the compressor and measure the rate "
+        "axis (context_tokens per row), so the budget unit and the rate unit "
+        "match. 'auto' (default): tiktoken cl100k if the [rate] extra is "
+        "installed, else char-ratio. 'tiktoken' forces cl100k (errors if absent); "
+        "'char' forces the dependency-free fallback.",
     )
     ap.add_argument("--state", type=Path, default=None, help="batch state file (default alongside --out)")
     ap.add_argument("--fresh", action="store_true", help="ignore state; submit a new batch")
@@ -260,12 +297,17 @@ def run_main(argv: list[str] | None = None) -> int:
     # The context compressor sits between session selection and the reader
     # prompt. ``full`` (default) renders every selected session unchanged
     # (byte-identical to the pre-rate-distortion path); the others transform the
-    # sessions down to ``--budget`` approximate tokens. The tokenizer's count is
-    # only the control knob — the plotted rate is the reader's real
-    # usage.input_tokens. The extractive_relevance compressor needs a relevance
-    # scorer; build it once (env points it at the live stack) and inject so it is
-    # reused across questions rather than reconstructed per call.
-    tokenizer = CharRatioTokenizer()
+    # sessions down to ``--budget`` approximate tokens. ONE tokenizer instance
+    # both budgets the compressor AND measures the rate axis (context_tokens per
+    # row), so "budget 1000" and the recorded rate share a unit. The rate is the
+    # emitted-context token count measured here — NOT the reader's
+    # usage.input_tokens, which on the claude-code backend is fixed harness
+    # overhead (~3279 tokens regardless of payload) and so reported the same rate
+    # for every setting (the bug this fix corrects). The extractive_relevance
+    # compressor needs a relevance scorer; build it once (env points it at the
+    # live stack) and inject so it is reused across questions rather than
+    # reconstructed per call.
+    tokenizer = _select_rate_tokenizer(args.rate_tokenizer)
     compress_kwargs: dict[str, Any] = {}
     if args.compressor == "extractive_relevance":
         from .scorer import make_scorer
@@ -297,11 +339,21 @@ def run_main(argv: list[str] | None = None) -> int:
             tokenizer=tokenizer,
             **compress_kwargs,
         )
+        # Measure the rate HERE: count the emitted context's tokens with the same
+        # tokenizer that budgeted it. This is the rate axis — it tracks the
+        # payload, so it varies across compressors/budgets (unlike the constant
+        # harness usage.input_tokens). Counted on the rendered context text only
+        # (not the reader-prompt wrapper) so it is the memory payload we emit.
+        context_tokens = tokenizer.count(text)
         user_text = prompts.build_reader_prompt(
             entry["question"], entry["question_date"], text
         )
         built_prompts.append((qid, prompts.READER_SYSTEM, user_text))
-        meta[qid] = {"question_type": entry["question_type"]}
+        meta[qid] = {
+            "question_type": entry["question_type"],
+            "context_tokens": context_tokens,
+            "rate_tokenizer": tokenizer.name,
+        }
 
     if not built_prompts:
         sys.exit("error: no questions to read (dataset/run mismatch?)")
@@ -318,13 +370,20 @@ def run_main(argv: list[str] | None = None) -> int:
         # it into the report's provenance footer. compressor + budget are the
         # rate-distortion setting for this run — persisted alongside K so the
         # aggregator can group answers by (compressor, budget) without re-deriving
-        # the setting from the leaf directory name.
+        # the setting from the leaf directory name. context_tokens is the RATE
+        # axis (emitted-context token count, measured at build time with
+        # rate_tokenizer); rd_aggregate reads it instead of usage.input_tokens.
+        # usage.input_tokens is kept as-is — harmless, and a useful cross-check on
+        # a future batches backend where it is the real input count.
+        m = meta.get(r.custom_id, {})
         return {
             "question_id": r.custom_id,
-            "question_type": meta.get(r.custom_id, {}).get("question_type", ""),
+            "question_type": m.get("question_type", ""),
             "k": args.k,
             "compressor": args.compressor,
             "budget": args.budget,
+            "context_tokens": m.get("context_tokens"),
+            "rate_tokenizer": m.get("rate_tokenizer"),
             "hypothesis": r.text,
             "status": r.status,
             "error": r.error,

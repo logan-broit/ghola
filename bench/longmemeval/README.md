@@ -83,6 +83,9 @@ QA accuracy are different metrics and must not be cross-compared.
 ```sh
 # Install (Python >=3.12; needs the anthropic SDK):
 pip install -e 'bench/longmemeval/qa[dev]'
+# Optional: add the [rate] extra (tiktoken) for a real cl100k rate-axis count in
+# the rate-distortion sweep; without it the rate falls back to a char-ratio
+# estimate. e.g. pip install -e 'bench/longmemeval/qa[dev,rate]'
 export ANTHROPIC_API_KEY=sk-ant-...        # both stages require it
 ```
 
@@ -213,8 +216,9 @@ Batches API's batch lifecycle); the claude-code backend resumes from the
 
 The reader's accuracy depends on how much context it gets. The
 rate-distortion sweep traces that tradeoff: it varies the distilled-context
-**token budget** (the *rate*) against QA accuracy (the *distortion*, reported
-as the wrong-fraction `1 - accuracy`) and plots the frontier. A **compressor**
+**token budget** and plots the resulting *rate* (the emitted-context token
+count) against QA accuracy (the *distortion*, reported as the wrong-fraction
+`1 - accuracy`) to map the frontier. A **compressor**
 sits between session selection (`context.select_sessions`) and the reader
 prompt: it transforms the selected sessions down to a budget before the prompt
 is built. Four no-new-model baselines ship:
@@ -226,13 +230,27 @@ is built. Four no-new-model baselines ship:
 | `topk_sessions` | session | keep whole sessions in chronological order until the next would exceed the budget; never splits a session. |
 | `extractive_relevance` | turn | score each turn against the query (truthsayer `/v1/rerank` reranker, already up at `:8085`), greedily keep the most relevant turns within the budget, regroup under their sessions in chronological order. Per-turn, relevance-aware. |
 
-The reader takes `--compressor` (default `full`) and `--budget` (approximate
-target tokens; `extractive_relevance` also honors `--scorer`,
-`truthsayer`|`guild`). The budget is **only a control knob** — the plotted
-*rate* axis is the reader's **real `usage.input_tokens`** (Claude's own token
-count), never the budgeting tokenizer's estimate. The operating point you want
-is the **knee of the best curve**: the fewest tokens at which Claude still
-answers correctly.
+The reader takes `--compressor` (default `full`), `--budget` (approximate target
+tokens; `extractive_relevance` also honors `--scorer`, `truthsayer`|`guild`),
+and `--rate-tokenizer` (`auto`|`tiktoken`|`char`, default `auto`). The plotted
+*rate* axis is the **emitted-context token count** — the memory payload the
+reader actually emits, measured at build time by the rate tokenizer (tiktoken
+cl100k when the optional `[rate]` extra is installed, else the dependency-free
+char-ratio fallback). The SAME tokenizer both budgets the compressor and
+measures the rate, so `--budget 1000` and the recorded rate share a unit. The
+operating point you want is the **knee of the best curve**: the fewest tokens at
+which Claude still answers correctly.
+
+> **Why the rate is NOT `usage.input_tokens`.** An earlier version of this
+> instrument used the reader's `usage.input_tokens` as the rate axis. On the
+> `claude-code` backend that field is Claude Code's **fixed harness overhead**
+> (~3279 tokens — verified identical for a one-word prompt and a 22k-token
+> context); the real payload lands in `cache_creation_input_tokens` /
+> `cache_read_input_tokens`, split unpredictably by prompt caching. So every
+> sweep setting reported the same ~3279 rate and the frontier was flat-on-the-x
+> garbage. The fix records `context_tokens` (the emitted-context token count) per
+> reader row and aggregates on that. Do not re-introduce a `usage.input_tokens`
+> rate axis on the claude-code backend.
 
 ### Sweep → aggregate flow
 
@@ -277,10 +295,13 @@ first unfinished leaf. Run it in tmux (`tmux new-session -d -s lme-qa-sweep
 ...`) for the same multi-window reasons as a plain QA run.
 
 **Aggregation.** `lme-qa-rd` walks the leaf tree and, per setting, joins each
-question's real rate (`answers.usage.input_tokens`) to its verdict
-(`judgments.label`), dedups last-wins per qid, averages samples per question
-first, then averages questions to the setting's `mean_rate` + `accuracy`
-(`distortion == 1 - accuracy`). It emits `rd-curve.jsonl` (one row per setting),
+question's rate (`answers.context_tokens` — the emitted-context token count the
+reader measured) to its verdict (`judgments.label`), dedups last-wins per qid,
+averages samples per question first, then averages questions to the setting's
+`mean_rate` + `accuracy` (`distortion == 1 - accuracy`). A pre-fix run that has
+no `context_tokens` falls back to `usage.input_tokens` with a stderr warning (see
+the harness-overhead note above); the `rate_tokenizer` name is carried onto the
+curve rows + the `rd-curve.md` header so the unit is on the artifact. It emits `rd-curve.jsonl` (one row per setting),
 `rd-curve.md` (a table sorted by mean rate, calling out the
 truncate-vs-extractive accuracy gap at the nearest shared budget — the core
 question: does per-turn relevance selection beat a blind byte cut at the same

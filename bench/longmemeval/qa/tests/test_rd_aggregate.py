@@ -1,10 +1,11 @@
 """Rate-distortion aggregation (Task 8): join + average math on KNOWN numbers.
 
 Builds leaf trees by hand (no live model, no sweep run) and asserts the joined
-+ aggregated numbers exactly. The join is answers.usage.input_tokens (rate) ->
-judgments.label (distortion) per question_id per leaf; samples are averaged per
-(setting, question) then questions are averaged per setting; distortion is
-1 - accuracy by construction.
++ aggregated numbers exactly. The join is answers.context_tokens (rate, the
+emitted-context token count) -> judgments.label (distortion) per question_id per
+leaf; samples are averaged per (setting, question) then questions are averaged
+per setting; distortion is 1 - accuracy by construction. A row missing
+context_tokens (a pre-fix run) falls back to usage.input_tokens with a warning.
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ def _write_leaf(
 ) -> None:
     """Write a leaf's answers.jsonl + judgments.jsonl from (qid, rate, label).
 
-    The two files share question_ids; answers carry usage.input_tokens (the
-    rate), judgments carry the label (correct/incorrect). Both succeeded.
+    The two files share question_ids; answers carry context_tokens (the rate,
+    the emitted-context token count) AND usage.input_tokens (a fixed harness
+    proxy, deliberately DIFFERENT from the rate so a test relying on the wrong
+    field would fail), judgments carry the label. Both succeeded.
     """
     btag = "None" if budget is None else str(budget)
     leaf = outdir / f"{compressor}__b{btag}" / f"s{sample}"
@@ -42,10 +45,15 @@ def _write_leaf(
                         "k": 10,
                         "compressor": compressor,
                         "budget": budget,
+                        "context_tokens": rate,
+                        "rate_tokenizer": "cl100k",
                         "hypothesis": "x",
                         "status": "succeeded",
                         "error": "",
-                        "usage": {"input_tokens": rate, "output_tokens": 1},
+                        # Fixed harness-overhead proxy, NOT the rate. Distinct
+                        # from `rate` so any code reading this field instead of
+                        # context_tokens would produce the wrong mean_rate.
+                        "usage": {"input_tokens": 3279, "output_tokens": 1},
                     }
                 )
                 + "\n"
@@ -111,9 +119,9 @@ def test_dedup_last_wins_within_a_leaf(tmp_path):
     leaf = tmp_path / "full__bNone" / "s0"
     leaf.mkdir(parents=True)
     (leaf / "answers.jsonl").write_text(
-        json.dumps({"question_id": "q1", "status": "errored", "usage": {"input_tokens": 1}})
+        json.dumps({"question_id": "q1", "status": "errored", "context_tokens": 1})
         + "\n"
-        + json.dumps({"question_id": "q1", "status": "succeeded", "usage": {"input_tokens": 999}})
+        + json.dumps({"question_id": "q1", "status": "succeeded", "context_tokens": 999})
         + "\n"
     )
     (leaf / "judgments.jsonl").write_text(
@@ -139,6 +147,53 @@ def test_two_settings_distinct_rows(tmp_path):
     assert trunc["budget"] == 500
     assert trunc["mean_rate"] == 500
     assert trunc["accuracy"] == 0.5
+
+
+def test_rate_uses_context_tokens_not_usage(tmp_path):
+    # The rate axis is context_tokens (1100 mean), NOT usage.input_tokens (3279,
+    # the harness-overhead proxy _write_leaf stamps). This is the fix's whole
+    # point: a constant usage.input_tokens cannot be the rate.
+    _write_leaf(tmp_path, "full", None, 0, [("q1", 1000, True), ("q2", 1200, False)])
+    rows = rd_aggregate.aggregate(tmp_path)
+    full = next(r for r in rows if r["compressor"] == "full")
+    assert full["mean_rate"] == 1100  # from context_tokens, not 3279
+
+
+def test_rate_tokenizer_carried_to_curve_row(tmp_path):
+    _write_leaf(tmp_path, "full", None, 0, [("q1", 1000, True), ("q2", 1200, True)])
+    rows = rd_aggregate.aggregate(tmp_path)
+    full = next(r for r in rows if r["compressor"] == "full")
+    # The unit lives on the row (it was stamped "cl100k" by _write_leaf).
+    assert full["rate_tokenizer"] == "cl100k"
+
+
+def test_missing_context_tokens_falls_back_to_usage_and_warns(tmp_path, capsys):
+    # A pre-fix run has no context_tokens; the aggregator falls back to
+    # usage.input_tokens for the rate and warns on stderr naming the setting so
+    # a stale-schema leaf is obvious in the run log.
+    leaf = tmp_path / "full__bNone" / "s0"
+    leaf.mkdir(parents=True)
+    (leaf / "answers.jsonl").write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "compressor": "full",
+                "budget": None,
+                "status": "succeeded",
+                "usage": {"input_tokens": 2500, "output_tokens": 1},
+            }
+        )
+        + "\n"
+    )
+    (leaf / "judgments.jsonl").write_text(
+        json.dumps({"question_id": "q1", "label": True, "status": "succeeded"}) + "\n"
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    full = next(r for r in rows if r["compressor"] == "full")
+    assert full["mean_rate"] == 2500  # fell back to usage.input_tokens
+    err = capsys.readouterr().err
+    assert "context_tokens" in err  # warning fired
+    assert "full" in err            # names the offending setting
 
 
 # --- artifacts ---------------------------------------------------------------

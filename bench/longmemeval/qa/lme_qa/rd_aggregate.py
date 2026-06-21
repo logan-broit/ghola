@@ -1,10 +1,16 @@
 """lme-qa-rd: aggregate a sweep's leaves into the rate-distortion frontier.
 
-Joins, per setting, the reader's REAL token cost (rate) to the judge's verdict
-(distortion):
+Joins, per setting, the emitted-context token count (rate) to the judge's
+verdict (distortion):
 
-  - rate  = answers ``usage.input_tokens`` (Claude's own count, NOT the
-            budgeting tokenizer's estimate — the budget is only the control knob);
+  - rate  = answers ``context_tokens`` (the emitted-context token count the
+            reader measured at build time with its rate tokenizer — the memory
+            PAYLOAD we emit). This is explicitly NOT ``usage.input_tokens``: on
+            the claude-code backend that field is Claude Code's fixed harness
+            overhead (~3279 tokens regardless of payload), so it reported the
+            same rate for every setting (the bug this aggregator's rate axis
+            once had). A pre-fix run with no ``context_tokens`` falls back to
+            ``usage.input_tokens`` with a stderr warning naming the setting.
   - label = judgments ``label`` (True == judged correct).
 
 The join is per ``question_id`` within a leaf. Within a setting, samples are
@@ -79,22 +85,48 @@ def _parse_setting_dir(name: str) -> _LeafSetting | None:
     return _LeafSetting(compressor=compressor, budget=budget)
 
 
-def _rate_by_qid(answers: Path) -> dict[str, float]:
-    """question_id -> rate (usage.input_tokens), last-wins per qid.
+def _rate_by_qid(answers: Path, setting_label: str) -> tuple[dict[str, float], str | None]:
+    """question_id -> rate, last-wins per qid; plus the rate tokenizer name.
 
-    Only succeeded rows carry a real rate; an errored row's hypothesis is empty
-    and its rate is 0/absent. We dedup last-wins (the append-only resume shape)
-    and keep whatever the last row reports — a leaf that reached the aggregator
-    is expected complete (all succeeded), so the last row is the succeeded one.
+    Rate = the row's ``context_tokens`` (the emitted-context token count the
+    reader measured). A row missing ``context_tokens`` (a pre-fix run) falls
+    back to ``usage.input_tokens`` and emits a one-time stderr warning naming
+    ``setting_label`` so a stale-schema leaf is obvious in the run log rather
+    than silently producing a harness-overhead rate. Only succeeded rows carry a
+    real rate; we dedup last-wins (the append-only resume shape) and keep the
+    last row — a leaf that reached the aggregator is expected complete, so the
+    last row is the succeeded one. Returns the ``rate_tokenizer`` name seen on
+    the rows (None if absent) so the unit travels to the curve.
     """
     out: dict[str, float] = {}
+    rate_tokenizer: str | None = None
+    warned = False
     for row in cli._dedup_last_wins(cli._load_jsonl(answers)):
         qid = row.get("question_id")
         if qid is None:
             continue
-        usage = row.get("usage") or {}
-        out[qid] = float(usage.get("input_tokens", 0) or 0)
-    return out
+        if row.get("rate_tokenizer"):
+            rate_tokenizer = row["rate_tokenizer"]
+        ct = row.get("context_tokens")
+        if ct is None:
+            # Pre-fix schema: no measured rate. Fall back to usage.input_tokens
+            # (harness overhead on the cc backend — wrong, but better than 0 and
+            # the warning makes the staleness loud). Warn once per leaf.
+            if not warned:
+                print(
+                    f"warning: {setting_label}: answer rows lack 'context_tokens'"
+                    f" (pre-fix run?) — rate axis falling back to "
+                    f"usage.input_tokens, which on the claude-code backend is "
+                    f"harness overhead, not the emitted-context size. Re-run the "
+                    f"reader to record the real rate.",
+                    file=sys.stderr,
+                )
+                warned = True
+            usage = row.get("usage") or {}
+            out[qid] = float(usage.get("input_tokens", 0) or 0)
+        else:
+            out[qid] = float(ct or 0)
+    return out, rate_tokenizer
 
 
 def _label_by_qid(judgments: Path) -> dict[str, bool]:
@@ -141,6 +173,8 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
 
     # setting -> qid -> {"rates": [...per sample...], "labels": [...]}
     per_setting: dict[_LeafSetting, dict[str, dict[str, list[float]]]] = {}
+    # setting -> rate tokenizer name (the unit; carried to the curve row).
+    rate_tok_by_setting: dict[_LeafSetting, str | None] = {}
     # Preserve first-seen setting order for a stable tie-break under equal rate.
     order: list[_LeafSetting] = []
 
@@ -153,11 +187,15 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
             judgments = sample_dir / "judgments.jsonl"
             if not answers.exists() or not judgments.exists():
                 continue
-            rates = _rate_by_qid(answers)
+            rates, rate_tok = _rate_by_qid(answers, setting_dir.name)
             labels = _label_by_qid(judgments)
             if setting not in per_setting:
                 per_setting[setting] = {}
                 order.append(setting)
+            # First non-null tokenizer name seen for the setting wins (samples of
+            # one setting share a tokenizer; a pre-fix leaf reports None).
+            if rate_tok and not rate_tok_by_setting.get(setting):
+                rate_tok_by_setting[setting] = rate_tok
             qmap = per_setting[setting]
             # Join on qids present in BOTH files (a rate with no verdict, or a
             # verdict with no rate, is not a usable rate-distortion point).
@@ -186,6 +224,9 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
                 "distortion": 1.0 - accuracy,
                 "rate_ci": _sem_ci(per_q_rate),
                 "acc_ci": _sem_ci(per_q_acc),
+                # The rate unit travels with the row so the artifact is
+                # self-describing (None for a pre-fix run that fell back).
+                "rate_tokenizer": rate_tok_by_setting.get(setting),
             }
         )
 
@@ -232,14 +273,34 @@ def _truncate_extractive_gap(rows: list[dict[str, Any]]) -> str | None:
     )
 
 
+def _rate_unit(rows: list[dict[str, Any]]) -> str:
+    """Human label for the rate axis's unit, from the rows' rate_tokenizer.
+
+    cl100k -> "cl100k", char-ratio:4 -> "char-ratio", absent -> "unknown
+    (pre-fix run; fell back to usage.input_tokens)". Used in the md header so the
+    unit is on the artifact.
+    """
+    names = {r.get("rate_tokenizer") for r in rows if r.get("rate_tokenizer")}
+    if not names:
+        return "unknown (pre-fix run; fell back to usage.input_tokens)"
+    if len(names) == 1:
+        return next(iter(names))
+    return "mixed (" + ", ".join(sorted(names)) + ")"
+
+
 def render_markdown(rows: list[dict[str, Any]]) -> str:
     """Render the frontier table (sorted by mean rate) + the gap callout."""
     lines: list[str] = []
     lines.append("# Rate-distortion frontier")
     lines.append("")
     lines.append(
-        "Rate is the reader's real `usage.input_tokens`; distortion is the "
-        "wrong-fraction (1 - accuracy). Sorted by mean rate (cheapest first)."
+        f"Rate is the emitted-context token count ({_rate_unit(rows)}) — the "
+        "memory PAYLOAD the reader emits, measured at build time by the rate "
+        "tokenizer. It is explicitly NOT the reader's `usage.input_tokens`, "
+        "which on the claude-code backend is Claude Code's fixed harness "
+        "overhead (~3279 tokens regardless of payload) and so is constant across "
+        "settings. Distortion is the wrong-fraction (1 - accuracy). Sorted by "
+        "mean rate (cheapest first)."
     )
     lines.append("")
     lines.append(
@@ -293,7 +354,7 @@ def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:
         xs = [p["mean_rate"] for p in pts]
         ys = [p["accuracy"] for p in pts]
         ax.plot(xs, ys, marker="o", label=comp)
-    ax.set_xlabel("mean rate (reader input tokens)")
+    ax.set_xlabel("mean rate (emitted-context tokens)")
     ax.set_ylabel("accuracy")
     ax.set_title("Rate-distortion frontier")
     ax.legend()
