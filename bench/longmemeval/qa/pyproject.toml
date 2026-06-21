@@ -17,6 +17,10 @@ dev = ["pytest>=8"]
 # matplotlib is OPTIONAL: lme-qa-rd's PNG is best-effort. The markdown table is
 # the must-have and ships without it; install '.[plot]' to also get rd-curve.png.
 plot = ["matplotlib>=3.7"]
+# tiktoken is OPTIONAL: the rate axis uses a real cl100k BPE count when it's
+# installed, else falls back to the char-ratio estimate. NOT a core dep — CI
+# installs '[dev]' only, so the fallback path is what CI exercises.
+rate = ["tiktoken>=0.5"]
 
 [project.scripts]
 lme-qa-run = "lme_qa.cli:run_main"
