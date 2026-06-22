@@ -77,15 +77,16 @@ Caveats, stated plainly:
   changes the embeddings — re-validate before comparing against these
   numbers.
 
-## QA accuracy (methodology pinned; first run pending)
+## QA accuracy & distillation frontier
 
 The numbers above are **retrieval** metrics (R@k over evidence sessions).
 End-to-end QA accuracy is a separate, additional metric: it measures
 whether a reader, given the retrieved context, produces an answer a judge
 scores as correct. The stage is implemented in
-[`bench/longmemeval/qa/`](../bench/longmemeval/qa/) (the `lme-qa` package);
-the methodology is pinned here so the first run is reported against a fixed
-configuration, but no QA-accuracy numbers have been produced yet.
+[`bench/longmemeval/qa/`](../bench/longmemeval/qa/) (the `lme-qa` package).
+The full-500 QA-accuracy number is still pending; the first result produced
+with this stage is the **rate-distortion frontier** below (the P5
+distillation measurement).
 
 | Knob | Value |
 |---|---|
@@ -116,6 +117,62 @@ Stated plainly:
   (`via batches` / `via claude-code`) so any run is auditable, and the
   claude-code path strips MCP servers, tools, and plugins so the reader
   cannot reach context the benchmark withholds.
+
+### Rate-distortion frontier (P5 distillation, first measurement 2026-06-22)
+
+Distillation framed as rate-distortion compression of memory against the
+reader's prior: how few tokens of context can we hand the reader and still
+get the answer right? Each compressor reduces a question's retrieved context
+to a token budget; we measure **rate** (emitted-context tokens, cl100k) and
+**distortion** (QA wrong-fraction). The frontier is the achievable
+accuracy-vs-tokens trade; the best compressor sits furthest upper-left.
+
+n=120 (20/question-type, stratified subset of LongMemEval-S), reader+judge
+`claude-opus-4-8` via Claude Code, context from the `2026-05-17` retrieve run.
+
+![Rate-distortion frontier](assets/p5-rate-distortion-frontier.png)
+
+| compressor | rate (tok) | accuracy | ±95% CI |
+|---|---|---|---|
+| **full** (no compression) | **22,760** | **83.3%** | ±6.7 |
+| extractive_relevance @1000 | 993 | 85.0% | ±6.4 |
+| extractive_relevance @2000 | 1,994 | 85.0% | ±6.4 |
+| extractive_relevance @4000 | 3,994 | 85.8% | ±6.3 |
+| truncate_tokens @1000 | 1,000 | 25.0% | ±7.8 |
+| truncate_tokens @2000 | 2,000 | 25.0% | ±7.8 |
+| truncate_tokens @4000 | 4,000 | 39.2% | ±8.8 |
+| topk_sessions @2000 | 403 | 43.3% | ±8.9 |
+
+What it shows:
+
+- **Relevance-aware selection recovers full-context accuracy at ~1,000
+  tokens — a ~23x reduction at no measurable cost.** `extractive_relevance`
+  (score each retrieved turn against the question with the bge-reranker, keep
+  the highest until the budget) holds 85.0% at 993 tokens vs full-context
+  83.3% at 22,760 tokens; the two CIs overlap, so the reduction is free. The
+  curve is flat from 1k–4k — ~1k is the knee.
+- **Relevance is the whole game.** At an equal ~1,000-token budget,
+  relevance-aware selection scores 85.0% vs blind `truncate_tokens` at 25.0%
+  — a **+60pp** gap. Truncation keeps the chronologically-oldest turns, which
+  are almost never the evidence. `topk_sessions` (whole-session granularity)
+  also lags badly (43.3%): at a tight budget the oldest session alone often
+  overflows it, emitting little or nothing.
+- **Less may be slightly better, not just cheaper.** extractive at 1k
+  edges full (85.0 vs 83.3, within CI) — consistent with 22k tokens of
+  mostly-irrelevant context diluting the evidence that ~1k of relevant turns
+  presents cleanly.
+
+This is the Stage-A baseline frontier. Stage B (`perplexity_prune`,
+`llm_distill`) aims to push the knee below ~1k by removing redundancy *inside*
+the relevant turns. Reproduce with `lme-qa-sweep` → `lme-qa-rd` (see
+[`bench/longmemeval/README.md`](../bench/longmemeval/README.md)); rate is the
+emitted-context token count, **not** the reader's `usage.input_tokens` (which
+on the claude-code backend is fixed harness overhead).
+
+Caveats: n=120 subset (not the full 500); QA accuracy is a different metric
+from the retrieval R@k above and must not be cross-compared; the rate unit is
+a cl100k proxy for Claude's tokenizer (absolute counts ~10-20% off, frontier
+shape exact).
 
 ## Running the harness
 
