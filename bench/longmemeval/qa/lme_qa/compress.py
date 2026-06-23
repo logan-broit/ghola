@@ -94,31 +94,20 @@ def _regroup(
     return out
 
 
-def _extractive_relevance(
+def _score_and_greedy_select(
     sessions: list[context.Session],
-    *,
     query: str,
-    target_tokens: Optional[int],
-    tokenizer: Optional[Tokenizer],
+    target_tokens: int,
+    tokenizer: Tokenizer,
     scorer: Optional[Callable[[str, list[tuple[str, str]]], dict[str, float]]] = None,
-) -> str:
-    """Keep the turns most relevant to the query within the budget.
+) -> set[tuple[int, int]]:
+    """Score every turn against the query and greedily keep the highest-
+    relevance ones within the budget. Returns the kept set of
+    ``(session_index, turn_index)`` pairs.
 
-    Flatten sessions to individual turns, score each turn's text against the
-    query via the injected ``scorer`` (default: the truthsayer reranker), then
-    greedily admit turns in descending score order, accumulating the rendered
-    token cost until the next turn would exceed the budget. Kept turns are
-    regrouped under their sessions in the original chronological order before
-    rendering -- the selection is relevance-ranked but the render stays
-    timeline-ordered (matters for temporal-reasoning questions).
-
-    Distinct from topk_sessions (whole-session granularity) and truncate_tokens
-    (relevance-blind byte cut): this is per-turn, relevance-aware selection.
+    Shared core for ``extractive_relevance`` and its expanded variant so the
+    scoring + greedy packing logic is not duplicated.
     """
-    if target_tokens is None or tokenizer is None:
-        text, _ = context.render_sessions(sessions)
-        return text
-
     # Flatten to ((session_index, turn_index), text). The turn id encodes its
     # position so we can regroup in original order regardless of score order.
     # The relevance signal is the turn's raw content, not the rendered
@@ -130,7 +119,7 @@ def _extractive_relevance(
             flat.append(((si, ti), str(turn.get("content", ""))))
 
     if not flat:
-        return ""
+        return set()
 
     # urllib/JSON ids must be strings; map back after scoring.
     str_id = {f"{si}_{ti}": (si, ti) for (si, ti), _ in flat}
@@ -160,8 +149,131 @@ def _extractive_relevance(
             # may still fit even when a larger higher-ranked one did not.
             continue
         kept = candidate
+    return kept
 
+
+def _extractive_relevance(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    scorer: Optional[Callable[[str, list[tuple[str, str]]], dict[str, float]]] = None,
+) -> str:
+    """Keep the turns most relevant to the query within the budget.
+
+    Flatten sessions to individual turns, score each turn's text against the
+    query via the injected ``scorer`` (default: the truthsayer reranker), then
+    greedily admit turns in descending score order, accumulating the rendered
+    token cost until the next turn would exceed the budget. Kept turns are
+    regrouped under their sessions in the original chronological order before
+    rendering -- the selection is relevance-ranked but the render stays
+    timeline-ordered (matters for temporal-reasoning questions).
+
+    Distinct from topk_sessions (whole-session granularity) and truncate_tokens
+    (relevance-blind byte cut): this is per-turn, relevance-aware selection.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    kept = _score_and_greedy_select(
+        sessions, query, target_tokens, tokenizer, scorer
+    )
+    if not kept:
+        return ""
     text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
+def _extractive_relevance_expanded(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    scorer: Optional[Callable[[str, list[tuple[str, str]]], dict[str, float]]] = None,
+    expansion_reserve: float = 0.3,
+) -> str:
+    """Extractive selection + one-hop neighbor expansion.
+
+    Two phases:
+
+    1. **Greedy selection** with a *reduced* budget
+       (``target_tokens * (1 - expansion_reserve)``). This picks only the
+       highest-relevance turns, leaving room for neighbors.
+
+    2. **Neighbor expansion** with the *full* ``target_tokens`` budget.
+       For each turn kept by phase 1, try to admit its immediate predecessor
+       ``(si, ti-1)`` and successor ``(si, ti+1)`` if they fit. The expansion
+       iterates chronologically over the phase-1 kept turns (not the expanded
+       set), so it is a single one-hop layer — not a recursive fill.
+
+    Why the budget reserve is necessary: the greedy phase tries every turn
+    and keeps every turn that fits. Without a reserve, the greedy phase would
+    consume the entire budget with turns ranked by score (including low-
+    relevance non-neighbors that happen to be chronologically early), leaving
+    no room for the expansion to add anything. The reserve guarantees the
+    expansion has budget to work with. ``expansion_reserve`` (default 0.3,
+    i.e. 30% of the budget) controls the split; 0 reduces to plain
+    ``extractive_relevance``.
+
+    The hypothesis: temporal-reasoning questions need the connective timeline
+    between high-relevance turns. Pure extractive selection scores each turn
+    in isolation and may drop low-relevance connective turns that establish
+    "X happened, then Y, then Z." Neighbor expansion tests whether adding a
+    single layer of context around each kept turn recovers that connective
+    signal. If the temporal-category dip closes, it was lost connective
+    tissue; if not, temporal questions genuinely need the fuller session and
+    a different approach (gap-filling within a session) is warranted.
+
+    Out-of-bounds neighbors (first turn's predecessor, last turn's
+    successor) are skipped. A turn is never double-admitted (if a neighbor is
+    already in the set it is skipped). The expansion never crosses session
+    boundaries — neighbors are within-session only.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    if expansion_reserve <= 0:
+        # No reserve: degenerates to plain extractive_relevance.
+        kept = _score_and_greedy_select(
+            sessions, query, target_tokens, tokenizer, scorer
+        )
+        if not kept:
+            return ""
+        text, _ = context.render_sessions(_regroup(sessions, kept))
+        return text
+
+    # Phase 1: greedy selection with a reduced budget so phase 2 has room.
+    greedy_budget = max(1, int(target_tokens * (1 - expansion_reserve)))
+    kept = _score_and_greedy_select(
+        sessions, query, greedy_budget, tokenizer, scorer
+    )
+    if not kept:
+        return ""
+
+    # Phase 2: neighbor expansion against the full target_tokens budget.
+    # Iterate chronologically over the phase-1 kept turns (snapshot before the
+    # loop so newly admitted neighbors do NOT trigger further expansion —
+    # single-hop, not recursive fill).
+    expanded = set(kept)
+    for si, ti in sorted(kept):
+        for neighbor_ti in (ti - 1, ti + 1):
+            # Bounds check: skip out-of-range turns within the same session.
+            if neighbor_ti < 0 or neighbor_ti >= len(sessions[si].turns):
+                continue
+            key = (si, neighbor_ti)
+            if key in expanded:
+                continue  # already kept or already expanded
+            candidate = expanded | {key}
+            text, _ = context.render_sessions(_regroup(sessions, candidate))
+            if tokenizer.count(text) > target_tokens:
+                continue  # doesn't fit the remaining budget; try next neighbor
+            expanded = candidate
+
+    text, _ = context.render_sessions(_regroup(sessions, expanded))
     return text
 
 
@@ -171,6 +283,7 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "truncate_tokens": _truncate_tokens,
     "topk_sessions": _topk_sessions,
     "extractive_relevance": _extractive_relevance,
+    "extractive_relevance_expanded": _extractive_relevance_expanded,
 }
 
 
