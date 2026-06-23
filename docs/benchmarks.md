@@ -183,6 +183,57 @@ from the retrieval R@k above and must not be cross-compared; the rate unit is
 a cl100k proxy for Claude's tokenizer (absolute counts ~10-20% off, frontier
 shape exact).
 
+### Per-category breakdown (n=120 subset, hypothesis-generating)
+
+The n=120 subset is stratified 20/question-type, so per-category CIs are wide
+(±~20pp). These numbers are **suggestive, not conclusive** — they point at
+where to focus the full-500 run, not where to draw final conclusions.
+
+| Category | full | extractive@1000 | truncate@1000 |
+|---|---|---|---|
+| single-session-preference | 60% | 60% | 10% |
+| temporal-reasoning | 85% | 75% | 0% |
+| knowledge-update | 85% | 95% | 35% |
+| multi-session | 75% | 80% | 25% |
+
+The **temporal-reasoning** dip (75 vs 85) is the sharpest signal. Preference
+is the hardest category (lowest for both full and extractive), but it's
+**reasoning-hard, not selection-hard** — full context doesn't help either
+(60% on both), so extractive isn't where it loses. The temporal dip suggests
+extractive selection drops the low-relevance *connective* turns between
+high-relevance ones that establish "X happened, then Y, then Z." The
+evidence points at temporal, not preference, as the category where extractive
+selection has a structural limitation.
+
+A new compressor, `extractive_relevance_expanded`, tests this hypothesis: after
+greedy relevance selection, it admits each kept turn's immediate predecessor
+and successor (one-hop neighbor expansion) if budget allows. Falsifiable
+prediction: if the temporal dip closes, it was lost connective tissue; if not,
+temporal questions genuinely need the fuller session. The compressor is in the
+registry alongside the others; sweep it at `@1000` to compare against
+`extractive_relevance@1000` on the temporal category.
+
+### Connection to mentat's session pooler (PR8 prediction)
+
+The rate-distortion frontier measures dilution at the **turn-selection**
+level: 22k tokens of averaged-everything loses to 1k tokens of
+relevant-only. Mentat's session pooler
+([`mentat/mentat/pooler.py`](../mentat/mentat/pooler.py)) enshrines the same
+dilution at the **embedding** level: it mean-pools every event's embedding
+with type-based weights (`user: 1.0, assistant: 0.5, tool_result: 0.1,
+system: 0.0`), washing out the single highly-relevant turn the way full-
+context rendering washes out the single relevant passage.
+
+The frontier is therefore indirect quantitative evidence for PR8's attention
+pool: if extractive selection recovers signal by keeping less-but-relevant,
+an attention-weighted pool should recover signal by weighting less-but-
+relevant. **Falsifiable prediction**: an attention pool (PR8's
+`AttentionPool`) should beat the mean pool, and the delta should be largest
+on sessions with high variance in per-turn relevance — the same sessions where
+extractive selection at 1k beats full-context at 22k. The two experiments
+measure the same principle (relevance-weighted selection beats uniform
+averaging) at different granularities (turn-level vs embedding-level).
+
 ## Running the harness
 
 The ghola backend adapter lives in this repo at
