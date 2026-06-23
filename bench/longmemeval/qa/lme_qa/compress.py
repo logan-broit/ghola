@@ -258,6 +258,22 @@ def _extractive_relevance_expanded(
     # Iterate chronologically over the phase-1 kept turns (snapshot before the
     # loop so newly admitted neighbors do NOT trigger further expansion —
     # single-hop, not recursive fill).
+    #
+    # Admission policy: chronological-first. We iterate sorted(kept) and
+    # admit neighbors first-come-first-served against the budget. This is
+    # defensible (even temporal coverage across the timeline) but it's an
+    # unexamined choice — under a tight budget, the earliest kept turn's
+    # neighbors win over a later, higher-relevance anchor's neighbors. An
+    # alternative (expand around highest-relevance anchors first) would
+    # re-sort kept by descending score; try it as a variant if the result is
+    # murky.
+    #
+    # Confound to keep in mind: a turn rejected by phase 1 (didn't fit the
+    # reduced budget) can re-enter here as a neighbor, now against the full
+    # budget. This is desirable (relevant + connective), but it means a
+    # positive result is partly "extra relevance budget," not purely
+    # "connective tissue." Compare against extractive_relevance at the SAME
+    # total budget, not just the phase-1 budget, to separate the effects.
     expanded = set(kept)
     for si, ti in sorted(kept):
         for neighbor_ti in (ti - 1, ti + 1):

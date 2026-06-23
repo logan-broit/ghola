@@ -237,6 +237,17 @@ def run_main(argv: list[str] | None = None) -> int:
         "measured by the rate tokenizer — not usage.input_tokens.",
     )
     ap.add_argument(
+        "--expansion-reserve",
+        type=float,
+        default=None,
+        help="fraction of the budget reserved for neighbor expansion in "
+        "extractive_relevance_expanded (0.0–1.0; default: 0.3 = the "
+        "compressor's built-in default). Ignored by other compressors. Threading "
+        "this through the sweep (rather than baking a single value) lets the "
+        "expanded-vs-extractive comparison distinguish a hypothesis failure from "
+        "a reserve-mistuning confound.",
+    )
+    ap.add_argument(
         "--scorer",
         default="truthsayer",
         choices=sorted(scorer_mod._SCORERS),
@@ -313,6 +324,12 @@ def run_main(argv: list[str] | None = None) -> int:
         from .scorer import make_scorer
 
         compress_kwargs["scorer"] = make_scorer(args.scorer)
+    elif args.compressor == "extractive_relevance_expanded":
+        from .scorer import make_scorer
+
+        compress_kwargs["scorer"] = make_scorer(args.scorer)
+        if args.expansion_reserve is not None:
+            compress_kwargs["expansion_reserve"] = args.expansion_reserve
 
     # Build the (qid, system, user_text) per question ONCE. The system + user
     # split is identical for both backends (prompts.READER_SYSTEM + the rendered

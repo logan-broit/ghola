@@ -483,6 +483,51 @@ def test_expanded_neighbor_does_not_cross_session_boundary():
     assert "other session turn" not in out  # cross-session: NOT admitted
 
 
+@pytest.mark.parametrize("budget", [50, 100, 200, 500, 1000])
+def test_expanded_never_exceeds_budget(budget):
+    """The expanded output must never exceed target_tokens — the same property
+    extractive_relevance has. Phase 2 re-renders against target_tokens, so it
+    should hold, but it is unasserted without this test. Parametric across a
+    range of budgets to catch any edge case."""
+    sessions = [
+        context.Session(
+            "s1",
+            "2023/05/20 (Sat) 02:21",
+            [
+                {"role": "user", "content": f"turn {i} content here"}
+                for i in range(20)
+            ],
+        ),
+        context.Session(
+            "s2",
+            "2023/05/21 (Sun) 02:21",
+            [
+                {"role": "assistant", "content": f"response {i} with some text"}
+                for i in range(15)
+            ],
+        ),
+    ]
+    tok = CharRatioTokenizer(1)
+    fake_scores = {
+        f"turn {i} content here": 0.9 if i in (5, 10) else 0.1
+        for i in range(20)
+    }
+    fake_scores.update(
+        {f"response {i} with some text": 0.9 if i in (3, 7) else 0.1 for i in range(15)}
+    )
+    out = compress.compress(
+        "extractive_relevance_expanded",
+        sessions,
+        query="q",
+        target_tokens=budget,
+        tokenizer=tok,
+        scorer=_fake_scorer(fake_scores),
+    )
+    assert tok.count(out) <= budget, (
+        f"expanded output {tok.count(out)} exceeded budget {budget}"
+    )
+
+
 def _truthsayer_up() -> bool:
     """True if a truthsayer reranker answers at the configured URL. Probes the
     real /v1/rerank surface so the live test only runs against a working

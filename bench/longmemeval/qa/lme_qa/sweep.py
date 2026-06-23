@@ -44,10 +44,21 @@ from .scorer import _SCORERS
 
 @dataclass(frozen=True)
 class Setting:
-    """One rate-distortion setting: a compressor and its token budget."""
+    """One rate-distortion setting: a compressor, a token budget, and optional
+    compressor-specific parameters.
+
+    ``expansion_reserve`` is specific to ``extractive_relevance_expanded``: it
+    controls the fraction of the budget reserved for the neighbor-expansion
+    pass (0.0 = no reserve = plain extractive; 1.0 = all budget goes to
+    expansion). ``None`` means "use the compressor's default" (0.3 for the
+    expanded compressor). The reserve is an un-swept hyperparameter — sweeping
+    2–3 values at a fixed budget is the minimum to interpret an expanded-vs-
+    extractive comparison without the reserve-mistuning confound.
+    """
 
     compressor: str
     budget: int | None
+    expansion_reserve: float | None = None
 
 
 def _budget_tag(budget: int | None) -> str:
@@ -56,14 +67,41 @@ def _budget_tag(budget: int | None) -> str:
     return "None" if budget is None else str(budget)
 
 
-def leaf_dir(outdir: Path, compressor: str, budget: int | None, sample: int) -> Path:
-    """The directory for one ``(compressor, budget, sample)`` leaf.
+def _reserve_tag(reserve: float | None) -> str:
+    """Filesystem-safe expansion-reserve tag for a leaf path.
 
-    ``<outdir>/<compressor>__b<budget>/s<sample>``. Stable + parseable so the
-    aggregator (lme-qa-rd) can walk the tree and recover the setting from the
-    directory name without a side index.
+    ``None`` -> empty (the compressor's default). Non-``None`` -> ``r0.3``
+    style tag so multiple reserve values at the same budget get distinct leaf
+    directories. The separator is ``__r`` (matching the ``__b`` budget
+    separator) so the aggregator can parse it back out.
     """
-    return outdir / f"{compressor}__b{_budget_tag(budget)}" / f"s{sample}"
+    if reserve is None:
+        return ""
+    # Format: strip trailing zeros (0.30 -> 0.3, 0.0 -> 0), keep at least
+    # one decimal digit so the tag is never empty-string (which would
+    # collide with the None/default case in the directory name).
+    s = f"{reserve:.1f}"
+    return f"__r{s}"
+
+
+def leaf_dir(
+    outdir: Path,
+    compressor: str,
+    budget: int | None,
+    sample: int,
+    expansion_reserve: float | None = None,
+) -> Path:
+    """The directory for one ``(compressor, budget, expansion_reserve, sample)``
+    leaf.
+
+    ``<outdir>/<compressor>__b<budget>[__r<reserve>]/s<sample>``. Stable +
+    parseable so the aggregator (lme-qa-rd) can walk the tree and recover the
+    setting from the directory name without a side index. The optional
+    ``__r<reserve>`` suffix only appears when the setting carries an explicit
+    ``expansion_reserve`` so existing leaves without the suffix are unaffected.
+    """
+    name = f"{compressor}__b{_budget_tag(budget)}{_reserve_tag(expansion_reserve)}"
+    return outdir / name / f"s{sample}"
 
 
 def load_settings(path: Path) -> list[Setting]:
@@ -95,7 +133,26 @@ def load_settings(path: Path) -> list[Setting]:
                 f"{path}: settings entry at index {i} 'budget' must be an "
                 f"integer or null, got {budget!r}"
             )
-        settings.append(Setting(compressor=name, budget=budget))
+        expansion_reserve = item.get("expansion_reserve")
+        if expansion_reserve is not None:
+            if not isinstance(expansion_reserve, (int, float)):
+                raise ValueError(
+                    f"{path}: settings entry at index {i} 'expansion_reserve' "
+                    f"must be a number or null, got {expansion_reserve!r}"
+                )
+            if not (0.0 <= float(expansion_reserve) <= 1.0):
+                raise ValueError(
+                    f"{path}: settings entry at index {i} 'expansion_reserve' "
+                    f"must be in [0.0, 1.0], got {expansion_reserve!r}"
+                )
+            expansion_reserve = float(expansion_reserve)
+        settings.append(
+            Setting(
+                compressor=name,
+                budget=budget,
+                expansion_reserve=expansion_reserve,
+            )
+        )
     return settings
 
 
@@ -200,7 +257,13 @@ def sweep_main(argv: list[str] | None = None) -> int:
     skipped = 0
     completed = 0
     for idx, (setting, sample) in enumerate(leaves):
-        leaf = leaf_dir(args.outdir, setting.compressor, setting.budget, sample)
+        leaf = leaf_dir(
+            args.outdir,
+            setting.compressor,
+            setting.budget,
+            sample,
+            expansion_reserve=setting.expansion_reserve,
+        )
         answers = leaf / "answers.jsonl"
         judgments = leaf / "judgments.jsonl"
         report = leaf / "report.md"
@@ -213,7 +276,7 @@ def sweep_main(argv: list[str] | None = None) -> int:
             continue
 
         leaf.mkdir(parents=True, exist_ok=True)
-        label = f"{setting.compressor}__b{_budget_tag(setting.budget)}/s{sample}"
+        label = f"{setting.compressor}__b{_budget_tag(setting.budget)}{_reserve_tag(setting.expansion_reserve)}/s{sample}"
         print(f"sweep: leaf {idx + 1}/{len(leaves)} {label}", file=sys.stderr)
         ran += 1
 
@@ -233,6 +296,8 @@ def sweep_main(argv: list[str] | None = None) -> int:
         ]
         if setting.budget is not None:
             reader_argv += ["--budget", str(setting.budget)]
+        if setting.expansion_reserve is not None:
+            reader_argv += ["--expansion-reserve", str(setting.expansion_reserve)]
         cli.run_main(reader_argv)
 
         # The reader exits 0 even on a usage-window stop (partial progress saved).
@@ -285,7 +350,7 @@ def _stop_incomplete(
     reader/judge's window-exhaustion contract.
     """
     remaining = [
-        f"{s.compressor}__b{_budget_tag(s.budget)}/s{i}"
+        f"{s.compressor}__b{_budget_tag(s.budget)}{_reserve_tag(s.expansion_reserve)}/s{i}"
         for s, i in leaves[idx:]
     ]
     print(

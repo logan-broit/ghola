@@ -229,3 +229,70 @@ def test_aggregate_empty_outdir_returns_empty(tmp_path):
 def test_rd_main_no_settings_errors(tmp_path):
     with pytest.raises(SystemExit):
         rd_aggregate.rd_main(["--outdir", str(tmp_path)])
+
+
+# --- expansion_reserve parsing -----------------------------------------------
+
+
+def test_parse_setting_dir_with_expansion_reserve():
+    """The ``__r<reserve>`` suffix is parsed back as expansion_reserve."""
+    s = rd_aggregate._parse_setting_dir(
+        "extractive_relevance_expanded__b1000__r0.3"
+    )
+    assert s is not None
+    assert s.compressor == "extractive_relevance_expanded"
+    assert s.budget == 1000
+    assert s.expansion_reserve == 0.3
+
+
+def test_parse_setting_dir_without_expansion_reserve():
+    """A leaf without the ``__r`` suffix has expansion_reserve=None."""
+    s = rd_aggregate._parse_setting_dir("extractive_relevance__b500")
+    assert s is not None
+    assert s.compressor == "extractive_relevance"
+    assert s.budget == 500
+    assert s.expansion_reserve is None
+
+
+def test_parse_setting_dir_reserve_zero():
+    """r0.0 parses to 0.0, not None."""
+    s = rd_aggregate._parse_setting_dir(
+        "extractive_relevance_expanded__b1000__r0.0"
+    )
+    assert s is not None
+    assert s.expansion_reserve == 0.0
+
+
+def test_aggregate_carries_expansion_reserve_to_row(tmp_path):
+    """The expansion_reserve travels from the leaf directory name into the
+    curve row so the aggregator can distinguish reserve variants."""
+    # Two leaves of the same compressor+budget but different reserves.
+    _write_leaf(
+        tmp_path, "extractive_relevance_expanded", 500, 0,
+        [("q1", 400, True), ("q2", 450, True)],
+    )
+    # _write_leaf doesn't add the __r suffix, so write one by hand.
+    leaf2 = tmp_path / "extractive_relevance_expanded__b500__r0.5" / "s0"
+    leaf2.mkdir(parents=True, exist_ok=True)
+    (leaf2 / "answers.jsonl").write_text(
+        json.dumps({
+            "question_id": "q1", "context_tokens": 420, "rate_tokenizer": "cl100k",
+            "status": "succeeded", "usage": {"input_tokens": 3279, "output_tokens": 1},
+        }) + "\n" +
+        json.dumps({
+            "question_id": "q2", "context_tokens": 430, "rate_tokenizer": "cl100k",
+            "status": "succeeded", "usage": {"input_tokens": 3279, "output_tokens": 1},
+        }) + "\n"
+    )
+    (leaf2 / "judgments.jsonl").write_text(
+        json.dumps({"question_id": "q1", "label": True, "status": "succeeded"}) + "\n" +
+        json.dumps({"question_id": "q2", "label": False, "status": "succeeded"}) + "\n"
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 2
+    # The default-reserve leaf (no __r suffix) has None.
+    default_row = next(r for r in rows if r.get("expansion_reserve") is None)
+    assert default_row["compressor"] == "extractive_relevance_expanded"
+    # The __r0.5 leaf carries the reserve.
+    r05_row = next(r for r in rows if r.get("expansion_reserve") == 0.5)
+    assert r05_row["budget"] == 500

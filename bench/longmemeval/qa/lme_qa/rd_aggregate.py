@@ -57,24 +57,43 @@ class _LeafSetting:
 
     compressor: str
     budget: int | None
+    expansion_reserve: float | None = None
 
 
 def _parse_setting_dir(name: str) -> _LeafSetting | None:
-    """Recover ``(compressor, budget)`` from a ``<compressor>__b<budget>`` dir.
+    """Recover ``(compressor, budget, expansion_reserve)`` from a leaf dir name.
 
-    The compressor name itself contains underscores (``truncate_tokens``,
-    ``extractive_relevance``), so split on the LAST ``__b`` separator. ``bNone``
-    -> ``None`` budget. Returns ``None`` for a name that does not match the
-    pattern (a stray directory under outdir is ignored, not crashed on).
+    Format: ``<compressor>__b<budget>[__r<reserve>]``. The compressor name itself
+    contains underscores (``truncate_tokens``, ``extractive_relevance``), so we
+    split on the ``__b`` separator (rfind finds the LAST one, which is the
+    budget separator). The optional ``__r<reserve>`` suffix follows the budget
+    tag (e.g. ``extractive_relevance_expanded__b1000__r0.3``). Returns ``None``
+    for a name that does not match the pattern (a stray directory under outdir
+    is ignored, not crashed on).
     """
     sep = "__b"
     cut = name.rfind(sep)
     if cut == -1:
         return None
     compressor = name[:cut]
-    btag = name[cut + len(sep):]
-    if not compressor or not btag:
+    rest = name[cut + len(sep):]
+    if not compressor or not rest:
         return None
+
+    # Split off the optional ``__r<reserve>`` suffix.
+    reserve: float | None = None
+    rsep = "__r"
+    rcut = rest.rfind(rsep)
+    if rcut != -1:
+        btag = rest[:rcut]
+        rtag = rest[rcut + len(rsep):]
+        try:
+            reserve = float(rtag)
+        except ValueError:
+            return None
+    else:
+        btag = rest
+
     if btag == "None":
         budget: int | None = None
     else:
@@ -82,7 +101,9 @@ def _parse_setting_dir(name: str) -> _LeafSetting | None:
             budget = int(btag)
         except ValueError:
             return None
-    return _LeafSetting(compressor=compressor, budget=budget)
+    return _LeafSetting(
+        compressor=compressor, budget=budget, expansion_reserve=reserve
+    )
 
 
 def _rate_by_qid(answers: Path, setting_label: str) -> tuple[dict[str, float], str | None]:
@@ -218,6 +239,7 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
             {
                 "compressor": setting.compressor,
                 "budget": setting.budget,
+                "expansion_reserve": setting.expansion_reserve,
                 "n": len(qmap),
                 "mean_rate": mean_rate,
                 "accuracy": accuracy,
@@ -304,15 +326,18 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     )
     lines.append("")
     lines.append(
-        "| compressor | budget | N | mean_rate | rate_ci | accuracy | distortion | acc_ci |"
+        "| compressor | budget | reserve | N | mean_rate | rate_ci | accuracy | distortion | acc_ci |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for r in rows:
+        reserve = r.get("expansion_reserve")
+        reserve_label = f"{reserve:.1f}" if reserve is not None else "—"
         lines.append(
-            "| {comp} | {budget} | {n} | {rate} | {rate_ci} | {acc:.1%} | "
+            "| {comp} | {budget} | {reserve} | {n} | {rate} | {rate_ci} | {acc:.1%} | "
             "{dist:.1%} | {acc_ci} |".format(
                 comp=r["compressor"],
                 budget=_budget_label(r["budget"]),
+                reserve=reserve_label,
                 n=r["n"],
                 rate=_fmt_num(r["mean_rate"]),
                 rate_ci=_fmt_num(r["rate_ci"]),

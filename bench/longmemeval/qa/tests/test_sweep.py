@@ -154,3 +154,87 @@ def test_sweep_leaf_path_layout():
     assert sweep.leaf_dir(base, "truncate_tokens", 512, 3) == (
         base / "truncate_tokens__b512" / "s3"
     )
+
+
+def test_sweep_leaf_path_with_expansion_reserve():
+    # An explicit expansion_reserve gets a ``__r0.3`` suffix so multiple
+    # reserve values at the same budget get distinct leaf directories.
+    base = Path("/tmp/x")
+    assert sweep.leaf_dir(
+        base, "extractive_relevance_expanded", 1000, 0, expansion_reserve=0.3
+    ) == base / "extractive_relevance_expanded__b1000__r0.3" / "s0"
+    # None (default) gets no suffix — the leaf path matches the old format.
+    assert sweep.leaf_dir(
+        base, "extractive_relevance_expanded", 1000, 0
+    ) == base / "extractive_relevance_expanded__b1000" / "s0"
+
+
+@pytest.fixture
+def reserve_settings_file(tmp_path) -> Path:
+    # Three expansion_reserve values at the same budget for the expanded
+    # compressor — the minimum to interpret an expanded-vs-extractive comparison
+    # without the reserve-mistuning confound.
+    p = tmp_path / "reserve_settings.json"
+    p.write_text(
+        json.dumps(
+            [
+                {"compressor": "extractive_relevance_expanded", "budget": 50, "expansion_reserve": 0.0},
+                {"compressor": "extractive_relevance_expanded", "budget": 50, "expansion_reserve": 0.3},
+                {"compressor": "extractive_relevance_expanded", "budget": 50, "expansion_reserve": 0.5},
+            ]
+        )
+    )
+    return p
+
+
+def test_sweep_expansion_reserve_creates_distinct_leaves(
+    monkeypatch, dataset_file, run_file, reserve_settings_file, tmp_path
+):
+    """Different expansion_reserve values at the same budget must produce
+    distinct leaf directories so their results don't collide."""
+    _use_fake(monkeypatch, tmp_path, {"answer": "yes"})
+    outdir = tmp_path / "sweep"
+    rc = sweep.sweep_main(
+        [
+            "--dataset", str(dataset_file),
+            "--run", str(run_file),
+            "--outdir", str(outdir),
+            "--settings", str(reserve_settings_file),
+            "--samples", "1",
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+    # Three distinct leaves at the same budget, distinguished by __r suffix.
+    assert (outdir / "extractive_relevance_expanded__b50__r0.0" / "s0" / "judgments.jsonl").exists()
+    assert (outdir / "extractive_relevance_expanded__b50__r0.3" / "s0" / "judgments.jsonl").exists()
+    assert (outdir / "extractive_relevance_expanded__b50__r0.5" / "s0" / "judgments.jsonl").exists()
+
+
+def test_load_settings_rejects_invalid_expansion_reserve(tmp_path):
+    """expansion_reserve must be in [0.0, 1.0] and a number."""
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(
+        [{"compressor": "extractive_relevance_expanded", "budget": 100, "expansion_reserve": 1.5}]
+    ))
+    with pytest.raises(ValueError, match="expansion_reserve"):
+        sweep.load_settings(p)
+
+    p.write_text(json.dumps(
+        [{"compressor": "extractive_relevance_expanded", "budget": 100, "expansion_reserve": "high"}]
+    ))
+    with pytest.raises(ValueError, match="expansion_reserve"):
+        sweep.load_settings(p)
+
+
+def test_load_settings_accepts_missing_expansion_reserve(tmp_path):
+    """expansion_reserve defaults to None (the compressor's built-in default)
+    when omitted from the settings JSON."""
+    p = tmp_path / "ok.json"
+    p.write_text(json.dumps(
+        [{"compressor": "extractive_relevance_expanded", "budget": 100}]
+    ))
+    settings = sweep.load_settings(p)
+    assert len(settings) == 1
+    assert settings[0].expansion_reserve is None
