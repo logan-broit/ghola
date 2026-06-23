@@ -5,14 +5,23 @@ Recall pipeline is benchmarked against
 
 ## Current numbers
 
-| Metric | Value |
-|---|---|
-| **R@5** | **99.4%** |
-| R@1 | 94.0% |
-| R@10 | 99.6% |
-| MRR | 0.962 |
+| Metric | Reranker on | RRF-only | cross-encoder delta |
+|---|---|---|---|
+| **R@5** | **99.4%** | 95.2% | +4.2pp |
+| R@1 | 94.0% | 81.2% | +12.8pp |
+| R@10 | 99.6% | 96.8% | +2.8pp |
+| MRR | 0.962 | 0.873 | +0.089 |
 
-500 questions, run `2026-05-17` against the stack with
+**RRF-only** (`2026-06-23`, same stack with `TRUTHSAYER_URL` empty so
+`core.Recall` skips the cross-encoder — the production reranker-down / no-GPU
+degradation path) is the 5-tier RRF fan-out *without* rerank. It lands at
+95.2% R@5 on its own, so a GPU-less deployment is viable; the cross-encoder is
+a meaningful **rank-1-precision** upgrade (+12.8pp R@1 — it most affects
+putting the single best hit first) rather than a near-necessity at R@5. The
+reranker-on numbers are the headline; the RRF-only column quantifies what the
+GPU buys.
+
+500 questions, reranker-on run `2026-05-17` against the stack with
 `BAAI/bge-reranker-v2-m3` fp16 on 8k context (the upgrade that landed
 in commit `ca2eaec` + `593c293`; replaces the earlier
 `bge-reranker-base` baseline of R@5=97.4% / R@1=91.4% / R@10=98.2% /
