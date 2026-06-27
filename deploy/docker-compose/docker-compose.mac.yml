@@ -1,0 +1,165 @@
+# ghola stack for a Mac laptop (Apple Silicon, no CUDA, no Metal-in-Docker).
+#
+# The two accelerated services run NATIVELY on the host (Docker Desktop has no
+# Metal passthrough) and are reached from containers via host.docker.internal:
+#   - embedder : llama.cpp-server, Qwen3-Embedding-0.6B GGUF, :8082  (scripts/mac/run-embedder.sh)
+#   - reranker : truthsayer, TRUTHSAYER_DEVICE=mps, :8085            (scripts/mac/run-truthsayer.sh)
+#
+# Bring-up (after the two native services are healthy):
+#   docker compose -f docker-compose.mac.yml up -d
+#
+# This is a STANDALONE file (not an overlay on docker-compose.yml): compose
+# merges cannot remove the guild/truthsayer services or their nvidia deploy
+# blocks, so the CPU subset is defined directly here. Published ports bind to
+# 127.0.0.1 only — the daemon runs GHOLA_LOOPBACK_ONLY=false (a container can't
+# accept a host connection under loopback-only), and host-loopback binding is
+# what keeps the surface local.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memory_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-memories}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./seed.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memory_api} -d ${POSTGRES_DB:-memories}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ch-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.chapterhouse
+    image: ghola/chapterhouse:dev
+    entrypoint: ["/usr/local/bin/ch-init"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+      EMBEDDING_DIM: "1024"
+      GHOLA_EXTENSION_OPTIONAL: "true"
+    restart: "no"
+
+  chapterhouse:
+    image: ghola/chapterhouse:dev
+    restart: unless-stopped
+    depends_on:
+      ch-init:
+        condition: service_completed_successfully
+    environment:
+      ENVIRONMENT: local
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+      AUTH_PROVIDER: default
+      AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_DIMENSIONS: "1024"
+      # No /v1 suffix — the embedding client appends /v1/embeddings itself.
+      EMBEDDING_URL: http://host.docker.internal:8082
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      MENTAT_URL: http://mentat:8084
+    ports:
+      - "127.0.0.1:${CHAPTERHOUSE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  chapterhouse-worker:
+    image: ghola/chapterhouse:dev
+    entrypoint: ["/usr/local/bin/ch-worker"]
+    restart: unless-stopped
+    depends_on:
+      ch-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-memory_api}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-memories}?sslmode=disable"
+      WORKER_TICK_SECONDS: "5"
+      WORKER_BATCH_SIZE: "2000"
+
+  mentat:
+    build:
+      context: ../../mentat
+      dockerfile: Dockerfile
+    image: ghola/mentat:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      EMBEDDING_DIM: "1024"
+      MENTAT_WEIGHTS_ROOT: /weights
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-memory_api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      DATABASE_NAME: ${POSTGRES_DB:-memories}
+      DATABASE_SSL_MODE: disable
+    volumes:
+      - mentat-weights:/weights
+    ports:
+      - "127.0.0.1:${MENTAT_PORT:-8084}:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/v1/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  ghola:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.ghola
+    image: ghola/ghola:dev
+    restart: unless-stopped
+    depends_on:
+      chapterhouse:
+        condition: service_healthy
+    environment:
+      GHOLA_ADDR: 0.0.0.0:7421
+      # Container can't accept a host connection under loopback-only; the
+      # 127.0.0.1 published-port bind below is what keeps the surface local.
+      GHOLA_LOOPBACK_ONLY: "false"
+      AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
+      CHAPTERHOUSE_URL: http://chapterhouse:8080
+      CHAPTERHOUSE_REQUIRE_KEY: "false"
+      # No /v1 suffix — clients append /v1/embeddings and /v1/rerank.
+      EMBEDDING_URL: http://host.docker.internal:8082
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      TRUTHSAYER_URL: http://host.docker.internal:8085
+      RERANK_TOPK: ${RERANK_TOPK:-50}
+      RERANK_WEIGHT: ${RERANK_WEIGHT:-0.5}
+      RRF_K: ${RRF_K:-60}
+      ENCODING_INTERVAL: ${ENCODING_INTERVAL:-5m}
+    ports:
+      - "127.0.0.1:${GHOLA_PORT:-7421}:7421"
+    volumes:
+      - ghola-sessions:/root/.ghola/sessions
+
+volumes:
+  postgres-data:
+  mentat-weights:
+  ghola-sessions:
