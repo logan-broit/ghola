@@ -59,12 +59,13 @@ def parse_prompt_logprobs(resp: dict) -> list[tuple[str, float]]:
         candidates = list(entry.values())
         if not candidates:
             continue
-        chosen = next(
-            (c for c in candidates if c.get("rank") == 1),
+        chosen = next((c for c in candidates if c.get("rank") == 1), None)
+        if chosen is None:
             # Fall back to the highest-logprob candidate when no rank==1 entry
-            # is present (rank 1 is the realized token, but be defensive).
-            max(candidates, key=lambda c: c["logprob"]),
-        )
+            # is present (rank 1 is the realized token, but be defensive). Use
+            # .get so a candidate missing "logprob" can't KeyError the fallback
+            # out from under a position that had a valid rank-1 entry.
+            chosen = max(candidates, key=lambda c: c.get("logprob", float("-inf")))
         out.append((chosen["decoded_token"], float(chosen["logprob"])))
     return out
 
