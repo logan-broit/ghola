@@ -144,10 +144,10 @@ def _hp_tag(
     different leaf names — the collision that would silently overwrite results is
     structurally impossible.
 
-    Fixed order: budget(reserve), q, of, pl, om, e — the budget + reserve tags
-    are emitted by ``leaf_dir`` directly (reserve via ``_reserve_tag`` for
-    byte-compat with existing leaves); this helper covers the five new fields in
-    order ``q, of, pl, om, e``.
+    Fixed order: budget, reserve, q, of, pl, om, e — the budget tag is emitted
+    by ``leaf_dir`` directly; this helper emits the reserve tag (via
+    ``_reserve_tag``, for byte-compat with existing leaves) plus the five new
+    fields in order ``q, of, pl, om, e``.
     """
     parts: list[str] = []
     if expansion_reserve is not None:

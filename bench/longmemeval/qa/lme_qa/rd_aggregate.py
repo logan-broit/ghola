@@ -97,6 +97,23 @@ def _leaf_setting_from_sidecar(path: Path) -> _LeafSetting | None:
     )
 
 
+# Stage-B leaf-name tags (see sweep._hp_tag). A dir name carrying any of these
+# is a Stage-B setting: if it ALSO lacks a setting.json sidecar AND fails the
+# legacy dir-name parse, dropping it would lose a real measurement silently —
+# so ``aggregate`` warns in that case (``_has_stage_b_tag`` gates the warning).
+_STAGE_B_TAGS = ("__q", "__of", "__pl", "__om", "__e")
+
+
+def _has_stage_b_tag(name: str) -> bool:
+    """True if ``name`` carries any Stage-B hyperparameter tag.
+
+    Substring check over the full ``__q``/``__of``/``__pl``/``__om``/``__e``
+    tags. ``__om``/``__of`` both begin ``__o`` but the two/three-char tags are
+    distinct substrings, so the check does not confuse them.
+    """
+    return any(tag in name for tag in _STAGE_B_TAGS)
+
+
 def _parse_setting_dir(name: str) -> _LeafSetting | None:
     """Recover ``(compressor, budget, expansion_reserve)`` from a leaf dir name.
 
@@ -107,6 +124,11 @@ def _parse_setting_dir(name: str) -> _LeafSetting | None:
     tag (e.g. ``extractive_relevance_expanded__b1000__r0.3``). Returns ``None``
     for a name that does not match the pattern (a stray directory under outdir
     is ignored, not crashed on).
+
+    Stage-B fields (``query_mode``/``output_form``/``prune_level``/
+    ``oracle_model``/``edge_metric``) are recovered ONLY via the ``setting.json``
+    sidecar (``_leaf_setting_from_sidecar``); this parser stays reserve-only for
+    legacy leaves and never reconstructs those fields from the name.
     """
     sep = "__b"
     cut = name.rfind(sep)
@@ -247,6 +269,19 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
             else _parse_setting_dir(setting_dir.name)
         )
         if setting is None:
+            # A non-setting dir under outdir is legitimately ignored. But a
+            # Stage-B leaf name (carries a __q/__of/__pl/__om/__e tag) with NO
+            # sidecar that also fails the legacy parse is a real measurement
+            # vanishing without a trace — warn (mirrors the context_tokens
+            # fallback warning in _rate_by_qid) but keep the existing skip.
+            if not sidecar.exists() and _has_stage_b_tag(setting_dir.name):
+                print(
+                    f"warning: {setting_dir.name}: Stage-B leaf has no "
+                    f"setting.json sidecar and its dir name does not parse — "
+                    f"dropping it from the curve. Re-run the sweep to write the "
+                    f"sidecar so this setting is aggregated.",
+                    file=sys.stderr,
+                )
             continue
         for sample_dir in sorted(p for p in setting_dir.iterdir() if p.is_dir()):
             answers = sample_dir / "answers.jsonl"

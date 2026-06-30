@@ -424,6 +424,44 @@ def test_aggregate_legacy_leaf_without_sidecar_still_parses(tmp_path):
     assert r["output_form"] is None
 
 
+def test_sidecarless_stage_b_leaf_warns_and_is_dropped(tmp_path, capsys):
+    """A Stage-B leaf name (carries a __q tag) with NO setting.json sidecar that
+    also fails the legacy dir-name parse must WARN (naming the dir) and be
+    dropped — not vanish silently. A legacy leaf that parses fine must NOT warn.
+    """
+    # Stage-B leaf: __qaware tag, no sidecar. The dir name does not match the
+    # legacy <compressor>__b<budget> pattern (no __b), so _parse_setting_dir
+    # returns None — exactly the silent-drop path the warning guards.
+    leaf = tmp_path / "statistical_prune__b1000__qaware" / "s0"
+    leaf.mkdir(parents=True)
+    (leaf / "answers.jsonl").write_text(
+        json.dumps({
+            "question_id": "q1", "context_tokens": 800, "rate_tokenizer": "cl100k",
+            "status": "succeeded", "usage": {"input_tokens": 3279, "output_tokens": 1},
+        }) + "\n"
+    )
+    (leaf / "judgments.jsonl").write_text(
+        json.dumps({"question_id": "q1", "label": True, "status": "succeeded"}) + "\n"
+    )
+    # A legacy leaf alongside it that parses cleanly (no Stage-B tag) — must not
+    # warn and must still be counted.
+    _write_leaf(tmp_path, "extractive_relevance", 1000,
+                0, [("q1", 900, True), ("q2", 920, True)])
+
+    rows = rd_aggregate.aggregate(tmp_path)
+    err = capsys.readouterr().err
+
+    # The Stage-B leaf warned, naming the directory, and is not counted.
+    assert "statistical_prune__b1000__qaware" in err
+    assert all(r["compressor"] != "statistical_prune" for r in rows)
+    # The legacy leaf parsed fine, did NOT warn, and IS counted.
+    assert "extractive_relevance__b1000" not in err
+    assert any(
+        r["compressor"] == "extractive_relevance" and r["budget"] == 1000
+        for r in rows
+    )
+
+
 def test_render_markdown_has_query_mode_and_output_form_columns(tmp_path):
     _write_sidecar_leaf(
         tmp_path,
