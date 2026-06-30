@@ -209,6 +209,60 @@ def _select_rate_tokenizer(choice: str) -> Tokenizer:
 # --- reader -----------------------------------------------------------------
 
 
+def build_compress_kwargs(args: Any) -> dict[str, Any]:
+    """Per-compressor keyword arguments for ``compress.compress(...)``.
+
+    A pure mapping from the parsed reader args to the kwargs the SELECTED
+    compressor accepts. Each branch passes ONLY the kwargs its compressor's
+    signature accepts — a kwarg is never leaked to a compressor that would
+    reject it (``full`` / ``truncate_tokens`` / ``topk_sessions`` /
+    ``lexical_relevance`` take none). Stateful/expensive collaborators (the
+    relevance scorer, the oracle LM client, the distiller) are CONSTRUCTED HERE,
+    once, so the reader reuses a single instance across every question rather
+    than rebuilding it per call.
+
+    Factored out of ``run_main`` so the exact key set per compressor is unit-
+    testable without running the reader (no live model, no claude).
+    """
+    kwargs: dict[str, Any] = {}
+    if args.compressor == "extractive_relevance":
+        from .scorer import make_scorer
+
+        kwargs["scorer"] = make_scorer(args.scorer)
+    elif args.compressor == "extractive_relevance_expanded":
+        from .scorer import make_scorer
+
+        kwargs["scorer"] = make_scorer(args.scorer)
+        if args.expansion_reserve is not None:
+            kwargs["expansion_reserve"] = args.expansion_reserve
+    elif args.compressor == "statistical_prune":
+        kwargs["query_mode"] = args.query_mode
+    elif args.compressor == "graph_community":
+        kwargs["query_mode"] = args.query_mode
+        kwargs["edge_metric"] = args.edge_metric
+    elif args.compressor == "perplexity_prune":
+        from . import local_lm
+
+        # Construct the oracle client ONCE (reused across questions, like the
+        # scorer). An explicit --oracle-model overrides the client's default;
+        # otherwise the LocalLMClient default (env/built-in) stands.
+        if args.oracle_model:
+            kwargs["lm_client"] = local_lm.LocalLMClient(model=args.oracle_model)
+        else:
+            kwargs["lm_client"] = local_lm.LocalLMClient()
+        kwargs["query_mode"] = args.query_mode
+    elif args.compressor == "llm_distill":
+        from . import distill
+
+        # Construct the distiller ONCE (its disk cache + claude runtime are
+        # reused across questions).
+        kwargs["distiller"] = distill.Distiller()
+        kwargs["output_form"] = args.output_form
+        kwargs["query_mode"] = args.query_mode
+    # full / truncate_tokens / topk_sessions / lexical_relevance: no extra kwargs.
+    return kwargs
+
+
 def run_main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="lme-qa-run",
@@ -253,6 +307,46 @@ def run_main(argv: list[str] | None = None) -> int:
         choices=sorted(scorer_mod._SCORERS),
         help="relevance scorer for the extractive_relevance compressor "
         "(truthsayer | guild; default truthsayer). Ignored by other compressors.",
+    )
+    ap.add_argument(
+        "--query-mode",
+        choices=("agnostic", "aware"),
+        default="agnostic",
+        help="query conditioning for the Stage B compressors (statistical_prune, "
+        "graph_community, perplexity_prune, llm_distill): 'agnostic' (default) "
+        "compresses on the context's own merits — the HEADLINE mode mirroring "
+        "ghola's semantic tier (distills at consolidation with no query in hand); "
+        "'aware' folds the question in. Ignored by other compressors.",
+    )
+    ap.add_argument(
+        "--output-form",
+        choices=("prose", "structured"),
+        default="prose",
+        help="llm_distill output form: 'prose' (default; a compressed summary) "
+        "or 'structured' (atomic facts as a bullet list). Ignored by other "
+        "compressors.",
+    )
+    ap.add_argument(
+        "--prune-level",
+        choices=("turn", "sentence", "token"),
+        default=None,
+        help="reserved for a future prune-granularity variant; accepted + "
+        "swept but no compressor consumes it yet. Ignored by all compressors.",
+    )
+    ap.add_argument(
+        "--oracle-model",
+        type=str,
+        default=None,
+        help="perplexity_prune oracle model name (vLLM /v1/completions model). "
+        "Default: the LocalLMClient's built-in default (ORACLE_MODEL env or "
+        "Qwen2.5-1.5B-Instruct). Ignored by other compressors.",
+    )
+    ap.add_argument(
+        "--edge-metric",
+        choices=("jaccard", "tfidf", "bm25"),
+        default="jaccard",
+        help="graph_community edge metric (default jaccard). Ignored by other "
+        "compressors.",
     )
     ap.add_argument(
         "--rate-tokenizer",
@@ -319,17 +413,11 @@ def run_main(argv: list[str] | None = None) -> int:
     # live stack) and inject so it is reused across questions rather than
     # reconstructed per call.
     tokenizer = _select_rate_tokenizer(args.rate_tokenizer)
-    compress_kwargs: dict[str, Any] = {}
-    if args.compressor == "extractive_relevance":
-        from .scorer import make_scorer
-
-        compress_kwargs["scorer"] = make_scorer(args.scorer)
-    elif args.compressor == "extractive_relevance_expanded":
-        from .scorer import make_scorer
-
-        compress_kwargs["scorer"] = make_scorer(args.scorer)
-        if args.expansion_reserve is not None:
-            compress_kwargs["expansion_reserve"] = args.expansion_reserve
+    # Per-compressor kwargs: built ONCE here and reused across every question
+    # (the scorer/oracle-client/distiller are stateful + expensive, so they are
+    # constructed once, not per call). The builder is a pure function so the
+    # exact per-compressor key set can be unit-tested without running the reader.
+    compress_kwargs = build_compress_kwargs(args)
 
     # Build the (qid, system, user_text) per question ONCE. The system + user
     # split is identical for both backends (prompts.READER_SYSTEM + the rendered
