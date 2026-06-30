@@ -53,11 +53,65 @@ _Z95 = 1.96
 
 @dataclass(frozen=True)
 class _LeafSetting:
-    """A setting recovered from a leaf directory name."""
+    """A setting recovered from a leaf's ``setting.json`` sidecar (preferred) or,
+    for a legacy leaf without one, from the directory name.
+
+    Frozen + hashable so ``aggregate`` can group sample rows by the FULL setting
+    — two settings differing in any field are distinct keys, so their results
+    never merge."""
 
     compressor: str
     budget: int | None
     expansion_reserve: float | None = None
+    query_mode: str | None = None
+    output_form: str | None = None
+    prune_level: str | None = None
+    oracle_model: str | None = None
+    edge_metric: str | None = None
+
+
+def _leaf_setting_from_sidecar(path: Path) -> _LeafSetting | None:
+    """Build a ``_LeafSetting`` from a ``setting.json`` sidecar.
+
+    The sidecar is the source of truth (``dataclasses.asdict`` of the sweep's
+    ``Setting``): it carries every field losslessly, including values the dir
+    name encodes lossily (a sanitized oracle model). Returns ``None`` on a
+    malformed/unreadable sidecar or one missing ``compressor`` so the caller can
+    fall back to the dir-name parse rather than crash on a stray file.
+    """
+    try:
+        obj = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict) or "compressor" not in obj:
+        return None
+    return _LeafSetting(
+        compressor=obj["compressor"],
+        budget=obj.get("budget"),
+        expansion_reserve=obj.get("expansion_reserve"),
+        query_mode=obj.get("query_mode"),
+        output_form=obj.get("output_form"),
+        prune_level=obj.get("prune_level"),
+        oracle_model=obj.get("oracle_model"),
+        edge_metric=obj.get("edge_metric"),
+    )
+
+
+# Stage-B leaf-name tags (see sweep._hp_tag). A dir name carrying any of these
+# is a Stage-B setting: if it ALSO lacks a setting.json sidecar AND fails the
+# legacy dir-name parse, dropping it would lose a real measurement silently —
+# so ``aggregate`` warns in that case (``_has_stage_b_tag`` gates the warning).
+_STAGE_B_TAGS = ("__q", "__of", "__pl", "__om", "__e")
+
+
+def _has_stage_b_tag(name: str) -> bool:
+    """True if ``name`` carries any Stage-B hyperparameter tag.
+
+    Substring check over the full ``__q``/``__of``/``__pl``/``__om``/``__e``
+    tags. ``__om``/``__of`` both begin ``__o`` but the two/three-char tags are
+    distinct substrings, so the check does not confuse them.
+    """
+    return any(tag in name for tag in _STAGE_B_TAGS)
 
 
 def _parse_setting_dir(name: str) -> _LeafSetting | None:
@@ -70,6 +124,11 @@ def _parse_setting_dir(name: str) -> _LeafSetting | None:
     tag (e.g. ``extractive_relevance_expanded__b1000__r0.3``). Returns ``None``
     for a name that does not match the pattern (a stray directory under outdir
     is ignored, not crashed on).
+
+    Stage-B fields (``query_mode``/``output_form``/``prune_level``/
+    ``oracle_model``/``edge_metric``) are recovered ONLY via the ``setting.json``
+    sidecar (``_leaf_setting_from_sidecar``); this parser stays reserve-only for
+    legacy leaves and never reconstructs those fields from the name.
     """
     sep = "__b"
     cut = name.rfind(sep)
@@ -200,8 +259,29 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
     order: list[_LeafSetting] = []
 
     for setting_dir in sorted(p for p in outdir.iterdir() if p.is_dir()):
-        setting = _parse_setting_dir(setting_dir.name)
+        # Prefer the per-setting sidecar (the source of truth: every field,
+        # losslessly) — fall back to the dir-name parse for legacy leaves written
+        # before the sidecar existed (new fields stay None there).
+        sidecar = setting_dir / "setting.json"
+        setting = (
+            _leaf_setting_from_sidecar(sidecar)
+            if sidecar.exists()
+            else _parse_setting_dir(setting_dir.name)
+        )
         if setting is None:
+            # A non-setting dir under outdir is legitimately ignored. But a
+            # Stage-B leaf name (carries a __q/__of/__pl/__om/__e tag) with NO
+            # sidecar that also fails the legacy parse is a real measurement
+            # vanishing without a trace — warn (mirrors the context_tokens
+            # fallback warning in _rate_by_qid) but keep the existing skip.
+            if not sidecar.exists() and _has_stage_b_tag(setting_dir.name):
+                print(
+                    f"warning: {setting_dir.name}: Stage-B leaf has no "
+                    f"setting.json sidecar and its dir name does not parse — "
+                    f"dropping it from the curve. Re-run the sweep to write the "
+                    f"sidecar so this setting is aggregated.",
+                    file=sys.stderr,
+                )
             continue
         for sample_dir in sorted(p for p in setting_dir.iterdir() if p.is_dir()):
             answers = sample_dir / "answers.jsonl"
@@ -240,6 +320,11 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
                 "compressor": setting.compressor,
                 "budget": setting.budget,
                 "expansion_reserve": setting.expansion_reserve,
+                "query_mode": setting.query_mode,
+                "output_form": setting.output_form,
+                "prune_level": setting.prune_level,
+                "oracle_model": setting.oracle_model,
+                "edge_metric": setting.edge_metric,
                 "n": len(qmap),
                 "mean_rate": mean_rate,
                 "accuracy": accuracy,
@@ -326,18 +411,26 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     )
     lines.append("")
     lines.append(
-        "| compressor | budget | reserve | N | mean_rate | rate_ci | accuracy | distortion | acc_ci |"
+        "| compressor | budget | reserve | query_mode | output_form | "
+        "edge_metric | oracle_model | prune_level | N | "
+        "mean_rate | rate_ci | accuracy | distortion | acc_ci |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         reserve = r.get("expansion_reserve")
         reserve_label = f"{reserve:.1f}" if reserve is not None else "—"
         lines.append(
-            "| {comp} | {budget} | {reserve} | {n} | {rate} | {rate_ci} | {acc:.1%} | "
-            "{dist:.1%} | {acc_ci} |".format(
+            "| {comp} | {budget} | {reserve} | {qmode} | {oform} | "
+            "{emetric} | {omodel} | {plevel} | {n} | "
+            "{rate} | {rate_ci} | {acc:.1%} | {dist:.1%} | {acc_ci} |".format(
                 comp=r["compressor"],
                 budget=_budget_label(r["budget"]),
                 reserve=reserve_label,
+                qmode=r.get("query_mode") or "—",
+                oform=r.get("output_form") or "—",
+                emetric=r.get("edge_metric") or "—",
+                omodel=r.get("oracle_model") or "—",
+                plevel=r.get("prune_level") or "—",
                 n=r["n"],
                 rate=_fmt_num(r["mean_rate"]),
                 rate_ci=_fmt_num(r["rate_ci"]),
@@ -354,8 +447,26 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _series_key(r: dict[str, Any]) -> str:
+    """Plot series label so every distinct setting plots as its OWN line.
+
+    Starts at ``<compressor>/<query_mode|na>`` (the query-awareness premium reads
+    as the gap between the agnostic and aware series) and appends each
+    discriminating hyperparameter that is set — ``output_form`` (prose vs
+    structured), ``edge_metric``, ``oracle_model`` — so variants that differ only
+    in one of those don't silently collapse onto the same line. ``prune_level``
+    is excluded: it's a reserved no-op that doesn't change the emitted context."""
+    key = f"{r['compressor']}/{r.get('query_mode') or 'na'}"
+    for field in ("output_form", "edge_metric", "oracle_model"):
+        val = r.get(field)
+        if val:
+            key += f"/{val}"
+    return key
+
+
 def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:
-    """Best-effort PNG: accuracy (y) vs mean_rate (x), one line per compressor.
+    """Best-effort PNG: accuracy (y) vs mean_rate (x), one line per
+    ``compressor/query_mode`` series.
 
     Returns True on success, False if matplotlib is unavailable (caller prints
     the install hint). matplotlib is the optional ``[plot]`` extra — never a
@@ -371,7 +482,7 @@ def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:
 
     by_comp: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        by_comp.setdefault(r["compressor"], []).append(r)
+        by_comp.setdefault(_series_key(r), []).append(r)
 
     fig, ax = plt.subplots()
     for comp, pts in sorted(by_comp.items()):

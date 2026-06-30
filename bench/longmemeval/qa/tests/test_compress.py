@@ -581,3 +581,255 @@ def test_extractive_with_live_truthsayer_scores_real_turns():
     )
     # The cat turn is the relevant one for the cat query; it should survive.
     assert "Luna" in out
+
+
+# --- statistical_prune (IDF self-information, no model) ------------------
+
+
+def _sessions_rare_vs_filler() -> list[context.Session]:
+    """One session, two turns: a rare-token sentence and a repetitive filler.
+
+    The rare-token turn carries high IDF self-information (distinctive tokens
+    like "database", "9931"); the filler turn is all stopword-ish repetition.
+    With the corpus being just these turns, "the" appears in both docs (low
+    IDF), while the distinctive tokens appear in one doc (high IDF). The MEAN
+    self-information of the rare turn dominates the filler's, so a tight budget
+    keeps the rare turn and drops the filler."""
+    return [
+        context.Session(
+            "s1",
+            "2023/05/20 (Sat) 02:21",
+            [
+                {"role": "user", "content": "the database listens on port 9931"},
+                {"role": "assistant", "content": "the the the the"},
+            ],
+        ),
+    ]
+
+
+def test_statistical_prune_keeps_rare_drops_filler_agnostic():
+    sessions = _sessions_rare_vs_filler()
+    tok = CharRatioTokenizer(1)
+    # Budget that fits the rare-token turn + its date header but not both turns.
+    rare_only, _ = context.render_sessions(
+        [context.Session(
+            "s1", "2023/05/20 (Sat) 02:21",
+            [{"role": "user", "content": "the database listens on port 9931"}],
+        )]
+    )
+    both, _ = context.render_sessions(sessions)
+    budget = tok.count(rare_only) + 1
+    assert tok.count(rare_only) <= budget < tok.count(both)
+
+    out = compress.compress(
+        "statistical_prune",
+        sessions,
+        query="q",
+        target_tokens=budget,
+        tokenizer=tok,
+        query_mode="agnostic",
+    )
+    assert "9931" in out
+    assert "the the the the" not in out
+
+
+def test_statistical_prune_aware_mode_returns_text():
+    sessions = _sessions_rare_vs_filler()
+    tok = CharRatioTokenizer(1)
+    rare_only, _ = context.render_sessions(
+        [context.Session(
+            "s1", "2023/05/20 (Sat) 02:21",
+            [{"role": "user", "content": "the database listens on port 9931"}],
+        )]
+    )
+    budget = tok.count(rare_only) + 1
+    out = compress.compress(
+        "statistical_prune",
+        sessions,
+        query="which port does the database use",
+        target_tokens=budget,
+        tokenizer=tok,
+        query_mode="aware",
+    )
+    assert "9931" in out
+    assert "the the the the" not in out
+
+
+def test_statistical_prune_no_budget_keeps_all():
+    sessions = _sessions_rare_vs_filler()
+    tok = CharRatioTokenizer(1)
+    full_text, _ = context.render_sessions(sessions)
+    out = compress.compress(
+        "statistical_prune",
+        sessions,
+        query="q",
+        target_tokens=None,
+        tokenizer=tok,
+    )
+    assert out == full_text
+
+
+# --- lexical_relevance (BM25, no neural reranker) ------------------------
+
+
+def test_lexical_relevance_keeps_query_matching_turn():
+    """A BM25-relevant turn (shares query terms) survives a tight budget over an
+    irrelevant turn that shares no terms with the query."""
+    sessions = [
+        context.Session(
+            "s1",
+            "2023/05/20 (Sat) 02:21",
+            [
+                {"role": "user", "content": "unrelated weather chatter today"},
+                {"role": "assistant", "content": "my cat luna likes tuna"},
+            ],
+        ),
+    ]
+    tok = CharRatioTokenizer(1)
+    relevant_only, _ = context.render_sessions(
+        [context.Session(
+            "s1", "2023/05/20 (Sat) 02:21",
+            [{"role": "assistant", "content": "my cat luna likes tuna"}],
+        )]
+    )
+    both, _ = context.render_sessions(sessions)
+    budget = tok.count(relevant_only) + 1
+    assert tok.count(relevant_only) <= budget < tok.count(both)
+
+    out = compress.compress(
+        "lexical_relevance",
+        sessions,
+        query="what is my cat luna favorite food",
+        target_tokens=budget,
+        tokenizer=tok,
+    )
+    assert "luna" in out
+    assert "weather chatter" not in out
+
+
+def test_lexical_relevance_no_budget_keeps_all():
+    sessions = _sessions_with_many_turns()
+    tok = CharRatioTokenizer(4)
+    full_text, _ = context.render_sessions(sessions)
+    out = compress.compress(
+        "lexical_relevance",
+        sessions,
+        query="q",
+        target_tokens=None,
+        tokenizer=tok,
+    )
+    assert out == full_text
+
+
+# --- perplexity_prune (local-oracle surprisal, LLMLingua-style) ----------
+
+
+class _FakeLM:
+    """Deterministic injected logprob client -- NO network. Returns a very
+    negative logprob (high surprisal) for any text mentioning the rare token
+    9931, and a near-zero logprob (low surprisal) otherwise. The compressor's
+    _SurprisalScorer turns these into MEAN surprisal so the informative turn
+    out-ranks the filler."""
+
+    def token_logprobs(self, text):
+        return [("x", -8.0)] if "9931" in text else [("x", -0.1)]
+
+
+def _perplexity_budget(tok) -> int:
+    """A budget that fits the single rare turn (+ its date header) but not both
+    turns -- so the surprisal ranking actually decides which turn survives.
+    Mirrors the statistical_prune test's ``rare_only + 1`` pattern. (The task
+    spec's literal ``target_tokens=10`` is unsatisfiable: the rendered rare turn
+    alone is ~21 tokens at ratio 4.)"""
+    rare_only, _ = context.render_sessions(
+        [context.Session("s1", "2023/05/20 (Sat) 02:21",
+                         [{"role": "user", "content": "the database listens on port 9931"}])]
+    )
+    return tok.count(rare_only) + 1
+
+
+def test_perplexity_prune_keeps_surprising_turn():
+    sessions = [context.Session("s1", "2023/05/20 (Sat) 02:21", [
+        {"role": "user", "content": "the database listens on port 9931"},
+        {"role": "user", "content": "ok thanks sounds good"},
+    ])]
+    tok = CharRatioTokenizer(4)
+    out = compress.compress(
+        "perplexity_prune", sessions, query="port",
+        target_tokens=_perplexity_budget(tok), tokenizer=tok,
+        lm_client=_FakeLM(), query_mode="agnostic",
+    )
+    assert "9931" in out and "sounds good" not in out
+
+
+def test_perplexity_prune_aware_mode_returns_text():
+    sessions = [context.Session("s1", "2023/05/20 (Sat) 02:21", [
+        {"role": "user", "content": "the database listens on port 9931"},
+        {"role": "user", "content": "ok thanks sounds good"},
+    ])]
+    tok = CharRatioTokenizer(4)
+    out = compress.compress(
+        "perplexity_prune", sessions, query="which port",
+        target_tokens=_perplexity_budget(tok), tokenizer=tok,
+        lm_client=_FakeLM(), query_mode="aware",
+    )
+    assert "9931" in out and "sounds good" not in out
+
+
+def test_perplexity_prune_no_budget_keeps_all():
+    sessions = [context.Session("s1", "2023/05/20 (Sat) 02:21", [
+        {"role": "user", "content": "the database listens on port 9931"},
+        {"role": "user", "content": "ok thanks sounds good"},
+    ])]
+    tok = CharRatioTokenizer(4)
+    full_text, _ = context.render_sessions(sessions)
+    out = compress.compress(
+        "perplexity_prune", sessions, query="q",
+        target_tokens=None, tokenizer=tok, lm_client=_FakeLM(),
+    )
+    # No budget -> render all; the fake client is never consulted.
+    assert out == full_text
+
+
+# --- llm_distill (claude distiller, prose|structured, cached) ------------
+
+
+class _FakeDistiller:
+    """Injected distiller with the ``.distill(...)`` shape the compressor calls.
+    Records that it was called and echoes the output form so the test can assert
+    the compressor forwarded the args and returned the distiller's text verbatim
+    (no truncation)."""
+
+    def __init__(self) -> None:
+        self.called = False
+
+    def distill(self, text, *, query, query_mode, output_form, budget):
+        self.called = True
+        return "DISTILLED:" + output_form
+
+
+def test_llm_distill_returns_distilled_text():
+    out = compress.compress(
+        "llm_distill",
+        _sessions(),
+        query="q",
+        target_tokens=50,
+        tokenizer=CharRatioTokenizer(4),
+        distiller=_FakeDistiller(),
+        output_form="structured",
+    )
+    assert out == "DISTILLED:structured"
+
+
+def test_llm_distill_full_when_no_budget():
+    fake = _FakeDistiller()
+    out = compress.compress(
+        "llm_distill",
+        _sessions(),
+        query="q",
+        target_tokens=None,
+        tokenizer=None,
+        distiller=fake,
+    )
+    assert "alpha" in out  # rendered all
+    assert not fake.called  # distiller not consulted on the no-budget early-out

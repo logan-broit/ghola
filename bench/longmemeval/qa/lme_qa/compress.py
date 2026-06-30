@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from . import context
+from . import context, stats
 from .tokenize import Tokenizer
 
 
@@ -293,6 +293,258 @@ def _extractive_relevance_expanded(
     return text
 
 
+class _SelfInfoScorer:
+    """Scorer with the ``scorer(query, items) -> {id: float}`` shape that ranks
+    items by IDF self-information -- the "surprise" of their tokens against the
+    item corpus -- with no model and no network.
+
+    Per-item score is the MEAN self-information of its tokens (summed IDF divided
+    by token count), so a long turn does not out-score a short distinctive one
+    merely by accumulating more tokens. ``query_mode="aware"`` adds the item's
+    BM25 relevance to the query on top of the surprise signal; ``"agnostic"``
+    (the default) ignores the query entirely.
+    """
+
+    def __init__(self, query_mode: str = "agnostic") -> None:
+        self.query_mode = query_mode
+        self._bm25 = stats.BM25Scorer() if query_mode == "aware" else None
+
+    def __call__(
+        self, query: str, items: list[tuple[str, str]]
+    ) -> dict[str, float]:
+        if not items:
+            return {}
+        idf = stats.idf_map([text for _, text in items])
+        bm25 = self._bm25(query, items) if self._bm25 is not None else {}
+        out: dict[str, float] = {}
+        for sid, text in items:
+            n_tokens = len(stats.tokenize_words(text))
+            mean_info = stats.self_information(text, idf) / max(1, n_tokens)
+            out[sid] = mean_info + bm25.get(sid, 0.0)
+        return out
+
+
+def _statistical_prune(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    query_mode: str = "agnostic",
+) -> str:
+    """Keep the highest-surprise turns within the budget -- IDF self-information
+    pruning with no model.
+
+    The free, no-model cousin of ``extractive_relevance``: same greedy-select +
+    chronological-regroup core, but the scorer is ``_SelfInfoScorer`` (mean IDF
+    surprise, optionally plus BM25 query relevance) instead of a neural reranker.
+    ``query_mode="agnostic"`` ranks purely by token rarity; ``"aware"`` folds in
+    BM25 relevance to the query.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    kept = _score_and_greedy_select(
+        sessions, query, target_tokens, tokenizer, _SelfInfoScorer(query_mode)
+    )
+    if not kept:
+        return ""
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
+class _SurprisalScorer:
+    """Scorer with the ``scorer(query, items) -> {id: float}`` shape that ranks
+    items by LM surprisal -- the local-oracle twin of ``_SelfInfoScorer``.
+
+    Per-item score is the MEAN surprisal (negative mean logprob) of the item's
+    tokens under a small local LM, so a long turn does not out-score a short
+    distinctive one merely by accumulating more tokens. Higher surprisal = more
+    informative = kept first by the greedy core.
+
+    ``query_mode="aware"`` prepends the query to the scored text so the
+    surprisal is conditioned on it; ``"agnostic"`` (the default) scores the turn
+    alone. NOTE the aware-mode approximation: prepending the query conditions the
+    later tokens' surprisal on it, but we average over ALL returned tokens
+    (including the query prefix's own tokens), so the score is diluted by the
+    prefix -- a v1 approximation, not a clean conditional surprisal of the turn
+    given the query.
+    """
+
+    def __init__(self, lm_client, query_mode: str = "agnostic") -> None:
+        self.lm_client = lm_client
+        self.query_mode = query_mode
+
+    def __call__(
+        self, query: str, items: list[tuple[str, str]]
+    ) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for sid, text in items:
+            scored = f"{query}\n{text}" if self.query_mode == "aware" else text
+            lp = self.lm_client.token_logprobs(scored)
+            if not lp:
+                out[sid] = 0.0
+                continue
+            # Mean surprisal = -mean(logprob). Logprobs are <= 0, so this is
+            # >= 0; a more surprising (rarer) turn has more-negative logprobs
+            # and thus a HIGHER score -> the greedy core keeps it first.
+            out[sid] = -sum(logprob for _, logprob in lp) / len(lp)
+        return out
+
+
+def _perplexity_prune(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    lm_client=None,
+    query_mode: str = "agnostic",
+) -> str:
+    """Keep the highest-surprisal turns within the budget -- LM-oracle pruning
+    (LLMLingua-style), the small-local-model cousin of ``statistical_prune``.
+
+    Same greedy-select + chronological-regroup core as ``extractive_relevance``
+    and ``statistical_prune``, but the scorer is ``_SurprisalScorer``: it scores
+    each turn by its MEAN token surprisal under a small local LM (vLLM
+    ``prompt_logprobs``) rather than free IDF self-information. The sweep can
+    then compare "does the LM oracle beat free IDF?". ``query_mode="agnostic"``
+    scores each turn alone; ``"aware"`` prepends the query (see
+    ``_SurprisalScorer`` for the v1 averaging approximation).
+
+    ``lm_client`` is injected for tests; when ``None`` it is lazy-constructed
+    (``local_lm.LocalLMClient()``) inside this function so importing
+    ``compress.py`` never needs a live server.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    if lm_client is None:
+        # Deferred import + lazy construct: keep compress.py importable without
+        # a running oracle, and let tests inject a deterministic fake.
+        from . import local_lm
+
+        lm_client = local_lm.LocalLMClient()
+
+    kept = _score_and_greedy_select(
+        sessions,
+        query,
+        target_tokens,
+        tokenizer,
+        _SurprisalScorer(lm_client, query_mode),
+    )
+    if not kept:
+        return ""
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
+def _lexical_relevance(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    **_: object,
+) -> str:
+    """Keep the turns most BM25-relevant to the query within the budget -- the
+    no-reranker twin of ``extractive_relevance``.
+
+    Same greedy-select + chronological-regroup core, but the scorer is
+    ``stats.BM25Scorer()`` (Okapi BM25 over the turn corpus) instead of a neural
+    reranker. Query-aware by nature: a turn scores zero if it shares no terms
+    with the query, so a tight budget keeps the term-overlapping turns.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    kept = _score_and_greedy_select(
+        sessions, query, target_tokens, tokenizer, stats.BM25Scorer()
+    )
+    if not kept:
+        return ""
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
+def _llm_distill(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    distiller=None,
+    output_form: str = "prose",
+    query_mode: str = "agnostic",
+) -> str:
+    """Distill the rendered sessions to the budget via a claude ``-p`` call.
+
+    The most expensive compressor: one claude call per question (so the distiller
+    disk-caches its outputs — a re-run after a usage-window stop is free). It
+    renders the selected sessions to the canonical reader text, then hands that
+    to a ``distill.Distiller`` which asks claude to compress it to
+    ``target_tokens``. There is NO hard truncation here — the budget is the
+    distiller's instruction, and the plotted rate is the reader's real token
+    count (the budget is approximate by design, like every compressor).
+
+    ``output_form`` ("prose" | "structured") and ``query_mode`` ("agnostic" |
+    "aware") are the two distiller knobs the sweep varies. ``distiller`` is
+    injected for tests; when ``None`` a real ``distill.Distiller()`` is
+    lazy-constructed inside this function (deferred import) so ``compress.py``
+    imports without pulling in the claude runtime.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    text, _ = context.render_sessions(sessions)
+
+    if distiller is None:
+        # Deferred import + lazy construct: keep compress.py importable without
+        # cc.py's claude runtime, and let tests inject a fake distiller.
+        from . import distill
+
+        distiller = distill.Distiller()
+
+    return distiller.distill(
+        text,
+        query=query,
+        query_mode=query_mode,
+        output_form=output_form,
+        budget=target_tokens,
+    )
+
+
+def _graph_community(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    **kwargs: object,
+) -> str:
+    """Thin wrapper delegating to ``graph_compress.graph_community``.
+
+    The lazy import keeps ``compress.py`` importable without the optional
+    ``[graph]`` extra (igraph/leidenalg): only this call path -- reached when the
+    ``graph_community`` compressor actually runs -- can need them, and even then
+    the pure ``build_graph`` / ``compress_with_partition`` helpers don't (only
+    ``leiden_partition`` does, and it raises a clear error when they're absent).
+    """
+    from . import graph_compress
+
+    return graph_compress.graph_community(
+        sessions,
+        query=query,
+        target_tokens=target_tokens,
+        tokenizer=tokenizer,
+        **kwargs,
+    )
+
+
 # name -> compressor. compress() dispatches here; KeyError on unknown name.
 REGISTRY: dict[str, Callable[..., str]] = {
     "full": _full,
@@ -300,6 +552,11 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "topk_sessions": _topk_sessions,
     "extractive_relevance": _extractive_relevance,
     "extractive_relevance_expanded": _extractive_relevance_expanded,
+    "statistical_prune": _statistical_prune,
+    "perplexity_prune": _perplexity_prune,
+    "lexical_relevance": _lexical_relevance,
+    "llm_distill": _llm_distill,
+    "graph_community": _graph_community,
 }
 
 

@@ -274,6 +274,133 @@ def test_context_tokens_varies_full_vs_truncate_same_question(
     assert full_ct != trunc_ct        # the real rate axis: varies
 
 
+# --- Stage B: compress_kwargs builder (pure function) ------------------------
+
+
+import argparse
+
+from lme_qa import distill, local_lm
+
+
+def _args(**overrides):
+    """A minimal args namespace with the Stage B defaults the argparse layer
+    sets, overridable per test."""
+    base = dict(
+        compressor="full",
+        scorer="truthsayer",
+        expansion_reserve=None,
+        query_mode="agnostic",
+        output_form="prose",
+        prune_level=None,
+        oracle_model=None,
+        edge_metric="jaccard",
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_build_compress_kwargs_full_is_empty():
+    # full / truncate_tokens / topk_sessions take no extra kwargs.
+    assert cli.build_compress_kwargs(_args(compressor="full")) == {}
+    assert cli.build_compress_kwargs(_args(compressor="truncate_tokens")) == {}
+    assert cli.build_compress_kwargs(_args(compressor="topk_sessions")) == {}
+
+
+def test_build_compress_kwargs_extractive_relevance_has_scorer_only():
+    kw = cli.build_compress_kwargs(_args(compressor="extractive_relevance"))
+    assert set(kw) == {"scorer"}
+
+
+def test_build_compress_kwargs_extractive_expanded_has_scorer_and_reserve():
+    kw = cli.build_compress_kwargs(
+        _args(compressor="extractive_relevance_expanded", expansion_reserve=0.4)
+    )
+    assert set(kw) == {"scorer", "expansion_reserve"}
+    assert kw["expansion_reserve"] == 0.4
+    # reserve None -> not passed (compressor default stands).
+    kw2 = cli.build_compress_kwargs(
+        _args(compressor="extractive_relevance_expanded", expansion_reserve=None)
+    )
+    assert set(kw2) == {"scorer"}
+
+
+def test_build_compress_kwargs_statistical_prune_query_mode_only():
+    kw = cli.build_compress_kwargs(
+        _args(compressor="statistical_prune", query_mode="aware")
+    )
+    assert kw == {"query_mode": "aware"}
+
+
+def test_build_compress_kwargs_lexical_relevance_is_empty():
+    assert cli.build_compress_kwargs(_args(compressor="lexical_relevance")) == {}
+
+
+def test_build_compress_kwargs_graph_community_query_mode_and_edge_metric():
+    kw = cli.build_compress_kwargs(
+        _args(compressor="graph_community", query_mode="agnostic", edge_metric="jaccard")
+    )
+    assert kw == {"query_mode": "agnostic", "edge_metric": "jaccard"}
+
+
+def test_build_compress_kwargs_perplexity_prune_builds_lm_client():
+    kw = cli.build_compress_kwargs(
+        _args(
+            compressor="perplexity_prune",
+            query_mode="agnostic",
+            oracle_model="Qwen/Qwen2.5-1.5B-Instruct",
+        )
+    )
+    assert set(kw) == {"lm_client", "query_mode"}
+    assert isinstance(kw["lm_client"], local_lm.LocalLMClient)
+    # The oracle model flows into the client.
+    assert kw["lm_client"].model == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert kw["query_mode"] == "agnostic"
+
+
+def test_build_compress_kwargs_perplexity_prune_default_oracle_model():
+    # oracle_model None -> the client's built-in default model is used.
+    kw = cli.build_compress_kwargs(
+        _args(compressor="perplexity_prune", oracle_model=None)
+    )
+    assert isinstance(kw["lm_client"], local_lm.LocalLMClient)
+    assert kw["lm_client"].model == local_lm.DEFAULT_ORACLE_MODEL
+
+
+def test_build_compress_kwargs_llm_distill_builds_distiller():
+    kw = cli.build_compress_kwargs(
+        _args(compressor="llm_distill", output_form="structured", query_mode="aware")
+    )
+    assert set(kw) == {"distiller", "output_form", "query_mode"}
+    assert isinstance(kw["distiller"], distill.Distiller)
+    assert kw["output_form"] == "structured"
+    assert kw["query_mode"] == "aware"
+
+
+def test_run_main_parses_stage_b_flags(
+    monkeypatch, dataset_file, run_file, tmp_path
+):
+    # The new flags parse + the run completes through the fake binary. Use
+    # statistical_prune (no live oracle / no claude needed) with query_mode.
+    _use_fake(monkeypatch, tmp_path, {"answer": "an answer"})
+    answers = tmp_path / "answers.jsonl"
+    rc = cli.run_main(
+        [
+            "--dataset", str(dataset_file),
+            "--run", str(run_file),
+            "--out", str(answers),
+            "--compressor", "statistical_prune",
+            "--budget", "50",
+            "--query-mode", "aware",
+            "--rate-tokenizer", "char",
+            "--backend", "claude-code",
+            "--parallel", "1",
+        ]
+    )
+    assert rc == 0
+    rows = _rows(answers)
+    assert all(r["compressor"] == "statistical_prune" for r in rows)
+
+
 def test_reader_rate_tokenizer_auto_default(
     monkeypatch, dataset_file, run_file, tmp_path
 ):

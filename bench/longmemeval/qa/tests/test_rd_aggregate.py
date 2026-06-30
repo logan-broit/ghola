@@ -296,3 +296,229 @@ def test_aggregate_carries_expansion_reserve_to_row(tmp_path):
     # The __r0.5 leaf carries the reserve.
     r05_row = next(r for r in rows if r.get("expansion_reserve") == 0.5)
     assert r05_row["budget"] == 500
+
+
+# --- Stage B: setting.json sidecar is the aggregation source of truth --------
+
+
+def _write_sidecar_leaf(
+    outdir: Path,
+    dir_name: str,
+    setting: dict,
+    sample: int,
+    rows: list[tuple[str, int, bool]],
+) -> None:
+    """Write a setting dir with a setting.json sidecar + one sample leaf
+    (answers + judgments). ``dir_name`` is the leaf SETTING dir component;
+    ``setting`` is the full Setting dict the sidecar holds."""
+    setting_dir = outdir / dir_name
+    setting_dir.mkdir(parents=True, exist_ok=True)
+    (setting_dir / "setting.json").write_text(json.dumps(setting))
+    leaf = setting_dir / f"s{sample}"
+    leaf.mkdir(parents=True, exist_ok=True)
+    with (leaf / "answers.jsonl").open("w") as fh:
+        for qid, rate, _label in rows:
+            fh.write(json.dumps({
+                "question_id": qid, "context_tokens": rate,
+                "rate_tokenizer": "cl100k", "status": "succeeded",
+                "usage": {"input_tokens": 3279, "output_tokens": 1},
+            }) + "\n")
+    with (leaf / "judgments.jsonl").open("w") as fh:
+        for qid, _rate, label in rows:
+            fh.write(json.dumps({
+                "question_id": qid, "label": label, "status": "succeeded",
+            }) + "\n")
+
+
+def test_aggregate_reads_sidecar_and_surfaces_query_mode_output_form(tmp_path):
+    """When a setting.json sidecar exists, aggregate reads ALL fields from it
+    (including query_mode/output_form) and surfaces them on the curve row."""
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qagnostic__ofstructured",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": "structured", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 800, True), ("q2", 820, False)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["compressor"] == "llm_distill"
+    assert r["budget"] == 1000
+    assert r["query_mode"] == "agnostic"
+    assert r["output_form"] == "structured"
+    assert r["mean_rate"] == 810
+    assert r["accuracy"] == 0.5
+
+
+def test_aggregate_groups_distinct_settings_from_sidecars(tmp_path):
+    """Two settings differing only in output_form (distinct sidecars + dirs)
+    aggregate as TWO rows — they never collapse together."""
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qagnostic__ofprose",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": "prose", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 500, True), ("q2", 520, True)],
+    )
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qagnostic__ofstructured",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": "structured", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 700, True), ("q2", 720, False)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 2
+    forms = {r["output_form"] for r in rows}
+    assert forms == {"prose", "structured"}
+
+
+def test_aggregate_sidecar_oracle_model_survives_sanitized_dir(tmp_path):
+    """The sidecar carries the UNsanitized oracle_model even though the dir name
+    sanitized the ``/`` — proving the sidecar (not the dir name) is the truth."""
+    _write_sidecar_leaf(
+        tmp_path,
+        "perplexity_prune__b500__qagnostic__omQwen_Qwen2.5-1.5B-Instruct",
+        {
+            "compressor": "perplexity_prune", "budget": 500,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": None, "prune_level": None,
+            "oracle_model": "Qwen/Qwen2.5-1.5B-Instruct", "edge_metric": None,
+        },
+        0,
+        [("q1", 400, True)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["oracle_model"] == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_aggregate_legacy_leaf_without_sidecar_still_parses(tmp_path):
+    """Back-compat: a legacy leaf (no setting.json) still aggregates via the
+    dir-name parse, with the new fields left None."""
+    # _write_leaf does NOT write a sidecar — the legacy path.
+    _write_leaf(tmp_path, "extractive_relevance", 500, 0,
+                [("q1", 480, True), ("q2", 500, True)])
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["compressor"] == "extractive_relevance"
+    assert r["budget"] == 500
+    assert r["query_mode"] is None
+    assert r["output_form"] is None
+
+
+def test_sidecarless_stage_b_leaf_warns_and_is_dropped(tmp_path, capsys):
+    """A Stage-B leaf name (carries a __q tag) with NO setting.json sidecar that
+    also fails the legacy dir-name parse must WARN (naming the dir) and be
+    dropped — not vanish silently. A legacy leaf that parses fine must NOT warn.
+    """
+    # Stage-B leaf: __qaware tag, no sidecar. The dir name does not match the
+    # legacy <compressor>__b<budget> pattern (no __b), so _parse_setting_dir
+    # returns None — exactly the silent-drop path the warning guards.
+    leaf = tmp_path / "statistical_prune__b1000__qaware" / "s0"
+    leaf.mkdir(parents=True)
+    (leaf / "answers.jsonl").write_text(
+        json.dumps({
+            "question_id": "q1", "context_tokens": 800, "rate_tokenizer": "cl100k",
+            "status": "succeeded", "usage": {"input_tokens": 3279, "output_tokens": 1},
+        }) + "\n"
+    )
+    (leaf / "judgments.jsonl").write_text(
+        json.dumps({"question_id": "q1", "label": True, "status": "succeeded"}) + "\n"
+    )
+    # A legacy leaf alongside it that parses cleanly (no Stage-B tag) — must not
+    # warn and must still be counted.
+    _write_leaf(tmp_path, "extractive_relevance", 1000,
+                0, [("q1", 900, True), ("q2", 920, True)])
+
+    rows = rd_aggregate.aggregate(tmp_path)
+    err = capsys.readouterr().err
+
+    # The Stage-B leaf warned, naming the directory, and is not counted.
+    assert "statistical_prune__b1000__qaware" in err
+    assert all(r["compressor"] != "statistical_prune" for r in rows)
+    # The legacy leaf parsed fine, did NOT warn, and IS counted.
+    assert "extractive_relevance__b1000" not in err
+    assert any(
+        r["compressor"] == "extractive_relevance" and r["budget"] == 1000
+        for r in rows
+    )
+
+
+def test_render_markdown_has_query_mode_and_output_form_columns(tmp_path):
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qaware__ofprose",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "aware",
+            "output_form": "prose", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 500, True), ("q2", 520, True)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    md = rd_aggregate.render_markdown(rows)
+    assert "query_mode" in md
+    assert "output_form" in md
+    assert "aware" in md
+    assert "prose" in md
+
+
+def test_render_markdown_shows_dash_for_none_query_mode(tmp_path):
+    # A legacy leaf has query_mode/output_form None — the table shows "—".
+    _write_leaf(tmp_path, "full", None, 0, [("q1", 1000, True)])
+    rows = rd_aggregate.aggregate(tmp_path)
+    md = rd_aggregate.render_markdown(rows)
+    # The full row's query/output cells render the em dash placeholder.
+    assert "—" in md
+
+
+def test_render_markdown_has_stage_b_hyperparam_columns(tmp_path):
+    # edge_metric/oracle_model/prune_level must be legible in the table, not just
+    # in rd-curve.jsonl — else two graph/oracle variants render identically.
+    _write_sidecar_leaf(
+        tmp_path,
+        "graph_community__b1000__qagnostic__ejaccard",
+        {
+            "compressor": "graph_community", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": None, "prune_level": None,
+            "oracle_model": None, "edge_metric": "jaccard",
+        },
+        0,
+        [("q1", 500, True), ("q2", 520, True)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    md = rd_aggregate.render_markdown(rows)
+    assert "edge_metric" in md and "oracle_model" in md and "prune_level" in md
+    assert "jaccard" in md  # the VALUE renders, not just the header
+
+
+def test_series_key_distinguishes_output_form_and_edge_metric():
+    prose = {"compressor": "llm_distill", "query_mode": "agnostic", "output_form": "prose"}
+    struct = {"compressor": "llm_distill", "query_mode": "agnostic", "output_form": "structured"}
+    assert rd_aggregate._series_key(prose) != rd_aggregate._series_key(struct)
+    j = {"compressor": "graph_community", "query_mode": "agnostic", "edge_metric": "jaccard"}
+    t = {"compressor": "graph_community", "query_mode": "agnostic", "edge_metric": "tfidf"}
+    assert rd_aggregate._series_key(j) != rd_aggregate._series_key(t)
+    # Legacy row (query_mode only) keeps the original label.
+    assert rd_aggregate._series_key({"compressor": "full", "query_mode": None}) == "full/na"

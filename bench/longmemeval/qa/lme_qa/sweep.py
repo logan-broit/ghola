@@ -32,7 +32,9 @@ leaves remain, so a re-run after the window resets resumes from there.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +42,13 @@ from typing import Any
 
 from . import cli, compress
 from .scorer import _SCORERS
+
+# Allowed values for the enum-typed compressor hyperparameters. Validated in
+# ``load_settings`` so a typo in a settings file fails before any claude call.
+_QUERY_MODES = ("agnostic", "aware")
+_OUTPUT_FORMS = ("prose", "structured")
+_EDGE_METRICS = ("jaccard", "tfidf", "bm25")
+_PRUNE_LEVELS = ("turn", "sentence", "token")
 
 
 @dataclass(frozen=True)
@@ -54,11 +63,31 @@ class Setting:
     expanded compressor). The reserve is an un-swept hyperparameter — sweeping
     2–3 values at a fixed budget is the minimum to interpret an expanded-vs-
     extractive comparison without the reserve-mistuning confound.
+
+    The Stage B compressors add five more optional, compressor-specific
+    hyperparameters (each ``None`` when the setting does not carry it):
+
+    * ``query_mode`` ("agnostic" | "aware") — statistical_prune, graph_community,
+      perplexity_prune, llm_distill;
+    * ``output_form`` ("prose" | "structured") — llm_distill;
+    * ``oracle_model`` (vLLM model name) — perplexity_prune;
+    * ``edge_metric`` ("jaccard" | …) — graph_community;
+    * ``prune_level`` ("turn" | "sentence" | "token") — reserved for a future
+      variant; accepted + validated here but no compressor consumes it yet.
+
+    Every field participates in the leaf-dir name (see ``leaf_dir`` / ``_hp_tag``)
+    so two settings that differ in ANY field get distinct leaves — results never
+    collide.
     """
 
     compressor: str
     budget: int | None
     expansion_reserve: float | None = None
+    query_mode: str | None = None
+    output_form: str | None = None
+    prune_level: str | None = None
+    oracle_model: str | None = None
+    edge_metric: str | None = None
 
 
 def _budget_tag(budget: int | None) -> str:
@@ -84,24 +113,130 @@ def _reserve_tag(reserve: float | None) -> str:
     return f"__r{s}"
 
 
+def _sanitize_tag(value: str) -> str:
+    """Make a hyperparameter value safe to embed as one path component.
+
+    Replaces ``/`` (and any other char outside ``[A-Za-z0-9._-]``) with ``_`` so
+    a value like a HF repo id (``org/model``) cannot introduce a directory
+    separator into the leaf name. The substitution is deterministic and
+    collision-prone only across values that already differ solely by an unsafe
+    char (acceptable: such pairs do not occur in practice).
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+
+
+def _hp_tag(
+    *,
+    expansion_reserve: float | None = None,
+    query_mode: str | None = None,
+    output_form: str | None = None,
+    prune_level: str | None = None,
+    oracle_model: str | None = None,
+    edge_metric: str | None = None,
+) -> str:
+    """Fixed-order short tag for the compressor hyperparameters in a leaf name.
+
+    Each field contributes a tag ONLY when set (``None`` -> empty), mirroring
+    ``_reserve_tag``'s "empty when None" rule so a setting carrying no new field
+    produces a byte-identical leaf name to the pre-Stage-B format (back-compat:
+    existing done leaves are still skipped on resume). Because EVERY field emits
+    a distinct, ordered tag, two settings that differ in any one field get
+    different leaf names — the collision that would silently overwrite results is
+    structurally impossible.
+
+    Fixed order: budget, reserve, q, of, pl, om, e — the budget tag is emitted
+    by ``leaf_dir`` directly; this helper emits the reserve tag (via
+    ``_reserve_tag``, for byte-compat with existing leaves) plus the five new
+    fields in order ``q, of, pl, om, e``.
+    """
+    parts: list[str] = []
+    if expansion_reserve is not None:
+        parts.append(_reserve_tag(expansion_reserve))
+    if query_mode is not None:
+        parts.append(f"__q{query_mode}")
+    if output_form is not None:
+        parts.append(f"__of{output_form}")
+    if prune_level is not None:
+        parts.append(f"__pl{prune_level}")
+    if oracle_model is not None:
+        parts.append(f"__om{_sanitize_tag(oracle_model)}")
+    if edge_metric is not None:
+        parts.append(f"__e{edge_metric}")
+    return "".join(parts)
+
+
 def leaf_dir(
     outdir: Path,
     compressor: str,
     budget: int | None,
     sample: int,
     expansion_reserve: float | None = None,
+    query_mode: str | None = None,
+    output_form: str | None = None,
+    prune_level: str | None = None,
+    oracle_model: str | None = None,
+    edge_metric: str | None = None,
 ) -> Path:
-    """The directory for one ``(compressor, budget, expansion_reserve, sample)``
+    """The directory for one ``(compressor, budget, ...hyperparameters, sample)``
     leaf.
 
-    ``<outdir>/<compressor>__b<budget>[__r<reserve>]/s<sample>``. Stable +
-    parseable so the aggregator (lme-qa-rd) can walk the tree and recover the
-    setting from the directory name without a side index. The optional
-    ``__r<reserve>`` suffix only appears when the setting carries an explicit
-    ``expansion_reserve`` so existing leaves without the suffix are unaffected.
+    ``<outdir>/<compressor>__b<budget>[__r<reserve>][__q…][__of…][__pl…][__om…][__e…]/s<sample>``.
+    Stable + UNIQUE per distinct setting: every hyperparameter that is set emits
+    a fixed-order tag (see ``_hp_tag``), so two settings differing in ANY field
+    map to different directories — their results can never overwrite each other.
+    A setting with all new fields ``None`` produces a byte-identical leaf name to
+    the pre-Stage-B format, so existing done leaves are unaffected on resume.
     """
-    name = f"{compressor}__b{_budget_tag(budget)}{_reserve_tag(expansion_reserve)}"
+    tag = _hp_tag(
+        expansion_reserve=expansion_reserve,
+        query_mode=query_mode,
+        output_form=output_form,
+        prune_level=prune_level,
+        oracle_model=oracle_model,
+        edge_metric=edge_metric,
+    )
+    name = f"{compressor}__b{_budget_tag(budget)}{tag}"
     return outdir / name / f"s{sample}"
+
+
+def _leaf_dir_for(outdir: Path, setting: Setting, sample: int) -> Path:
+    """``leaf_dir`` keyed off a ``Setting`` — the single place that maps a
+    setting's full field set to its leaf path, so the sweep, the label strings,
+    and the remaining-leaves report all agree on the name."""
+    return leaf_dir(
+        outdir,
+        setting.compressor,
+        setting.budget,
+        sample,
+        expansion_reserve=setting.expansion_reserve,
+        query_mode=setting.query_mode,
+        output_form=setting.output_form,
+        prune_level=setting.prune_level,
+        oracle_model=setting.oracle_model,
+        edge_metric=setting.edge_metric,
+    )
+
+
+def _setting_label(setting: Setting, sample: int) -> str:
+    """The human label for a leaf in the sweep log + remaining-leaves report:
+    the leaf's setting-dir name plus ``/s<sample>`` (mirrors the leaf path so the
+    report is unambiguous across hyperparameter variants)."""
+    name = _leaf_dir_for(Path(""), setting, sample).parent.name
+    return f"{name}/s{sample}"
+
+
+def _write_setting_sidecar(setting_dir: Path, setting: Setting) -> None:
+    """Write ``<setting_dir>/setting.json`` = the full ``Setting`` as JSON.
+
+    One sidecar per setting (the parent of the sample leaves), so the aggregator
+    can recover every field — including the ones not encoded losslessly in the
+    dir name (e.g. an oracle model whose name was sanitized) — without parsing.
+    Idempotent: samples of the same setting rewrite the same bytes.
+    """
+    setting_dir.mkdir(parents=True, exist_ok=True)
+    (setting_dir / "setting.json").write_text(
+        json.dumps(dataclasses.asdict(setting))
+    )
 
 
 def load_settings(path: Path) -> list[Setting]:
@@ -146,14 +281,61 @@ def load_settings(path: Path) -> list[Setting]:
                     f"must be in [0.0, 1.0], got {expansion_reserve!r}"
                 )
             expansion_reserve = float(expansion_reserve)
+
+        # Stage B compressor hyperparameters: each optional (None when absent),
+        # enums validated against their allowed sets, oracle_model any non-empty
+        # string. Errors name the offending entry index + bad value (mirroring
+        # the expansion_reserve style) so a settings typo fails before any
+        # claude call.
+        query_mode = _enum_field(item, "query_mode", _QUERY_MODES, path, i)
+        output_form = _enum_field(item, "output_form", _OUTPUT_FORMS, path, i)
+        prune_level = _enum_field(item, "prune_level", _PRUNE_LEVELS, path, i)
+        edge_metric = _enum_field(item, "edge_metric", _EDGE_METRICS, path, i)
+        oracle_model = item.get("oracle_model")
+        if oracle_model is not None:
+            if not isinstance(oracle_model, str) or not oracle_model.strip():
+                raise ValueError(
+                    f"{path}: settings entry at index {i} 'oracle_model' must "
+                    f"be a non-empty string or null, got {oracle_model!r}"
+                )
+
         settings.append(
             Setting(
                 compressor=name,
                 budget=budget,
                 expansion_reserve=expansion_reserve,
+                query_mode=query_mode,
+                output_form=output_form,
+                prune_level=prune_level,
+                oracle_model=oracle_model,
+                edge_metric=edge_metric,
             )
         )
     return settings
+
+
+def _enum_field(
+    item: dict[str, Any],
+    key: str,
+    allowed: tuple[str, ...],
+    path: Path,
+    index: int,
+) -> str | None:
+    """Read + validate an optional enum-typed settings field.
+
+    ``None`` (absent) is allowed; any present value must be a string in
+    ``allowed`` or a ValueError naming the path, index, key, bad value, and the
+    allowed set is raised — diagnosable from the message alone.
+    """
+    value = item.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(
+            f"{path}: settings entry at index {index} {key!r} must be one of "
+            f"{list(allowed)} or null, got {value!r}"
+        )
+    return value
 
 
 def _expected_qids(dataset: Path, run: Path) -> set[str]:
@@ -257,13 +439,7 @@ def sweep_main(argv: list[str] | None = None) -> int:
     skipped = 0
     completed = 0
     for idx, (setting, sample) in enumerate(leaves):
-        leaf = leaf_dir(
-            args.outdir,
-            setting.compressor,
-            setting.budget,
-            sample,
-            expansion_reserve=setting.expansion_reserve,
-        )
+        leaf = _leaf_dir_for(args.outdir, setting, sample)
         answers = leaf / "answers.jsonl"
         judgments = leaf / "judgments.jsonl"
         report = leaf / "report.md"
@@ -276,7 +452,10 @@ def sweep_main(argv: list[str] | None = None) -> int:
             continue
 
         leaf.mkdir(parents=True, exist_ok=True)
-        label = f"{setting.compressor}__b{_budget_tag(setting.budget)}{_reserve_tag(setting.expansion_reserve)}/s{sample}"
+        # The per-setting sidecar (the aggregator's source of truth) — written
+        # next to the sample leaves, idempotently re-written per sample.
+        _write_setting_sidecar(leaf.parent, setting)
+        label = _setting_label(setting, sample)
         print(f"sweep: leaf {idx + 1}/{len(leaves)} {label}", file=sys.stderr)
         ran += 1
 
@@ -298,6 +477,19 @@ def sweep_main(argv: list[str] | None = None) -> int:
             reader_argv += ["--budget", str(setting.budget)]
         if setting.expansion_reserve is not None:
             reader_argv += ["--expansion-reserve", str(setting.expansion_reserve)]
+        # Stage B hyperparameters: forward each only when the setting carries it,
+        # so the reader's argparse defaults stand for legacy settings (and the
+        # cc backend's flag surface is identical to a hand-run lme-qa-run).
+        if setting.query_mode is not None:
+            reader_argv += ["--query-mode", setting.query_mode]
+        if setting.output_form is not None:
+            reader_argv += ["--output-form", setting.output_form]
+        if setting.prune_level is not None:
+            reader_argv += ["--prune-level", setting.prune_level]
+        if setting.oracle_model is not None:
+            reader_argv += ["--oracle-model", setting.oracle_model]
+        if setting.edge_metric is not None:
+            reader_argv += ["--edge-metric", setting.edge_metric]
         cli.run_main(reader_argv)
 
         # The reader exits 0 even on a usage-window stop (partial progress saved).
@@ -349,10 +541,7 @@ def _stop_incomplete(
     Returns 0 (a clean, expected stop — not an error), matching the
     reader/judge's window-exhaustion contract.
     """
-    remaining = [
-        f"{s.compressor}__b{_budget_tag(s.budget)}{_reserve_tag(s.expansion_reserve)}/s{i}"
-        for s, i in leaves[idx:]
-    ]
+    remaining = [_setting_label(s, i) for s, i in leaves[idx:]]
     print(
         f"sweep: stopped in {stage} on leaf {label} (usage window exhausted "
         f"or systemic failure; partial progress saved). "
