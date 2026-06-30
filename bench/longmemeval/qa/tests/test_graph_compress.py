@@ -151,3 +151,45 @@ def test_leiden_partition_raises_when_extra_missing(monkeypatch):
 
     with pytest.raises(RuntimeError, match=r"\[graph\] extra"):
         graph_compress.leiden_partition(2, [(0, 1)], [1.0])
+
+
+@pytest.mark.parametrize("absent", ["igraph", "leidenalg"])
+def test_leiden_partition_raises_when_one_extra_missing(monkeypatch, absent):
+    """Null ONLY one dependency at a time. Guards against the ``or`` in
+    leiden_partition silently degrading to ``and`` (which would only raise when
+    BOTH are missing). Each single-missing case must still raise."""
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name == absent else real(name, *a, **k),
+    )
+    with pytest.raises(RuntimeError, match=r"\[graph\] extra"):
+        graph_compress.leiden_partition(2, [(0, 1)], [1.0])
+
+
+# --- leiden_partition (real igraph/leidenalg path) -----------------------
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("leidenalg") is None
+    or importlib.util.find_spec("igraph") is None,
+    reason="[graph] extra not installed",
+)
+def test_leiden_partition_real_two_clusters():
+    """Exercise the real igraph/leidenalg code path (no monkeypatch). Two tight
+    triangles (0-1-2) and (3-4-5) joined by one weak edge should land in two
+    separate communities, and the partition must cover every node exactly once."""
+    n = 6
+    edges = [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5), (2, 3)]
+    weights = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.05]
+    part = graph_compress.leiden_partition(n, edges, weights, seed=0)
+    # Valid partition: every node appears exactly once across communities.
+    flat = sorted(x for comm in part for x in comm)
+    assert flat == list(range(n))
+    assert all(len(c) > 0 for c in part)
+    # The two triangles should land in different communities (weak bridge).
+    comm_of = {x: i for i, c in enumerate(part) for x in c}
+    assert comm_of[0] == comm_of[1] == comm_of[2]
+    assert comm_of[3] == comm_of[4] == comm_of[5]
+    assert comm_of[0] != comm_of[3]

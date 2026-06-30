@@ -173,6 +173,9 @@ def compress_with_partition(
     if query_mode == "aware":
         bm25 = stats.BM25Scorer()
         # Score each turn once; a community's priority is the sum over members.
+        # The IDF corpus is the full flattened turn set (every turn scored in one
+        # pass), so BM25 scores -- and thus community priorities -- are comparable
+        # across communities.
         items = [(str(idx), idx_text[idx]) for idx in idx_text]
         per_turn = bm25(query or "", items)
 
