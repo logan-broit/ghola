@@ -296,3 +296,159 @@ def test_aggregate_carries_expansion_reserve_to_row(tmp_path):
     # The __r0.5 leaf carries the reserve.
     r05_row = next(r for r in rows if r.get("expansion_reserve") == 0.5)
     assert r05_row["budget"] == 500
+
+
+# --- Stage B: setting.json sidecar is the aggregation source of truth --------
+
+
+def _write_sidecar_leaf(
+    outdir: Path,
+    dir_name: str,
+    setting: dict,
+    sample: int,
+    rows: list[tuple[str, int, bool]],
+) -> None:
+    """Write a setting dir with a setting.json sidecar + one sample leaf
+    (answers + judgments). ``dir_name`` is the leaf SETTING dir component;
+    ``setting`` is the full Setting dict the sidecar holds."""
+    setting_dir = outdir / dir_name
+    setting_dir.mkdir(parents=True, exist_ok=True)
+    (setting_dir / "setting.json").write_text(json.dumps(setting))
+    leaf = setting_dir / f"s{sample}"
+    leaf.mkdir(parents=True, exist_ok=True)
+    with (leaf / "answers.jsonl").open("w") as fh:
+        for qid, rate, _label in rows:
+            fh.write(json.dumps({
+                "question_id": qid, "context_tokens": rate,
+                "rate_tokenizer": "cl100k", "status": "succeeded",
+                "usage": {"input_tokens": 3279, "output_tokens": 1},
+            }) + "\n")
+    with (leaf / "judgments.jsonl").open("w") as fh:
+        for qid, _rate, label in rows:
+            fh.write(json.dumps({
+                "question_id": qid, "label": label, "status": "succeeded",
+            }) + "\n")
+
+
+def test_aggregate_reads_sidecar_and_surfaces_query_mode_output_form(tmp_path):
+    """When a setting.json sidecar exists, aggregate reads ALL fields from it
+    (including query_mode/output_form) and surfaces them on the curve row."""
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qagnostic__ofstructured",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": "structured", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 800, True), ("q2", 820, False)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["compressor"] == "llm_distill"
+    assert r["budget"] == 1000
+    assert r["query_mode"] == "agnostic"
+    assert r["output_form"] == "structured"
+    assert r["mean_rate"] == 810
+    assert r["accuracy"] == 0.5
+
+
+def test_aggregate_groups_distinct_settings_from_sidecars(tmp_path):
+    """Two settings differing only in output_form (distinct sidecars + dirs)
+    aggregate as TWO rows — they never collapse together."""
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qagnostic__ofprose",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": "prose", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 500, True), ("q2", 520, True)],
+    )
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qagnostic__ofstructured",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": "structured", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 700, True), ("q2", 720, False)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 2
+    forms = {r["output_form"] for r in rows}
+    assert forms == {"prose", "structured"}
+
+
+def test_aggregate_sidecar_oracle_model_survives_sanitized_dir(tmp_path):
+    """The sidecar carries the UNsanitized oracle_model even though the dir name
+    sanitized the ``/`` — proving the sidecar (not the dir name) is the truth."""
+    _write_sidecar_leaf(
+        tmp_path,
+        "perplexity_prune__b500__qagnostic__omQwen_Qwen2.5-1.5B-Instruct",
+        {
+            "compressor": "perplexity_prune", "budget": 500,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": None, "prune_level": None,
+            "oracle_model": "Qwen/Qwen2.5-1.5B-Instruct", "edge_metric": None,
+        },
+        0,
+        [("q1", 400, True)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["oracle_model"] == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_aggregate_legacy_leaf_without_sidecar_still_parses(tmp_path):
+    """Back-compat: a legacy leaf (no setting.json) still aggregates via the
+    dir-name parse, with the new fields left None."""
+    # _write_leaf does NOT write a sidecar — the legacy path.
+    _write_leaf(tmp_path, "extractive_relevance", 500, 0,
+                [("q1", 480, True), ("q2", 500, True)])
+    rows = rd_aggregate.aggregate(tmp_path)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["compressor"] == "extractive_relevance"
+    assert r["budget"] == 500
+    assert r["query_mode"] is None
+    assert r["output_form"] is None
+
+
+def test_render_markdown_has_query_mode_and_output_form_columns(tmp_path):
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qaware__ofprose",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "aware",
+            "output_form": "prose", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 500, True), ("q2", 520, True)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    md = rd_aggregate.render_markdown(rows)
+    assert "query_mode" in md
+    assert "output_form" in md
+    assert "aware" in md
+    assert "prose" in md
+
+
+def test_render_markdown_shows_dash_for_none_query_mode(tmp_path):
+    # A legacy leaf has query_mode/output_form None — the table shows "—".
+    _write_leaf(tmp_path, "full", None, 0, [("q1", 1000, True)])
+    rows = rd_aggregate.aggregate(tmp_path)
+    md = rd_aggregate.render_markdown(rows)
+    # The full row's query/output cells render the em dash placeholder.
+    assert "—" in md

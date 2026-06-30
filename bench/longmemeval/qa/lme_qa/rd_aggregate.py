@@ -53,11 +53,48 @@ _Z95 = 1.96
 
 @dataclass(frozen=True)
 class _LeafSetting:
-    """A setting recovered from a leaf directory name."""
+    """A setting recovered from a leaf's ``setting.json`` sidecar (preferred) or,
+    for a legacy leaf without one, from the directory name.
+
+    Frozen + hashable so ``aggregate`` can group sample rows by the FULL setting
+    — two settings differing in any field are distinct keys, so their results
+    never merge."""
 
     compressor: str
     budget: int | None
     expansion_reserve: float | None = None
+    query_mode: str | None = None
+    output_form: str | None = None
+    prune_level: str | None = None
+    oracle_model: str | None = None
+    edge_metric: str | None = None
+
+
+def _leaf_setting_from_sidecar(path: Path) -> _LeafSetting | None:
+    """Build a ``_LeafSetting`` from a ``setting.json`` sidecar.
+
+    The sidecar is the source of truth (``dataclasses.asdict`` of the sweep's
+    ``Setting``): it carries every field losslessly, including values the dir
+    name encodes lossily (a sanitized oracle model). Returns ``None`` on a
+    malformed/unreadable sidecar or one missing ``compressor`` so the caller can
+    fall back to the dir-name parse rather than crash on a stray file.
+    """
+    try:
+        obj = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict) or "compressor" not in obj:
+        return None
+    return _LeafSetting(
+        compressor=obj["compressor"],
+        budget=obj.get("budget"),
+        expansion_reserve=obj.get("expansion_reserve"),
+        query_mode=obj.get("query_mode"),
+        output_form=obj.get("output_form"),
+        prune_level=obj.get("prune_level"),
+        oracle_model=obj.get("oracle_model"),
+        edge_metric=obj.get("edge_metric"),
+    )
 
 
 def _parse_setting_dir(name: str) -> _LeafSetting | None:
@@ -200,7 +237,15 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
     order: list[_LeafSetting] = []
 
     for setting_dir in sorted(p for p in outdir.iterdir() if p.is_dir()):
-        setting = _parse_setting_dir(setting_dir.name)
+        # Prefer the per-setting sidecar (the source of truth: every field,
+        # losslessly) — fall back to the dir-name parse for legacy leaves written
+        # before the sidecar existed (new fields stay None there).
+        sidecar = setting_dir / "setting.json"
+        setting = (
+            _leaf_setting_from_sidecar(sidecar)
+            if sidecar.exists()
+            else _parse_setting_dir(setting_dir.name)
+        )
         if setting is None:
             continue
         for sample_dir in sorted(p for p in setting_dir.iterdir() if p.is_dir()):
@@ -240,6 +285,11 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
                 "compressor": setting.compressor,
                 "budget": setting.budget,
                 "expansion_reserve": setting.expansion_reserve,
+                "query_mode": setting.query_mode,
+                "output_form": setting.output_form,
+                "prune_level": setting.prune_level,
+                "oracle_model": setting.oracle_model,
+                "edge_metric": setting.edge_metric,
                 "n": len(qmap),
                 "mean_rate": mean_rate,
                 "accuracy": accuracy,
@@ -326,18 +376,21 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     )
     lines.append("")
     lines.append(
-        "| compressor | budget | reserve | N | mean_rate | rate_ci | accuracy | distortion | acc_ci |"
+        "| compressor | budget | reserve | query_mode | output_form | N | "
+        "mean_rate | rate_ci | accuracy | distortion | acc_ci |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         reserve = r.get("expansion_reserve")
         reserve_label = f"{reserve:.1f}" if reserve is not None else "—"
         lines.append(
-            "| {comp} | {budget} | {reserve} | {n} | {rate} | {rate_ci} | {acc:.1%} | "
-            "{dist:.1%} | {acc_ci} |".format(
+            "| {comp} | {budget} | {reserve} | {qmode} | {oform} | {n} | "
+            "{rate} | {rate_ci} | {acc:.1%} | {dist:.1%} | {acc_ci} |".format(
                 comp=r["compressor"],
                 budget=_budget_label(r["budget"]),
                 reserve=reserve_label,
+                qmode=r.get("query_mode") or "—",
+                oform=r.get("output_form") or "—",
                 n=r["n"],
                 rate=_fmt_num(r["mean_rate"]),
                 rate_ci=_fmt_num(r["rate_ci"]),
@@ -354,8 +407,16 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _series_key(r: dict[str, Any]) -> str:
+    """Plot series label: ``<compressor>/<query_mode|na>`` so a compressor's
+    query-agnostic and query-aware variants plot as DISTINCT lines (the
+    query-awareness premium reads as the gap between the two series)."""
+    return f"{r['compressor']}/{r.get('query_mode') or 'na'}"
+
+
 def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:
-    """Best-effort PNG: accuracy (y) vs mean_rate (x), one line per compressor.
+    """Best-effort PNG: accuracy (y) vs mean_rate (x), one line per
+    ``compressor/query_mode`` series.
 
     Returns True on success, False if matplotlib is unavailable (caller prints
     the install hint). matplotlib is the optional ``[plot]`` extra — never a
@@ -371,7 +432,7 @@ def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:
 
     by_comp: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        by_comp.setdefault(r["compressor"], []).append(r)
+        by_comp.setdefault(_series_key(r), []).append(r)
 
     fig, ax = plt.subplots()
     for comp, pts in sorted(by_comp.items()):
