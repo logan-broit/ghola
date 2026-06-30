@@ -354,6 +354,93 @@ def _statistical_prune(
     return text
 
 
+class _SurprisalScorer:
+    """Scorer with the ``scorer(query, items) -> {id: float}`` shape that ranks
+    items by LM surprisal -- the local-oracle twin of ``_SelfInfoScorer``.
+
+    Per-item score is the MEAN surprisal (negative mean logprob) of the item's
+    tokens under a small local LM, so a long turn does not out-score a short
+    distinctive one merely by accumulating more tokens. Higher surprisal = more
+    informative = kept first by the greedy core.
+
+    ``query_mode="aware"`` prepends the query to the scored text so the
+    surprisal is conditioned on it; ``"agnostic"`` (the default) scores the turn
+    alone. NOTE the aware-mode approximation: prepending the query conditions the
+    later tokens' surprisal on it, but we average over ALL returned tokens
+    (including the query prefix's own tokens), so the score is diluted by the
+    prefix -- a v1 approximation, not a clean conditional surprisal of the turn
+    given the query.
+    """
+
+    def __init__(self, lm_client, query_mode: str = "agnostic") -> None:
+        self.lm_client = lm_client
+        self.query_mode = query_mode
+
+    def __call__(
+        self, query: str, items: list[tuple[str, str]]
+    ) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for sid, text in items:
+            scored = f"{query}\n{text}" if self.query_mode == "aware" else text
+            lp = self.lm_client.token_logprobs(scored)
+            if not lp:
+                out[sid] = 0.0
+                continue
+            # Mean surprisal = -mean(logprob). Logprobs are <= 0, so this is
+            # >= 0; a more surprising (rarer) turn has more-negative logprobs
+            # and thus a HIGHER score -> the greedy core keeps it first.
+            out[sid] = -sum(logprob for _, logprob in lp) / len(lp)
+        return out
+
+
+def _perplexity_prune(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    lm_client=None,
+    query_mode: str = "agnostic",
+) -> str:
+    """Keep the highest-surprisal turns within the budget -- LM-oracle pruning
+    (LLMLingua-style), the small-local-model cousin of ``statistical_prune``.
+
+    Same greedy-select + chronological-regroup core as ``extractive_relevance``
+    and ``statistical_prune``, but the scorer is ``_SurprisalScorer``: it scores
+    each turn by its MEAN token surprisal under a small local LM (vLLM
+    ``prompt_logprobs``) rather than free IDF self-information. The sweep can
+    then compare "does the LM oracle beat free IDF?". ``query_mode="agnostic"``
+    scores each turn alone; ``"aware"`` prepends the query (see
+    ``_SurprisalScorer`` for the v1 averaging approximation).
+
+    ``lm_client`` is injected for tests; when ``None`` it is lazy-constructed
+    (``local_lm.LocalLMClient()``) inside this function so importing
+    ``compress.py`` never needs a live server.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    if lm_client is None:
+        # Deferred import + lazy construct: keep compress.py importable without
+        # a running oracle, and let tests inject a deterministic fake.
+        from . import local_lm
+
+        lm_client = local_lm.LocalLMClient()
+
+    kept = _score_and_greedy_select(
+        sessions,
+        query,
+        target_tokens,
+        tokenizer,
+        _SurprisalScorer(lm_client, query_mode),
+    )
+    if not kept:
+        return ""
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
 def _lexical_relevance(
     sessions: list[context.Session],
     *,
@@ -418,6 +505,7 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "extractive_relevance": _extractive_relevance,
     "extractive_relevance_expanded": _extractive_relevance_expanded,
     "statistical_prune": _statistical_prune,
+    "perplexity_prune": _perplexity_prune,
     "lexical_relevance": _lexical_relevance,
     "graph_community": _graph_community,
 }

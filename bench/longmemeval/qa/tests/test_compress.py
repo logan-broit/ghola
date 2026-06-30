@@ -719,3 +719,73 @@ def test_lexical_relevance_no_budget_keeps_all():
         tokenizer=tok,
     )
     assert out == full_text
+
+
+# --- perplexity_prune (local-oracle surprisal, LLMLingua-style) ----------
+
+
+class _FakeLM:
+    """Deterministic injected logprob client -- NO network. Returns a very
+    negative logprob (high surprisal) for any text mentioning the rare token
+    9931, and a near-zero logprob (low surprisal) otherwise. The compressor's
+    _SurprisalScorer turns these into MEAN surprisal so the informative turn
+    out-ranks the filler."""
+
+    def token_logprobs(self, text):
+        return [("x", -8.0)] if "9931" in text else [("x", -0.1)]
+
+
+def _perplexity_budget(tok) -> int:
+    """A budget that fits the single rare turn (+ its date header) but not both
+    turns -- so the surprisal ranking actually decides which turn survives.
+    Mirrors the statistical_prune test's ``rare_only + 1`` pattern. (The task
+    spec's literal ``target_tokens=10`` is unsatisfiable: the rendered rare turn
+    alone is ~21 tokens at ratio 4.)"""
+    rare_only, _ = context.render_sessions(
+        [context.Session("s1", "2023/05/20 (Sat) 02:21",
+                         [{"role": "user", "content": "the database listens on port 9931"}])]
+    )
+    return tok.count(rare_only) + 1
+
+
+def test_perplexity_prune_keeps_surprising_turn():
+    sessions = [context.Session("s1", "2023/05/20 (Sat) 02:21", [
+        {"role": "user", "content": "the database listens on port 9931"},
+        {"role": "user", "content": "ok thanks sounds good"},
+    ])]
+    tok = CharRatioTokenizer(4)
+    out = compress.compress(
+        "perplexity_prune", sessions, query="port",
+        target_tokens=_perplexity_budget(tok), tokenizer=tok,
+        lm_client=_FakeLM(), query_mode="agnostic",
+    )
+    assert "9931" in out and "sounds good" not in out
+
+
+def test_perplexity_prune_aware_mode_returns_text():
+    sessions = [context.Session("s1", "2023/05/20 (Sat) 02:21", [
+        {"role": "user", "content": "the database listens on port 9931"},
+        {"role": "user", "content": "ok thanks sounds good"},
+    ])]
+    tok = CharRatioTokenizer(4)
+    out = compress.compress(
+        "perplexity_prune", sessions, query="which port",
+        target_tokens=_perplexity_budget(tok), tokenizer=tok,
+        lm_client=_FakeLM(), query_mode="aware",
+    )
+    assert "9931" in out and "sounds good" not in out
+
+
+def test_perplexity_prune_no_budget_keeps_all():
+    sessions = [context.Session("s1", "2023/05/20 (Sat) 02:21", [
+        {"role": "user", "content": "the database listens on port 9931"},
+        {"role": "user", "content": "ok thanks sounds good"},
+    ])]
+    tok = CharRatioTokenizer(4)
+    full_text, _ = context.render_sessions(sessions)
+    out = compress.compress(
+        "perplexity_prune", sessions, query="q",
+        target_tokens=None, tokenizer=tok, lm_client=_FakeLM(),
+    )
+    # No budget -> render all; the fake client is never consulted.
+    assert out == full_text
