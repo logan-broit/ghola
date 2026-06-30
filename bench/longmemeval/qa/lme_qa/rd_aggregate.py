@@ -411,21 +411,26 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     )
     lines.append("")
     lines.append(
-        "| compressor | budget | reserve | query_mode | output_form | N | "
+        "| compressor | budget | reserve | query_mode | output_form | "
+        "edge_metric | oracle_model | prune_level | N | "
         "mean_rate | rate_ci | accuracy | distortion | acc_ci |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         reserve = r.get("expansion_reserve")
         reserve_label = f"{reserve:.1f}" if reserve is not None else "—"
         lines.append(
-            "| {comp} | {budget} | {reserve} | {qmode} | {oform} | {n} | "
+            "| {comp} | {budget} | {reserve} | {qmode} | {oform} | "
+            "{emetric} | {omodel} | {plevel} | {n} | "
             "{rate} | {rate_ci} | {acc:.1%} | {dist:.1%} | {acc_ci} |".format(
                 comp=r["compressor"],
                 budget=_budget_label(r["budget"]),
                 reserve=reserve_label,
                 qmode=r.get("query_mode") or "—",
                 oform=r.get("output_form") or "—",
+                emetric=r.get("edge_metric") or "—",
+                omodel=r.get("oracle_model") or "—",
+                plevel=r.get("prune_level") or "—",
                 n=r["n"],
                 rate=_fmt_num(r["mean_rate"]),
                 rate_ci=_fmt_num(r["rate_ci"]),
@@ -443,10 +448,20 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
 
 
 def _series_key(r: dict[str, Any]) -> str:
-    """Plot series label: ``<compressor>/<query_mode|na>`` so a compressor's
-    query-agnostic and query-aware variants plot as DISTINCT lines (the
-    query-awareness premium reads as the gap between the two series)."""
-    return f"{r['compressor']}/{r.get('query_mode') or 'na'}"
+    """Plot series label so every distinct setting plots as its OWN line.
+
+    Starts at ``<compressor>/<query_mode|na>`` (the query-awareness premium reads
+    as the gap between the agnostic and aware series) and appends each
+    discriminating hyperparameter that is set — ``output_form`` (prose vs
+    structured), ``edge_metric``, ``oracle_model`` — so variants that differ only
+    in one of those don't silently collapse onto the same line. ``prune_level``
+    is excluded: it's a reserved no-op that doesn't change the emitted context."""
+    key = f"{r['compressor']}/{r.get('query_mode') or 'na'}"
+    for field in ("output_form", "edge_metric", "oracle_model"):
+        val = r.get(field)
+        if val:
+            key += f"/{val}"
+    return key
 
 
 def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:

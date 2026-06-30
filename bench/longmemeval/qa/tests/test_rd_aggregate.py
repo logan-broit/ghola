@@ -490,3 +490,35 @@ def test_render_markdown_shows_dash_for_none_query_mode(tmp_path):
     md = rd_aggregate.render_markdown(rows)
     # The full row's query/output cells render the em dash placeholder.
     assert "—" in md
+
+
+def test_render_markdown_has_stage_b_hyperparam_columns(tmp_path):
+    # edge_metric/oracle_model/prune_level must be legible in the table, not just
+    # in rd-curve.jsonl — else two graph/oracle variants render identically.
+    _write_sidecar_leaf(
+        tmp_path,
+        "graph_community__b1000__qagnostic__ejaccard",
+        {
+            "compressor": "graph_community", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "agnostic",
+            "output_form": None, "prune_level": None,
+            "oracle_model": None, "edge_metric": "jaccard",
+        },
+        0,
+        [("q1", 500, True), ("q2", 520, True)],
+    )
+    rows = rd_aggregate.aggregate(tmp_path)
+    md = rd_aggregate.render_markdown(rows)
+    assert "edge_metric" in md and "oracle_model" in md and "prune_level" in md
+    assert "jaccard" in md  # the VALUE renders, not just the header
+
+
+def test_series_key_distinguishes_output_form_and_edge_metric():
+    prose = {"compressor": "llm_distill", "query_mode": "agnostic", "output_form": "prose"}
+    struct = {"compressor": "llm_distill", "query_mode": "agnostic", "output_form": "structured"}
+    assert rd_aggregate._series_key(prose) != rd_aggregate._series_key(struct)
+    j = {"compressor": "graph_community", "query_mode": "agnostic", "edge_metric": "jaccard"}
+    t = {"compressor": "graph_community", "query_mode": "agnostic", "edge_metric": "tfidf"}
+    assert rd_aggregate._series_key(j) != rd_aggregate._series_key(t)
+    # Legacy row (query_mode only) keeps the original label.
+    assert rd_aggregate._series_key({"compressor": "full", "query_mode": None}) == "full/na"
