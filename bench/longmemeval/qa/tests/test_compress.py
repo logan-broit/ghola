@@ -581,3 +581,89 @@ def test_extractive_with_live_truthsayer_scores_real_turns():
     )
     # The cat turn is the relevant one for the cat query; it should survive.
     assert "Luna" in out
+
+
+# --- statistical_prune (IDF self-information, no model) ------------------
+
+
+def _sessions_rare_vs_filler() -> list[context.Session]:
+    """One session, two turns: a rare-token sentence and a repetitive filler.
+
+    The rare-token turn carries high IDF self-information (distinctive tokens
+    like "database", "9931"); the filler turn is all stopword-ish repetition.
+    With the corpus being just these turns, "the" appears in both docs (low
+    IDF), while the distinctive tokens appear in one doc (high IDF). The MEAN
+    self-information of the rare turn dominates the filler's, so a tight budget
+    keeps the rare turn and drops the filler."""
+    return [
+        context.Session(
+            "s1",
+            "2023/05/20 (Sat) 02:21",
+            [
+                {"role": "user", "content": "the database listens on port 9931"},
+                {"role": "assistant", "content": "the the the the"},
+            ],
+        ),
+    ]
+
+
+def test_statistical_prune_keeps_rare_drops_filler_agnostic():
+    sessions = _sessions_rare_vs_filler()
+    tok = CharRatioTokenizer(1)
+    # Budget that fits the rare-token turn + its date header but not both turns.
+    rare_only, _ = context.render_sessions(
+        [context.Session(
+            "s1", "2023/05/20 (Sat) 02:21",
+            [{"role": "user", "content": "the database listens on port 9931"}],
+        )]
+    )
+    both, _ = context.render_sessions(sessions)
+    budget = tok.count(rare_only) + 1
+    assert tok.count(rare_only) <= budget < tok.count(both)
+
+    out = compress.compress(
+        "statistical_prune",
+        sessions,
+        query="q",
+        target_tokens=budget,
+        tokenizer=tok,
+        query_mode="agnostic",
+    )
+    assert "9931" in out
+    assert "the the the the" not in out
+
+
+def test_statistical_prune_aware_mode_returns_text():
+    sessions = _sessions_rare_vs_filler()
+    tok = CharRatioTokenizer(1)
+    rare_only, _ = context.render_sessions(
+        [context.Session(
+            "s1", "2023/05/20 (Sat) 02:21",
+            [{"role": "user", "content": "the database listens on port 9931"}],
+        )]
+    )
+    budget = tok.count(rare_only) + 1
+    out = compress.compress(
+        "statistical_prune",
+        sessions,
+        query="which port does the database use",
+        target_tokens=budget,
+        tokenizer=tok,
+        query_mode="aware",
+    )
+    assert "9931" in out
+    assert "the the the the" not in out
+
+
+def test_statistical_prune_no_budget_keeps_all():
+    sessions = _sessions_rare_vs_filler()
+    tok = CharRatioTokenizer(1)
+    full_text, _ = context.render_sessions(sessions)
+    out = compress.compress(
+        "statistical_prune",
+        sessions,
+        query="q",
+        target_tokens=None,
+        tokenizer=tok,
+    )
+    assert out == full_text

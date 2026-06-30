@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from . import context
+from . import context, stats
 from .tokenize import Tokenizer
 
 
@@ -293,6 +293,67 @@ def _extractive_relevance_expanded(
     return text
 
 
+class _SelfInfoScorer:
+    """Scorer with the ``scorer(query, items) -> {id: float}`` shape that ranks
+    items by IDF self-information -- the "surprise" of their tokens against the
+    item corpus -- with no model and no network.
+
+    Per-item score is the MEAN self-information of its tokens (summed IDF divided
+    by token count), so a long turn does not out-score a short distinctive one
+    merely by accumulating more tokens. ``query_mode="aware"`` adds the item's
+    BM25 relevance to the query on top of the surprise signal; ``"agnostic"``
+    (the default) ignores the query entirely.
+    """
+
+    def __init__(self, query_mode: str = "agnostic") -> None:
+        self.query_mode = query_mode
+        self._bm25 = stats.BM25Scorer() if query_mode == "aware" else None
+
+    def __call__(
+        self, query: str, items: list[tuple[str, str]]
+    ) -> dict[str, float]:
+        if not items:
+            return {}
+        idf = stats.idf_map([text for _, text in items])
+        bm25 = self._bm25(query, items) if self._bm25 is not None else {}
+        out: dict[str, float] = {}
+        for sid, text in items:
+            n_tokens = len(stats.tokenize_words(text))
+            mean_info = stats.self_information(text, idf) / max(1, n_tokens)
+            out[sid] = mean_info + bm25.get(sid, 0.0)
+        return out
+
+
+def _statistical_prune(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    query_mode: str = "agnostic",
+) -> str:
+    """Keep the highest-surprise turns within the budget -- IDF self-information
+    pruning with no model.
+
+    The free, no-model cousin of ``extractive_relevance``: same greedy-select +
+    chronological-regroup core, but the scorer is ``_SelfInfoScorer`` (mean IDF
+    surprise, optionally plus BM25 query relevance) instead of a neural reranker.
+    ``query_mode="agnostic"`` ranks purely by token rarity; ``"aware"`` folds in
+    BM25 relevance to the query.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    kept = _score_and_greedy_select(
+        sessions, query, target_tokens, tokenizer, _SelfInfoScorer(query_mode)
+    )
+    if not kept:
+        return ""
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
 # name -> compressor. compress() dispatches here; KeyError on unknown name.
 REGISTRY: dict[str, Callable[..., str]] = {
     "full": _full,
@@ -300,6 +361,7 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "topk_sessions": _topk_sessions,
     "extractive_relevance": _extractive_relevance,
     "extractive_relevance_expanded": _extractive_relevance_expanded,
+    "statistical_prune": _statistical_prune,
 }
 
 
