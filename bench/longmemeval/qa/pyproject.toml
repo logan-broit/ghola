@@ -21,6 +21,11 @@ plot = ["matplotlib>=3.7"]
 # installed, else falls back to the char-ratio estimate. NOT a core dep — CI
 # installs '[dev]' only, so the fallback path is what CI exercises.
 rate = ["tiktoken>=0.5"]
+# igraph + leidenalg are OPTIONAL: only the graph_community compressor needs
+# them, and only its leiden_partition step (build_graph/compress_with_partition
+# are pure). NOT a core dep — graph_community raises a clear [graph]-extra error
+# when they're absent, so importing lme_qa.compress never requires them.
+graph = ["igraph>=0.11", "leidenalg>=0.10"]
 
 [project.scripts]
 lme-qa-run = "lme_qa.cli:run_main"

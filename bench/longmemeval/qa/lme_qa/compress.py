@@ -383,6 +383,33 @@ def _lexical_relevance(
     return text
 
 
+def _graph_community(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    **kwargs: object,
+) -> str:
+    """Thin wrapper delegating to ``graph_compress.graph_community``.
+
+    The lazy import keeps ``compress.py`` importable without the optional
+    ``[graph]`` extra (igraph/leidenalg): only this call path -- reached when the
+    ``graph_community`` compressor actually runs -- can need them, and even then
+    the pure ``build_graph`` / ``compress_with_partition`` helpers don't (only
+    ``leiden_partition`` does, and it raises a clear error when they're absent).
+    """
+    from . import graph_compress
+
+    return graph_compress.graph_community(
+        sessions,
+        query=query,
+        target_tokens=target_tokens,
+        tokenizer=tokenizer,
+        **kwargs,
+    )
+
+
 # name -> compressor. compress() dispatches here; KeyError on unknown name.
 REGISTRY: dict[str, Callable[..., str]] = {
     "full": _full,
@@ -392,6 +419,7 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "extractive_relevance_expanded": _extractive_relevance_expanded,
     "statistical_prune": _statistical_prune,
     "lexical_relevance": _lexical_relevance,
+    "graph_community": _graph_community,
 }
 
 
