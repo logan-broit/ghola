@@ -789,3 +789,47 @@ def test_perplexity_prune_no_budget_keeps_all():
     )
     # No budget -> render all; the fake client is never consulted.
     assert out == full_text
+
+
+# --- llm_distill (claude distiller, prose|structured, cached) ------------
+
+
+class _FakeDistiller:
+    """Injected distiller with the ``.distill(...)`` shape the compressor calls.
+    Records that it was called and echoes the output form so the test can assert
+    the compressor forwarded the args and returned the distiller's text verbatim
+    (no truncation)."""
+
+    def __init__(self) -> None:
+        self.called = False
+
+    def distill(self, text, *, query, query_mode, output_form, budget):
+        self.called = True
+        return "DISTILLED:" + output_form
+
+
+def test_llm_distill_returns_distilled_text():
+    out = compress.compress(
+        "llm_distill",
+        _sessions(),
+        query="q",
+        target_tokens=50,
+        tokenizer=CharRatioTokenizer(4),
+        distiller=_FakeDistiller(),
+        output_form="structured",
+    )
+    assert out == "DISTILLED:structured"
+
+
+def test_llm_distill_full_when_no_budget():
+    fake = _FakeDistiller()
+    out = compress.compress(
+        "llm_distill",
+        _sessions(),
+        query="q",
+        target_tokens=None,
+        tokenizer=None,
+        distiller=fake,
+    )
+    assert "alpha" in out  # rendered all
+    assert not fake.called  # distiller not consulted on the no-budget early-out

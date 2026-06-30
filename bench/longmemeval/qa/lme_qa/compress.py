@@ -470,6 +470,54 @@ def _lexical_relevance(
     return text
 
 
+def _llm_distill(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    distiller=None,
+    output_form: str = "prose",
+    query_mode: str = "agnostic",
+) -> str:
+    """Distill the rendered sessions to the budget via a claude ``-p`` call.
+
+    The most expensive compressor: one claude call per question (so the distiller
+    disk-caches its outputs — a re-run after a usage-window stop is free). It
+    renders the selected sessions to the canonical reader text, then hands that
+    to a ``distill.Distiller`` which asks claude to compress it to
+    ``target_tokens``. There is NO hard truncation here — the budget is the
+    distiller's instruction, and the plotted rate is the reader's real token
+    count (the budget is approximate by design, like every compressor).
+
+    ``output_form`` ("prose" | "structured") and ``query_mode`` ("agnostic" |
+    "aware") are the two distiller knobs the sweep varies. ``distiller`` is
+    injected for tests; when ``None`` a real ``distill.Distiller()`` is
+    lazy-constructed inside this function (deferred import) so ``compress.py``
+    imports without pulling in the claude runtime.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    text, _ = context.render_sessions(sessions)
+
+    if distiller is None:
+        # Deferred import + lazy construct: keep compress.py importable without
+        # cc.py's claude runtime, and let tests inject a fake distiller.
+        from . import distill
+
+        distiller = distill.Distiller()
+
+    return distiller.distill(
+        text,
+        query=query,
+        query_mode=query_mode,
+        output_form=output_form,
+        budget=target_tokens,
+    )
+
+
 def _graph_community(
     sessions: list[context.Session],
     *,
@@ -507,6 +555,7 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "statistical_prune": _statistical_prune,
     "perplexity_prune": _perplexity_prune,
     "lexical_relevance": _lexical_relevance,
+    "llm_distill": _llm_distill,
     "graph_community": _graph_community,
 }
 
