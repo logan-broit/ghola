@@ -667,3 +667,55 @@ def test_statistical_prune_no_budget_keeps_all():
         tokenizer=tok,
     )
     assert out == full_text
+
+
+# --- lexical_relevance (BM25, no neural reranker) ------------------------
+
+
+def test_lexical_relevance_keeps_query_matching_turn():
+    """A BM25-relevant turn (shares query terms) survives a tight budget over an
+    irrelevant turn that shares no terms with the query."""
+    sessions = [
+        context.Session(
+            "s1",
+            "2023/05/20 (Sat) 02:21",
+            [
+                {"role": "user", "content": "unrelated weather chatter today"},
+                {"role": "assistant", "content": "my cat luna likes tuna"},
+            ],
+        ),
+    ]
+    tok = CharRatioTokenizer(1)
+    relevant_only, _ = context.render_sessions(
+        [context.Session(
+            "s1", "2023/05/20 (Sat) 02:21",
+            [{"role": "assistant", "content": "my cat luna likes tuna"}],
+        )]
+    )
+    both, _ = context.render_sessions(sessions)
+    budget = tok.count(relevant_only) + 1
+    assert tok.count(relevant_only) <= budget < tok.count(both)
+
+    out = compress.compress(
+        "lexical_relevance",
+        sessions,
+        query="what is my cat luna favorite food",
+        target_tokens=budget,
+        tokenizer=tok,
+    )
+    assert "luna" in out
+    assert "weather chatter" not in out
+
+
+def test_lexical_relevance_no_budget_keeps_all():
+    sessions = _sessions_with_many_turns()
+    tok = CharRatioTokenizer(4)
+    full_text, _ = context.render_sessions(sessions)
+    out = compress.compress(
+        "lexical_relevance",
+        sessions,
+        query="q",
+        target_tokens=None,
+        tokenizer=tok,
+    )
+    assert out == full_text

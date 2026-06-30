@@ -354,6 +354,35 @@ def _statistical_prune(
     return text
 
 
+def _lexical_relevance(
+    sessions: list[context.Session],
+    *,
+    query: str,
+    target_tokens: Optional[int],
+    tokenizer: Optional[Tokenizer],
+    **_: object,
+) -> str:
+    """Keep the turns most BM25-relevant to the query within the budget -- the
+    no-reranker twin of ``extractive_relevance``.
+
+    Same greedy-select + chronological-regroup core, but the scorer is
+    ``stats.BM25Scorer()`` (Okapi BM25 over the turn corpus) instead of a neural
+    reranker. Query-aware by nature: a turn scores zero if it shares no terms
+    with the query, so a tight budget keeps the term-overlapping turns.
+    """
+    if target_tokens is None or tokenizer is None:
+        text, _ = context.render_sessions(sessions)
+        return text
+
+    kept = _score_and_greedy_select(
+        sessions, query, target_tokens, tokenizer, stats.BM25Scorer()
+    )
+    if not kept:
+        return ""
+    text, _ = context.render_sessions(_regroup(sessions, kept))
+    return text
+
+
 # name -> compressor. compress() dispatches here; KeyError on unknown name.
 REGISTRY: dict[str, Callable[..., str]] = {
     "full": _full,
@@ -362,6 +391,7 @@ REGISTRY: dict[str, Callable[..., str]] = {
     "extractive_relevance": _extractive_relevance,
     "extractive_relevance_expanded": _extractive_relevance_expanded,
     "statistical_prune": _statistical_prune,
+    "lexical_relevance": _lexical_relevance,
 }
 
 
