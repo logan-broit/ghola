@@ -160,6 +160,11 @@ class CCRunner:
     timeout_s: int = DEFAULT_TIMEOUT_S
     parallel: int = DEFAULT_PARALLEL
     progress_every: int = 10
+    # The claude model id for this runner. Defaults to the fixed Opus MODEL so
+    # the reader/judge — which build a bare CCRunner() — stay on the published
+    # rate-distortion frontier's model (comparability-critical). ONLY the
+    # distiller overrides this (see distill._default_call / GHOLA_DISTILL_MODEL).
+    model: str = MODEL
     # Phrasing-independent stop: the 2026-06-10 run proved the marker list
     # can miss the real limit message (334 calls churned uselessly). N
     # consecutive errored results — whatever the message — means the window
@@ -178,7 +183,7 @@ class CCRunner:
             self.claude_bin,
             "-p",
             "--model",
-            MODEL,
+            self.model,
             "--system-prompt",
             system,
             "--tools",
