@@ -256,6 +256,22 @@ def test_consecutive_failure_breaker_stops_submitting(tmp_path):
     assert len(ei.value.results) >= 3
 
 
+def test_ccrunner_default_model_is_opus():
+    # COMPARABILITY GUARD: the reader/judge build a bare CCRunner() and rely on
+    # the Opus default. The published rate-distortion frontier is measured with
+    # an Opus reader+judge; if the default silently changes model, the curve is
+    # corrupted. A no-arg runner must still put the Opus id in the argv.
+    assert "claude-opus-4-8" in CCRunner()._argv("sys")
+
+
+def test_ccrunner_model_override_in_argv():
+    # An explicit model override flows into the argv and REPLACES the Opus id
+    # (used ONLY by the distiller via GHOLA_DISTILL_MODEL — never reader/judge).
+    argv = CCRunner(model="claude-haiku-4-5")._argv("sys")
+    assert "claude-haiku-4-5" in argv
+    assert "claude-opus-4-8" not in argv
+
+
 def test_error_capture_keeps_tail(tmp_path):
     # The failure detail lives at the END of claude's output; the stored
     # error must keep the tail, not the head (2026-06-10: stored heads made

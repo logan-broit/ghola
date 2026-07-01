@@ -177,10 +177,19 @@ def _default_call() -> Callable[[str], str]:
 
     Imported lazily so importing ``distill.py`` (and ``compress.py``) never pulls
     in the claude runtime.
+
+    ``GHOLA_DISTILL_MODEL`` (if set and non-empty) overrides the claude model
+    for the DISTILLER ONLY — never the reader or judge. This is
+    comparability-critical: the published rate-distortion frontier is measured
+    with an Opus reader+judge, so those must keep cc.MODEL. The distiller is a
+    preprocessing step whose output is cached, so its model can be swapped (e.g.
+    to a cheaper one) without corrupting the reader/judge measurement. When the
+    env var is unset, the distiller falls back to the Opus default too.
     """
     from .cc import CCRequest, CCRunner
 
-    runner = CCRunner()
+    override = os.environ.get("GHOLA_DISTILL_MODEL")
+    runner = CCRunner(model=override) if override else CCRunner()
 
     def call(prompt: str) -> str:
         # _run_one raises UsageLimitExhausted on a usage-window stop (let it

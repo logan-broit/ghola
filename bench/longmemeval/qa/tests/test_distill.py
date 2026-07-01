@@ -11,7 +11,7 @@ in CI).
 
 from __future__ import annotations
 
-from lme_qa import distill
+from lme_qa import cc, distill
 
 
 def test_render_structured_joins_facts():
@@ -143,6 +143,41 @@ def test_distill_caches_rendered_text_not_raw(tmp_path):
         context_text="ctx",
     )
     assert cache.get(key) == "- x\n- y"
+
+
+def test_default_call_honors_distill_model_env(monkeypatch):
+    # The DISTILLER-ONLY knob: GHOLA_DISTILL_MODEL overrides the distiller's
+    # model without touching the reader/judge (which construct a bare CCRunner
+    # and stay Opus — that comparability guard lives in tests/test_cc.py).
+    #
+    # No real claude call: patch cc.CCRunner._run_one to capture the runner's
+    # .model off `self` and return a dummy succeeded CCResult. Assert on the
+    # constructed runner's model (process-construction logic), not a live call.
+    seen: dict[str, str] = {}
+
+    def fake_run_one(self, req):
+        seen["model"] = self.model
+        return cc.CCResult(
+            custom_id=req.custom_id,
+            status="succeeded",
+            text="distilled",
+            input_tokens=0,
+            output_tokens=0,
+            error="",
+        )
+
+    monkeypatch.setattr(cc.CCRunner, "_run_one", fake_run_one)
+
+    # Env set -> distiller uses the override.
+    monkeypatch.setenv("GHOLA_DISTILL_MODEL", "claude-haiku-4-5")
+    assert distill._default_call()("prompt") == "distilled"
+    assert seen["model"] == "claude-haiku-4-5"
+
+    # Env unset -> distiller falls back to the Opus default (everywhere Opus).
+    seen.clear()
+    monkeypatch.delenv("GHOLA_DISTILL_MODEL", raising=False)
+    assert distill._default_call()("prompt") == "distilled"
+    assert seen["model"] == cc.MODEL == "claude-opus-4-8"
 
 
 def test_distill_works_without_cache():
