@@ -592,3 +592,39 @@ def test_aggregate_many_single_source_matches_aggregate(tmp_path):
     many = rd_aggregate.aggregate_many([(tmp_path, {})])
     one = rd_aggregate.aggregate(tmp_path)
     assert many == one
+
+
+# --- extra-label columns: _series_key and render_markdown ---------------------
+
+
+def test_series_key_distinguishes_distill_model():
+    base = {
+        "compressor": "llm_distill", "expansion_reserve": None,
+        "query_mode": "agnostic", "output_form": "prose",
+        "prune_level": None, "oracle_model": None, "edge_metric": None,
+    }
+    a = dict(base, distill_model="haiku")
+    b = dict(base, distill_model="opus")
+    assert rd_aggregate._series_key(a) != rd_aggregate._series_key(b)
+
+
+def test_render_markdown_includes_label_column(tmp_path):
+    """Extra label keys appear as columns; unlabeled rows get the em-dash placeholder."""
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    # llm_distill leaf labelled distill_model=opus.
+    _write_leaf(out_a, "llm_distill", 1000, 0, [("q1", 800, True), ("q2", 820, True)])
+    # truncate_tokens leaf: no distill_model label.
+    _write_leaf(out_b, "truncate_tokens", 500, 0, [("q1", 500, False), ("q2", 520, True)])
+    rows = rd_aggregate.aggregate_many(
+        [(out_a, {"distill_model": "opus"}, ["llm_distill"]), (out_b, {})]
+    )
+    md = rd_aggregate.render_markdown(rows)
+    # Column header must be present.
+    assert "distill_model" in md
+    # The labelled row value must appear.
+    assert "opus" in md
+    # The unlabelled row must use the em-dash placeholder (not a blank cell).
+    # Both rows are in the table; only one carries distill_model, so "—" must appear
+    # in that column for the truncate_tokens row.
+    assert "—" in md

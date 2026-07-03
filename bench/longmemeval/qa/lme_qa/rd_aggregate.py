@@ -31,6 +31,11 @@ Emits three artifacts under ``--outdir``:
 
 Both files reuse the reader's append-only dedup (last-wins per qid) so a
 failed-then-succeeded qid within a leaf counts once, at its succeeded values.
+
+``aggregate`` / ``lme-qa-rd`` are the single-outdir path. ``aggregate_many``
+pools leaves across multiple outdirs with per-outdir extra labels (e.g.
+``distill_model="opus"``), keeping rows with different labels distinct even
+when their leaf directory names are identical.
 """
 
 from __future__ import annotations
@@ -49,6 +54,17 @@ from . import cli
 # are simple std-err-based (Wald for accuracy, SEM for rate) — a rough spread
 # indicator on a small eval set, not an exact interval.
 _Z95 = 1.96
+
+# Fixed keys present on every row produced by aggregate / aggregate_many.
+# Any key on a row that is NOT in this set is an extra label stamped by
+# aggregate_many (e.g. ``distill_model``). Used by _series_key and
+# render_markdown to surface those labels without hard-coding them.
+_STANDARD_ROW_KEYS: frozenset[str] = frozenset({
+    "compressor", "budget", "expansion_reserve", "query_mode", "output_form",
+    "prune_level", "oracle_model", "edge_metric",
+    "n", "mean_rate", "accuracy", "distortion", "rate_ci", "acc_ci",
+    "rate_tokenizer",
+})
 
 
 @dataclass(frozen=True)
@@ -467,7 +483,13 @@ def _rate_unit(rows: list[dict[str, Any]]) -> str:
 
 
 def render_markdown(rows: list[dict[str, Any]]) -> str:
-    """Render the frontier table (sorted by mean rate) + the gap callout."""
+    """Render the frontier table (sorted by mean rate) + the gap callout.
+
+    Extra label keys attached by ``aggregate_many`` (any key not in
+    ``_STANDARD_ROW_KEYS``, e.g. ``distill_model``) appear as additional
+    columns, one per key in sorted order, after the fixed columns. Rows that
+    do not carry a given label key render the em-dash placeholder in that cell,
+    matching the convention used by the existing optional columns."""
     lines: list[str] = []
     lines.append("# Rate-distortion frontier")
     lines.append("")
@@ -481,19 +503,28 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
         "mean rate (cheapest first)."
     )
     lines.append("")
+    # Collect extra label keys present on any row, in sorted order.
+    extra_keys: list[str] = sorted(
+        {k for r in rows for k in r if k not in _STANDARD_ROW_KEYS}
+    )
+    extra_header = (" " + " | ".join(extra_keys) + " |") if extra_keys else ""
     lines.append(
         "| compressor | budget | reserve | query_mode | output_form | "
         "edge_metric | oracle_model | prune_level | N | "
-        "mean_rate | rate_ci | accuracy | distortion | acc_ci |"
+        f"mean_rate | rate_ci | accuracy | distortion | acc_ci |{extra_header}"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    sep_extra = (" " + " | ".join("---" for _ in extra_keys) + " |") if extra_keys else ""
+    lines.append(f"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|{sep_extra}")
     for r in rows:
         reserve = r.get("expansion_reserve")
         reserve_label = f"{reserve:.1f}" if reserve is not None else "—"
+        extra_cells = (
+            " " + " | ".join(r.get(k) or "—" for k in extra_keys) + " |"
+        ) if extra_keys else ""
         lines.append(
             "| {comp} | {budget} | {reserve} | {qmode} | {oform} | "
             "{emetric} | {omodel} | {plevel} | {n} | "
-            "{rate} | {rate_ci} | {acc:.1%} | {dist:.1%} | {acc_ci} |".format(
+            "{rate} | {rate_ci} | {acc:.1%} | {dist:.1%} | {acc_ci} |{extra}".format(
                 comp=r["compressor"],
                 budget=_budget_label(r["budget"]),
                 reserve=reserve_label,
@@ -508,6 +539,7 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
                 acc=r["accuracy"],
                 dist=r["distortion"],
                 acc_ci=_fmt_num(r["acc_ci"]),
+                extra=extra_cells,
             )
         )
     lines.append("")
@@ -526,12 +558,20 @@ def _series_key(r: dict[str, Any]) -> str:
     discriminating hyperparameter that is set — ``output_form`` (prose vs
     structured), ``edge_metric``, ``oracle_model`` — so variants that differ only
     in one of those don't silently collapse onto the same line. ``prune_level``
-    is excluded: it's a reserved no-op that doesn't change the emitted context."""
+    is excluded: it's a reserved no-op that doesn't change the emitted context.
+
+    Extra label keys attached by ``aggregate_many`` (any key not in
+    ``_STANDARD_ROW_KEYS``, e.g. ``distill_model``) are appended in sorted
+    key order as ``key=value`` segments so rows with different labels never
+    collapse onto the same series. Rows without extra labels are unaffected."""
     key = f"{r['compressor']}/{r.get('query_mode') or 'na'}"
     for field in ("output_form", "edge_metric", "oracle_model"):
         val = r.get(field)
         if val:
             key += f"/{val}"
+    # Append any extra label keys (from aggregate_many) in sorted order.
+    for k in sorted(r.keys() - _STANDARD_ROW_KEYS):
+        key += f"/{k}={r[k]}"
     return key
 
 
