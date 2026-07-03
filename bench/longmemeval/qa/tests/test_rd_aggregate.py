@@ -628,3 +628,41 @@ def test_render_markdown_includes_label_column(tmp_path):
     # Both rows are in the table; only one carries distill_model, so "—" must appear
     # in that column for the truncate_tokens row.
     assert "—" in md
+
+
+# --- render_latex_table -------------------------------------------------------
+
+
+def test_render_latex_table_two_rows(tmp_path):
+    # extractive_relevance b1000 (1 q, correct, rate 993) and
+    # truncate_tokens b1000 (1 q, wrong, rate 1000) in one outdir
+    _write_leaf(tmp_path, "extractive_relevance", 1000, 0, [("q1", 993, True)])
+    _write_leaf(tmp_path, "truncate_tokens", 1000, 0, [("q1", 1000, False)])
+    rows = rd_aggregate.aggregate_many([(tmp_path, {})])
+    tex = rd_aggregate.render_latex_table(rows)
+    assert "\\begin{tabular}" in tex and "\\toprule" in tex and "\\bottomrule" in tex
+    assert "extractive\\_relevance" in tex   # underscore escaped
+    assert "100.0" in tex and "0.0" in tex   # the two accuracy percents
+    assert tex.count("\\\\") >= 2            # one line terminator per data row
+    # rows sorted by mean_rate: extractive (993) before truncate (1000)
+    assert tex.index("extractive") < tex.index("truncate")
+
+
+def test_render_latex_table_extra_label_column(tmp_path):
+    """Extra label key produces a column; rows without the label render '--'."""
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    # llm_distill labelled with distill_model=opus
+    _write_leaf(out_a, "llm_distill", 1000, 0, [("q1", 800, True), ("q2", 820, True)])
+    # truncate_tokens with no label
+    _write_leaf(out_b, "truncate_tokens", 500, 0, [("q1", 500, False), ("q2", 520, True)])
+    rows = rd_aggregate.aggregate_many(
+        [(out_a, {"distill_model": "opus"}, ["llm_distill"]), (out_b, {})]
+    )
+    tex = rd_aggregate.render_latex_table(rows)
+    # Column header must be present (underscore escaped)
+    assert "distill\\_model" in tex
+    # The labelled row value must appear
+    assert "opus" in tex
+    # The unlabelled row renders '--' in that column
+    assert "--" in tex

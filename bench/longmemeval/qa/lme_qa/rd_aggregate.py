@@ -388,6 +388,7 @@ def aggregate_many(
         per_q_acc = [_mean(slot["labels"]) for slot in qmap.values()]
         accuracy = _mean(per_q_acc)
         mean_rate = _mean(per_q_rate)
+        # Fields here must stay in sync with _STANDARD_ROW_KEYS (top of module).
         row = {
             "compressor": setting.compressor,
             "budget": setting.budget,
@@ -573,6 +574,111 @@ def _series_key(r: dict[str, Any]) -> str:
     for k in sorted(r.keys() - _STANDARD_ROW_KEYS):
         key += f"/{k}={r[k]}"
     return key
+
+
+def _latex_escape(s: str) -> str:
+    """Escape LaTeX-special characters in a text cell value."""
+    s = s.replace("%", r"\%")
+    s = s.replace("_", r"\_")
+    return s
+
+
+def render_latex_table(rows: list[dict[str, Any]]) -> str:
+    """Render the frontier as a booktabs LaTeX tabular for the paper's Table 1.
+
+    Columns: compressor, budget, then any optional hyperparameter/label columns
+    that are non-empty in at least one row (same optional-column discovery as
+    ``render_markdown``), then n, mean_rate, accuracy with CI.
+
+    Rows are sorted by mean_rate ascending (matching ``render_markdown``).
+    Missing optional values render as ``--``. LaTeX-special characters in text
+    cells are escaped.
+    """
+    # Rows already come in sorted by mean_rate from aggregate_many, but sort
+    # defensively to match render_markdown's guarantee.
+    rows = sorted(rows, key=lambda r: r["mean_rate"])
+
+    # Optional fixed hyperparameter columns (same vocabulary as render_markdown).
+    _OPTIONAL_FIXED = [
+        ("expansion_reserve", "reserve"),
+        ("query_mode", r"query\_mode"),
+        ("output_form", r"output\_form"),
+        ("edge_metric", r"edge\_metric"),
+        ("oracle_model", r"oracle\_model"),
+        ("prune_level", r"prune\_level"),
+    ]
+
+    # Which optional fixed columns have at least one non-None, non-empty value?
+    active_optional: list[tuple[str, str]] = [
+        (key, header)
+        for key, header in _OPTIONAL_FIXED
+        if any(r.get(key) for r in rows)
+    ]
+
+    # Extra label keys from aggregate_many (e.g. distill_model), sorted.
+    extra_keys: list[str] = sorted(
+        {k for r in rows for k in r if k not in _STANDARD_ROW_KEYS}
+    )
+
+    # Build the full ordered column list: (row_key_or_None, header_text)
+    # compressor and budget are always present.
+    col_headers: list[str] = (
+        [r"compressor", "budget"]
+        + [hdr for _, hdr in active_optional]
+        + [_latex_escape(k) for k in extra_keys]
+        + ["n", r"mean\_rate", "accuracy"]
+    )
+
+    n_cols = len(col_headers)
+    col_spec = "l" * n_cols  # all left-aligned; caller can tweak in the paper
+
+    lines: list[str] = []
+    lines.append(r"\begin{tabular}{" + col_spec + r"}")
+    lines.append(r"\toprule")
+    lines.append(" & ".join(col_headers) + r" \\")
+    lines.append(r"\midrule")
+
+    for r in rows:
+        cells: list[str] = []
+
+        # compressor
+        cells.append(_latex_escape(r["compressor"]))
+
+        # budget
+        budget_val = r["budget"]
+        cells.append("--" if budget_val is None else str(budget_val))
+
+        # active optional fixed columns
+        for key, _hdr in active_optional:
+            val = r.get(key)
+            if val is None:
+                cells.append("--")
+            elif isinstance(val, float):
+                cells.append(f"{val:.1f}")
+            else:
+                cells.append(_latex_escape(str(val)))
+
+        # extra label columns
+        for k in extra_keys:
+            val = r.get(k)
+            cells.append("--" if val is None else _latex_escape(str(val)))
+
+        # n
+        cells.append(str(r["n"]))
+
+        # mean_rate (one decimal)
+        cells.append(f"{r['mean_rate']:.1f}")
+
+        # accuracy: percent one decimal +/- CI as percent one decimal
+        acc_pct = r["accuracy"] * 100.0
+        ci_pct = r["acc_ci"] * 100.0
+        cells.append(f"{acc_pct:.1f} $\\pm$ {ci_pct:.1f}")
+
+        lines.append(" & ".join(cells) + r" \\")
+
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    return "\n".join(lines) + "\n"
 
 
 def _write_plot(rows: list[dict[str, Any]], path: Path) -> bool:
