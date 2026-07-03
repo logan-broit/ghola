@@ -66,6 +66,18 @@ _STANDARD_ROW_KEYS: frozenset[str] = frozenset({
     "rate_tokenizer",
 })
 
+# Optional fixed hyperparameter columns that may appear in the table when
+# non-empty. Shared between render_markdown and render_latex_table so both
+# emit the same column vocabulary. Each entry is (row_key, display_header).
+_OPTIONAL_FIXED: list[tuple[str, str]] = [
+    ("expansion_reserve", "reserve"),
+    ("query_mode", "query_mode"),
+    ("output_form", "output_form"),
+    ("edge_metric", "edge_metric"),
+    ("oracle_model", "oracle_model"),
+    ("prune_level", "prune_level"),
+]
+
 
 @dataclass(frozen=True)
 class _LeafSetting:
@@ -508,10 +520,11 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     extra_keys: list[str] = sorted(
         {k for r in rows for k in r if k not in _STANDARD_ROW_KEYS}
     )
+    # Optional-column vocabulary matches _OPTIONAL_FIXED (module-level constant).
     extra_header = (" " + " | ".join(extra_keys) + " |") if extra_keys else ""
     lines.append(
         "| compressor | budget | reserve | query_mode | output_form | "
-        "edge_metric | oracle_model | prune_level | N | "
+        "edge_metric | oracle_model | prune_level | n | "
         f"mean_rate | rate_ci | accuracy | distortion | acc_ci |{extra_header}"
     )
     sep_extra = (" " + " | ".join("---" for _ in extra_keys) + " |") if extra_keys else ""
@@ -577,7 +590,15 @@ def _series_key(r: dict[str, Any]) -> str:
 
 
 def _latex_escape(s: str) -> str:
-    """Escape LaTeX-special characters in a text cell value."""
+    """Escape LaTeX-special characters in a text cell value.
+
+    Replaces ``&``, ``%``, and ``_`` — the only characters that appear in
+    compressor names, model identifiers, and numeric labels emitted by this
+    module that have special meaning inside a LaTeX tabular cell. Backslash
+    itself is not present in this value domain so no further escaping is
+    required.
+    """
+    s = s.replace("&", r"\&")
     s = s.replace("%", r"\%")
     s = s.replace("_", r"\_")
     return s
@@ -598,19 +619,10 @@ def render_latex_table(rows: list[dict[str, Any]]) -> str:
     # defensively to match render_markdown's guarantee.
     rows = sorted(rows, key=lambda r: r["mean_rate"])
 
-    # Optional fixed hyperparameter columns (same vocabulary as render_markdown).
-    _OPTIONAL_FIXED = [
-        ("expansion_reserve", "reserve"),
-        ("query_mode", r"query\_mode"),
-        ("output_form", r"output\_form"),
-        ("edge_metric", r"edge\_metric"),
-        ("oracle_model", r"oracle\_model"),
-        ("prune_level", r"prune\_level"),
-    ]
-
-    # Which optional fixed columns have at least one non-None, non-empty value?
+    # Optional fixed hyperparameter columns (module-level _OPTIONAL_FIXED).
+    # Headers are LaTeX-escaped here so the shared constant stays plain-text.
     active_optional: list[tuple[str, str]] = [
-        (key, header)
+        (key, _latex_escape(header))
         for key, header in _OPTIONAL_FIXED
         if any(r.get(key) for r in rows)
     ]
@@ -666,8 +678,9 @@ def render_latex_table(rows: list[dict[str, Any]]) -> str:
         # n
         cells.append(str(r["n"]))
 
-        # mean_rate (one decimal)
-        cells.append(f"{r['mean_rate']:.1f}")
+        # mean_rate: one decimal +/- CI one decimal (same style as accuracy cell)
+        rate_ci = r["rate_ci"]
+        cells.append(f"{r['mean_rate']:.1f} $\\pm$ {rate_ci:.1f}")
 
         # accuracy: percent one decimal +/- CI as percent one decimal
         acc_pct = r["accuracy"] * 100.0

@@ -635,7 +635,8 @@ def test_render_markdown_includes_label_column(tmp_path):
 
 def test_render_latex_table_two_rows(tmp_path):
     # extractive_relevance b1000 (1 q, correct, rate 993) and
-    # truncate_tokens b1000 (1 q, wrong, rate 1000) in one outdir
+    # truncate_tokens b1000 (1 q, wrong, rate 1000) in one outdir.
+    # n=1 in each setting -> rate_ci = 0.0 (no spread estimate from one point).
     _write_leaf(tmp_path, "extractive_relevance", 1000, 0, [("q1", 993, True)])
     _write_leaf(tmp_path, "truncate_tokens", 1000, 0, [("q1", 1000, False)])
     rows = rd_aggregate.aggregate_many([(tmp_path, {})])
@@ -646,15 +647,18 @@ def test_render_latex_table_two_rows(tmp_path):
     assert tex.count("\\\\") >= 2            # one line terminator per data row
     # rows sorted by mean_rate: extractive (993) before truncate (1000)
     assert tex.index("extractive") < tex.index("truncate")
+    # rate CI is present in the rate cell (n=1 -> CI=0.0)
+    assert "993.0 $\\pm$ 0.0" in tex
+    assert "1000.0 $\\pm$ 0.0" in tex
 
 
 def test_render_latex_table_extra_label_column(tmp_path):
     """Extra label key produces a column; rows without the label render '--'."""
     out_a = tmp_path / "a"
     out_b = tmp_path / "b"
-    # llm_distill labelled with distill_model=opus
+    # llm_distill labelled with distill_model=opus; n=2 -> rate_ci > 0
     _write_leaf(out_a, "llm_distill", 1000, 0, [("q1", 800, True), ("q2", 820, True)])
-    # truncate_tokens with no label
+    # truncate_tokens with no label; n=2 -> rate_ci > 0
     _write_leaf(out_b, "truncate_tokens", 500, 0, [("q1", 500, False), ("q2", 520, True)])
     rows = rd_aggregate.aggregate_many(
         [(out_a, {"distill_model": "opus"}, ["llm_distill"]), (out_b, {})]
@@ -666,3 +670,7 @@ def test_render_latex_table_extra_label_column(tmp_path):
     assert "opus" in tex
     # The unlabelled row renders '--' in that column
     assert "--" in tex
+    # rate CI is present in each rate cell (n=2 -> CI > 0; $\pm$ always appears)
+    # llm_distill mean_rate=810, truncate mean_rate=510; both cells have $\pm$
+    assert "810.0 $\\pm$" in tex
+    assert "510.0 $\\pm$" in tex
