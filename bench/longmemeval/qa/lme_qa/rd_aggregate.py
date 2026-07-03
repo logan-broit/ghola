@@ -237,77 +237,134 @@ def _sem_ci(xs: list[float]) -> float:
     return _Z95 * math.sqrt(var) / math.sqrt(n)
 
 
-def aggregate(outdir: Path) -> list[dict[str, Any]]:
-    """Aggregate a sweep tree into one rate-distortion row per setting.
+# A source for ``aggregate_many``: an outdir, the extra labels to stamp onto its
+# rows, and the compressors those labels apply to (``None`` = all). The 3-tuple
+# is normalized from the 2-tuple convenience form at the top of the function.
+_Source = tuple[Path, dict[str, str], list[str] | None]
 
-    Walks ``<outdir>/<compressor>__b<budget>/s*/`` leaves, joins each leaf's
-    answers (rate) to its judgments (label) per qid, averages samples per
-    question then questions per setting, and returns one dict per setting with
-    ``{compressor, budget, n, mean_rate, distortion, accuracy, rate_ci,
-    acc_ci}``. Rows are sorted by ``mean_rate`` ascending (the frontier reads
-    left-to-right cheapest-first). Settings with no joinable question are
-    dropped (they contribute no point to the curve).
+# A group key: the full setting PLUS the labels that APPLY to that leaf (sorted
+# items so it's hashable + order-independent). Labels participate in grouping so
+# rows with different labels (haiku- vs opus-distilled) never merge, while rows
+# whose labels match pool their samples.
+_GroupKey = tuple[_LeafSetting, tuple[tuple[str, str], ...]]
+
+
+def _applied_labels(
+    compressor: str, labels: dict[str, str], label_compressors: list[str] | None
+) -> dict[str, str]:
+    """The subset of ``labels`` that applies to a leaf of ``compressor``.
+
+    ``label_compressors is None`` means the labels apply to every compressor;
+    otherwise only leaves whose compressor is in that list receive them (and
+    they participate in the group key only for those leaves)."""
+    if not labels:
+        return {}
+    if label_compressors is None or compressor in label_compressors:
+        return dict(labels)
+    return {}
+
+
+def aggregate_many(
+    sources: list[tuple[Path, dict[str, str]] | _Source],
+) -> list[dict[str, Any]]:
+    """Aggregate leaves from MULTIPLE outdirs into one row per (setting + labels).
+
+    Each source is ``(outdir, labels, label_compressors)``; the 2-tuple
+    ``(outdir, labels)`` is accepted as a convenience (``label_compressors=None``
+    = labels apply to every compressor) and normalized here. ``labels`` is a dict
+    of extra key/values stamped onto matching rows; ``label_compressors``
+    restricts which compressors receive them.
+
+    Leaves from different outdirs that map to the SAME setting AND carry the same
+    applied labels pool their per-question samples into one row (so a replicate
+    outdir just adds samples to an existing cell). Rows whose applied labels
+    differ stay distinct — leaf names do not encode the distiller model, so the
+    labels are what keep e.g. haiku- and opus-distilled results apart even when
+    the leaf dir names are identical.
+
+    Averaging is unchanged from the single-outdir walk: samples are averaged per
+    question first, then questions per group. Rows carry the standard fields
+    ``{compressor, budget, ..., n, mean_rate, accuracy, distortion, rate_ci,
+    acc_ci, rate_tokenizer}`` and — only for rows the labels applied to — the
+    label keys verbatim, appended AFTER the standard fields. Rows are sorted by
+    ``mean_rate`` ascending. Groups with no joinable question are dropped.
     """
-    if not outdir.exists():
-        return []
+    # group -> qid -> {"rates": [...per sample...], "labels": [...]}
+    per_group: dict[_GroupKey, dict[str, dict[str, list[float]]]] = {}
+    # group -> rate tokenizer name (the unit; carried to the curve row).
+    rate_tok_by_group: dict[_GroupKey, str | None] = {}
+    # group -> the applied-label dict (for row.update); same for every leaf in a
+    # group by construction (the labels are part of the key).
+    labels_by_group: dict[_GroupKey, dict[str, str]] = {}
+    # Preserve first-seen group order for a stable tie-break under equal rate.
+    order: list[_GroupKey] = []
 
-    # setting -> qid -> {"rates": [...per sample...], "labels": [...]}
-    per_setting: dict[_LeafSetting, dict[str, dict[str, list[float]]]] = {}
-    # setting -> rate tokenizer name (the unit; carried to the curve row).
-    rate_tok_by_setting: dict[_LeafSetting, str | None] = {}
-    # Preserve first-seen setting order for a stable tie-break under equal rate.
-    order: list[_LeafSetting] = []
-
-    for setting_dir in sorted(p for p in outdir.iterdir() if p.is_dir()):
-        # Prefer the per-setting sidecar (the source of truth: every field,
-        # losslessly) — fall back to the dir-name parse for legacy leaves written
-        # before the sidecar existed (new fields stay None there).
-        sidecar = setting_dir / "setting.json"
-        setting = (
-            _leaf_setting_from_sidecar(sidecar)
-            if sidecar.exists()
-            else _parse_setting_dir(setting_dir.name)
-        )
-        if setting is None:
-            # A non-setting dir under outdir is legitimately ignored. But a
-            # Stage-B leaf name (carries a __q/__of/__pl/__om/__e tag) with NO
-            # sidecar that also fails the legacy parse is a real measurement
-            # vanishing without a trace — warn (mirrors the context_tokens
-            # fallback warning in _rate_by_qid) but keep the existing skip.
-            if not sidecar.exists() and _has_stage_b_tag(setting_dir.name):
-                print(
-                    f"warning: {setting_dir.name}: Stage-B leaf has no "
-                    f"setting.json sidecar and its dir name does not parse — "
-                    f"dropping it from the curve. Re-run the sweep to write the "
-                    f"sidecar so this setting is aggregated.",
-                    file=sys.stderr,
-                )
+    for src in sources:
+        # Normalize the 2-tuple convenience form to the full 3-tuple.
+        if len(src) == 2:
+            outdir, labels = src  # type: ignore[misc]
+            label_compressors: list[str] | None = None
+        else:
+            outdir, labels, label_compressors = src  # type: ignore[misc]
+        if not outdir.exists():
             continue
-        for sample_dir in sorted(p for p in setting_dir.iterdir() if p.is_dir()):
-            answers = sample_dir / "answers.jsonl"
-            judgments = sample_dir / "judgments.jsonl"
-            if not answers.exists() or not judgments.exists():
+
+        for setting_dir in sorted(p for p in outdir.iterdir() if p.is_dir()):
+            # Prefer the per-setting sidecar (the source of truth: every field,
+            # losslessly) — fall back to the dir-name parse for legacy leaves
+            # written before the sidecar existed (new fields stay None there).
+            sidecar = setting_dir / "setting.json"
+            setting = (
+                _leaf_setting_from_sidecar(sidecar)
+                if sidecar.exists()
+                else _parse_setting_dir(setting_dir.name)
+            )
+            if setting is None:
+                # A non-setting dir under outdir is legitimately ignored. But a
+                # Stage-B leaf name (carries a __q/__of/__pl/__om/__e tag) with NO
+                # sidecar that also fails the legacy parse is a real measurement
+                # vanishing without a trace — warn (mirrors the context_tokens
+                # fallback warning in _rate_by_qid) but keep the existing skip.
+                if not sidecar.exists() and _has_stage_b_tag(setting_dir.name):
+                    print(
+                        f"warning: {setting_dir.name}: Stage-B leaf has no "
+                        f"setting.json sidecar and its dir name does not parse — "
+                        f"dropping it from the curve. Re-run the sweep to write "
+                        f"the sidecar so this setting is aggregated.",
+                        file=sys.stderr,
+                    )
                 continue
-            rates, rate_tok = _rate_by_qid(answers, setting_dir.name)
-            labels = _label_by_qid(judgments)
-            if setting not in per_setting:
-                per_setting[setting] = {}
-                order.append(setting)
-            # First non-null tokenizer name seen for the setting wins (samples of
-            # one setting share a tokenizer; a pre-fix leaf reports None).
-            if rate_tok and not rate_tok_by_setting.get(setting):
-                rate_tok_by_setting[setting] = rate_tok
-            qmap = per_setting[setting]
-            # Join on qids present in BOTH files (a rate with no verdict, or a
-            # verdict with no rate, is not a usable rate-distortion point).
-            for qid in rates.keys() & labels.keys():
-                slot = qmap.setdefault(qid, {"rates": [], "labels": []})
-                slot["rates"].append(rates[qid])
-                slot["labels"].append(1.0 if labels[qid] else 0.0)
+            applied = _applied_labels(
+                setting.compressor, labels, label_compressors
+            )
+            group: _GroupKey = (setting, tuple(sorted(applied.items())))
+            for sample_dir in sorted(p for p in setting_dir.iterdir() if p.is_dir()):
+                answers = sample_dir / "answers.jsonl"
+                judgments = sample_dir / "judgments.jsonl"
+                if not answers.exists() or not judgments.exists():
+                    continue
+                rates, rate_tok = _rate_by_qid(answers, setting_dir.name)
+                labels_map = _label_by_qid(judgments)
+                if group not in per_group:
+                    per_group[group] = {}
+                    labels_by_group[group] = applied
+                    order.append(group)
+                # First non-null tokenizer name seen for the group wins (samples
+                # of one setting share a tokenizer; a pre-fix leaf reports None).
+                if rate_tok and not rate_tok_by_group.get(group):
+                    rate_tok_by_group[group] = rate_tok
+                qmap = per_group[group]
+                # Join on qids present in BOTH files (a rate with no verdict, or
+                # a verdict with no rate, is not a usable rate-distortion point).
+                for qid in rates.keys() & labels_map.keys():
+                    slot = qmap.setdefault(qid, {"rates": [], "labels": []})
+                    slot["rates"].append(rates[qid])
+                    slot["labels"].append(1.0 if labels_map[qid] else 0.0)
 
     rows: list[dict[str, Any]] = []
-    for setting in order:
-        qmap = per_setting[setting]
+    for group in order:
+        setting, _ = group
+        qmap = per_group[group]
         if not qmap:
             continue
         # Average samples per question first, then average across questions.
@@ -315,31 +372,45 @@ def aggregate(outdir: Path) -> list[dict[str, Any]]:
         per_q_acc = [_mean(slot["labels"]) for slot in qmap.values()]
         accuracy = _mean(per_q_acc)
         mean_rate = _mean(per_q_rate)
-        rows.append(
-            {
-                "compressor": setting.compressor,
-                "budget": setting.budget,
-                "expansion_reserve": setting.expansion_reserve,
-                "query_mode": setting.query_mode,
-                "output_form": setting.output_form,
-                "prune_level": setting.prune_level,
-                "oracle_model": setting.oracle_model,
-                "edge_metric": setting.edge_metric,
-                "n": len(qmap),
-                "mean_rate": mean_rate,
-                "accuracy": accuracy,
-                "distortion": 1.0 - accuracy,
-                "rate_ci": _sem_ci(per_q_rate),
-                "acc_ci": _sem_ci(per_q_acc),
-                # The rate unit travels with the row so the artifact is
-                # self-describing (None for a pre-fix run that fell back).
-                "rate_tokenizer": rate_tok_by_setting.get(setting),
-            }
-        )
+        row = {
+            "compressor": setting.compressor,
+            "budget": setting.budget,
+            "expansion_reserve": setting.expansion_reserve,
+            "query_mode": setting.query_mode,
+            "output_form": setting.output_form,
+            "prune_level": setting.prune_level,
+            "oracle_model": setting.oracle_model,
+            "edge_metric": setting.edge_metric,
+            "n": len(qmap),
+            "mean_rate": mean_rate,
+            "accuracy": accuracy,
+            "distortion": 1.0 - accuracy,
+            "rate_ci": _sem_ci(per_q_rate),
+            "acc_ci": _sem_ci(per_q_acc),
+            # The rate unit travels with the row so the artifact is
+            # self-describing (None for a pre-fix run that fell back).
+            "rate_tokenizer": rate_tok_by_group.get(group),
+        }
+        # Applied labels are stamped verbatim AFTER the standard fields, only for
+        # rows the labels applied to (an empty dict is a no-op).
+        row.update(labels_by_group[group])
+        rows.append(row)
 
     # Sort by mean rate ascending; stable on the first-seen order for ties.
     rows.sort(key=lambda r: r["mean_rate"])
     return rows
+
+
+def aggregate(outdir: Path) -> list[dict[str, Any]]:
+    """Aggregate a single sweep tree into one rate-distortion row per setting.
+
+    Thin wrapper over ``aggregate_many`` with a single unlabeled source: walks
+    ``<outdir>/<compressor>__b<budget>/s*/`` leaves, joins each leaf's answers
+    (rate) to its judgments (label) per qid, averages samples per question then
+    questions per setting, and returns one dict per setting sorted by
+    ``mean_rate`` ascending. Settings with no joinable question are dropped.
+    """
+    return aggregate_many([(outdir, {})])
 
 
 def _fmt_num(x: float) -> str:

@@ -522,3 +522,73 @@ def test_series_key_distinguishes_output_form_and_edge_metric():
     assert rd_aggregate._series_key(j) != rd_aggregate._series_key(t)
     # Legacy row (query_mode only) keeps the original label.
     assert rd_aggregate._series_key({"compressor": "full", "query_mode": None}) == "full/na"
+
+
+# --- aggregate_many: multi-outdir pooling with extra labels ------------------
+
+
+def test_aggregate_many_pools_same_setting_across_outdirs(tmp_path):
+    # Same setting (extractive_relevance b2000) in two outdirs -> ONE row, the
+    # per-question samples POOLED across outdirs. Both leaves carry the SAME two
+    # qids so pooling adds a second sample per question (not two new questions):
+    #   outdir a: q1 correct, q2 correct
+    #   outdir b: q1 correct, q2 wrong
+    # Per question across the pooled samples: q1 acc = mean(1,1) = 1.0,
+    # q2 acc = mean(1,0) = 0.5. Across questions: mean(1.0, 0.5) = 0.75.
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    _write_leaf(out_a, "extractive_relevance", 2000, 0,
+                [("q1", 1900, True), ("q2", 1950, True)])
+    _write_leaf(out_b, "extractive_relevance", 2000, 0,
+                [("q1", 1980, True), ("q2", 1920, False)])
+    rows = rd_aggregate.aggregate_many([(out_a, {}), (out_b, {})])
+    assert len(rows) == 1
+    assert rows[0]["n"] == 2  # two distinct pooled questions, not four
+    assert rows[0]["accuracy"] == pytest.approx(0.75)
+    # Rate is per-question-averaged across the pooled samples then over questions:
+    #   q1 = mean(1900, 1980) = 1940, q2 = mean(1950, 1920) = 1935,
+    #   mean_rate = mean(1940, 1935) = 1937.5.
+    assert rows[0]["mean_rate"] == pytest.approx(1937.5)
+
+
+def test_aggregate_many_labels_make_settings_distinct(tmp_path):
+    # Identical leaf names in two outdirs but DIFFERENT labels -> TWO rows, each
+    # carrying its label. Leaf names do not encode the distiller model, so the
+    # label is the only thing keeping haiku- and opus-distilled results apart.
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    _write_leaf(out_a, "llm_distill", 1000, 0, [("q1", 800, True), ("q2", 820, True)])
+    _write_leaf(out_b, "llm_distill", 1000, 0, [("q1", 810, True), ("q2", 830, False)])
+    rows = rd_aggregate.aggregate_many(
+        [(out_a, {"distill_model": "haiku"}), (out_b, {"distill_model": "opus"})]
+    )
+    assert len(rows) == 2
+    assert {r["distill_model"] for r in rows} == {"haiku", "opus"}
+    # Each row keeps its own pooled math (they did NOT merge): haiku both correct
+    # (acc 1.0), opus one wrong (acc 0.5).
+    by_model = {r["distill_model"]: r for r in rows}
+    assert by_model["haiku"]["accuracy"] == pytest.approx(1.0)
+    assert by_model["opus"]["accuracy"] == pytest.approx(0.5)
+
+
+def test_aggregate_many_label_compressors_scopes_labels(tmp_path):
+    # One outdir with llm_distill AND truncate_tokens leaves; the label is scoped
+    # to llm_distill only -> the llm_distill row carries distill_model, the
+    # truncate_tokens row does NOT (and the label does not enter its group key).
+    out_a = tmp_path / "a"
+    _write_leaf(out_a, "llm_distill", 1000, 0, [("q1", 800, True), ("q2", 820, True)])
+    _write_leaf(out_a, "truncate_tokens", 1000, 0, [("q1", 900, True), ("q2", 920, False)])
+    rows = rd_aggregate.aggregate_many(
+        [(out_a, {"distill_model": "haiku"}, ["llm_distill"])]
+    )
+    by_comp = {r["compressor"]: r for r in rows}
+    assert by_comp["llm_distill"]["distill_model"] == "haiku"
+    assert "distill_model" not in by_comp["truncate_tokens"]
+
+
+def test_aggregate_many_single_source_matches_aggregate(tmp_path):
+    _write_leaf(tmp_path, "full", None, 0, [("q1", 1000, True), ("q2", 1200, False)])
+    _write_leaf(tmp_path, "truncate_tokens", 500, 0, [("q1", 500, True), ("q2", 520, True)])
+    many = rd_aggregate.aggregate_many([(tmp_path, {})])
+    one = rd_aggregate.aggregate(tmp_path)
+    assert many == one
