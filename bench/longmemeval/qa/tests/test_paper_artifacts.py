@@ -152,6 +152,7 @@ def test_paper_main_emits_artifacts(tmp_path):
     assert len(rows) == 3  # one row per setting
 
     assert "\\begin{tabular}" in tex.read_text()
+    assert "|" in md.read_text()
     # No figure artifacts (Task 5) were emitted.
     assert not (dest / "merged-curve.png").exists()
 
@@ -164,3 +165,63 @@ def test_paper_main_all_empty_exits(tmp_path):
     dest = tmp_path / "dest"
     with pytest.raises(SystemExit):
         paper_artifacts.paper_main(["--manifest", str(manifest), "--dest", str(dest)])
+
+
+def test_figures_written(tmp_path):
+    """paper_main emits fig1-frontier.pdf and fig2-escalation.pdf: rc 0,
+    files exist, nonzero size, and start with the PDF magic bytes."""
+    out = tmp_path / "out"
+    # selection family — extractive_relevance at budget 1000 and 2000
+    _write_leaf(out, "extractive_relevance", 1000, 0, [("q1", 980, True), ("q2", 990, False)])
+    _write_leaf(out, "extractive_relevance", 2000, 0, [("q1", 1900, True), ("q2", 2000, True)])
+    # transform family — llm_distill at budget 1000
+    _write_leaf(out, "llm_distill", 1000, 0, [("q1", 850, True), ("q2", 860, True)])
+    # selection family — truncate_tokens at budget 1000
+    _write_leaf(out, "truncate_tokens", 1000, 0, [("q1", 950, False), ("q2", 970, False)])
+    # full context (budget None)
+    _write_leaf(out, "full", None, 0, [("q1", 2200, True), ("q2", 2100, True)])
+
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, [{"outdir": str(out)}])
+    dest = tmp_path / "paper-figs"
+
+    rc = paper_artifacts.paper_main(["--manifest", str(manifest), "--dest", str(dest)])
+    assert rc == 0
+
+    f1 = dest / "fig1-frontier.pdf"
+    f2 = dest / "fig2-escalation.pdf"
+    assert f1.exists(), "fig1-frontier.pdf missing"
+    assert f2.exists(), "fig2-escalation.pdf missing"
+    assert f1.stat().st_size > 0
+    assert f2.stat().st_size > 0
+    assert f1.read_bytes()[:4] == b"%PDF"
+    assert f2.read_bytes()[:4] == b"%PDF"
+
+
+def test_figures_failure_does_not_break_text_artifacts(tmp_path, monkeypatch, capsys):
+    """If _write_figures raises, paper_main still exits 0 with text artifacts
+    written, and prints a one-line warning to stderr."""
+    out = tmp_path / "out"
+    _write_leaf(out, "full", None, 0, [("q1", 2000, True), ("q2", 1800, True)])
+    _write_leaf(out, "extractive_relevance", 500, 0, [("q1", 510, True), ("q2", 540, True)])
+
+    def _boom(rows, dest):
+        raise RuntimeError("simulated figure failure")
+
+    monkeypatch.setattr(paper_artifacts, "_write_figures", _boom)
+
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(manifest, [{"outdir": str(out)}])
+    dest = tmp_path / "paper-artifacts"
+
+    rc = paper_artifacts.paper_main(["--manifest", str(manifest), "--dest", str(dest)])
+    assert rc == 0
+
+    # Text artifacts must still be written.
+    assert (dest / "merged-curve.jsonl").exists()
+    assert (dest / "merged-curve.md").exists()
+    assert (dest / "results-table.tex").exists()
+
+    # A warning must appear on stderr.
+    err = capsys.readouterr().err
+    assert "fig" in err.lower() or "warn" in err.lower() or "figure" in err.lower()
