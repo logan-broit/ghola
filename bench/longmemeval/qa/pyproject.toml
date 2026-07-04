@@ -32,6 +32,7 @@ lme-qa-run = "lme_qa.cli:run_main"
 lme-qa-judge = "lme_qa.cli:judge_main"
 lme-qa-sweep = "lme_qa.sweep:sweep_main"
 lme-qa-rd = "lme_qa.rd_aggregate:rd_main"
+lme-qa-paper = "lme_qa.paper_artifacts:paper_main"
 
 [tool.setuptools]
 packages = ["lme_qa"]
