@@ -225,3 +225,60 @@ def test_figures_failure_does_not_break_text_artifacts(tmp_path, monkeypatch, ca
     # A warning must appear on stderr.
     err = capsys.readouterr().err
     assert "fig" in err.lower() or "warn" in err.lower() or "figure" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# _selection_plateau helper tests (Fix 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_row(compressor: str, accuracy: float, acc_ci: float = 0.02) -> dict:
+    """Minimal row dict for _selection_plateau tests."""
+    return {"compressor": compressor, "accuracy": accuracy, "acc_ci": acc_ci}
+
+
+def test_selection_plateau_excludes_full():
+    """full has higher accuracy than any other selection row; plateau must be
+    anchored on the best non-full selection row, not the full ceiling."""
+    rows = [
+        _make_row("extractive_relevance", 0.70, acc_ci=0.03),
+        _make_row("truncate_tokens", 0.65, acc_ci=0.04),
+        _make_row("full", 0.95, acc_ci=0.01),  # ceiling — must be excluded
+    ]
+    result = paper_artifacts._selection_plateau(rows)
+    assert result is not None
+    center, halfwidth = result
+    # center must be the best non-full selection accuracy (0.70), not 0.95
+    assert center == pytest.approx(0.70)
+    # halfwidth is the arithmetic mean of extractive_relevance and truncate acc_ci
+    assert halfwidth == pytest.approx((0.03 + 0.04) / 2)
+
+
+def test_selection_plateau_empty_returns_none():
+    """When all rows are either transform-family or there are no rows at all,
+    _selection_plateau returns None (caller skips the band)."""
+    assert paper_artifacts._selection_plateau([]) is None
+
+    transform_only = [
+        _make_row("llm_distill", 0.60),
+        _make_row("statistical_prune", 0.55),
+    ]
+    assert paper_artifacts._selection_plateau(transform_only) is None
+
+
+def test_selection_plateau_full_only_returns_none():
+    """A list containing only full (no other selection-family rows) returns None."""
+    rows = [_make_row("full", 0.95, acc_ci=0.01)]
+    assert paper_artifacts._selection_plateau(rows) is None
+
+
+def test_selection_plateau_no_ci_field_defaults_zero():
+    """Rows missing acc_ci are treated as 0.0 (no crash, halfwidth reflects it)."""
+    rows = [
+        {"compressor": "extractive_relevance", "accuracy": 0.72},
+    ]
+    result = paper_artifacts._selection_plateau(rows)
+    assert result is not None
+    center, halfwidth = result
+    assert center == pytest.approx(0.72)
+    assert halfwidth == pytest.approx(0.0)

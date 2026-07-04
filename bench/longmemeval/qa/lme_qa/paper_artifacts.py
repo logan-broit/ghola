@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,41 @@ def merged_rows(sources: list[Source]) -> list[dict[str, Any]]:
     return rd_aggregate.aggregate_many(usable)
 
 
+def _selection_plateau(rows: list[dict[str, Any]]) -> tuple[float, float] | None:
+    """Return (center, halfwidth) for the noise band anchored on the extractive
+    plateau, or None if there are no eligible rows.
+
+    Eligible rows: selection-family compressors, excluding ``full`` (which is
+    the ceiling, not the plateau).  Returns None when the filtered list is
+    empty so callers can skip the band entirely.
+    """
+    plateau_rows = [
+        r
+        for r in rows
+        if FAMILY.get(r.get("compressor", ""), "other") == "selection"
+        and r.get("compressor") != "full"
+    ]
+    if not plateau_rows:
+        return None
+    best_acc = max(r["accuracy"] for r in plateau_rows)
+    # visual approximation - arithmetic mean of per-row CIs, not a pooled SE
+    mean_ci = sum(r.get("acc_ci", 0.0) for r in plateau_rows) / len(plateau_rows)
+    return (best_acc, mean_ci)
+
+
+def _save_fig(fig: Any, plt: Any, path: Path) -> None:
+    """Save *fig* to *path* as PDF, then close it unconditionally.
+
+    ``plt.close(fig)`` is called in the ``finally`` block so figures are
+    released even when ``savefig`` raises (prevents matplotlib figure leaks).
+    """
+    try:
+        fig.tight_layout()
+        fig.savefig(path, format="pdf")
+    finally:
+        plt.close(fig)
+
+
 def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
     """Write fig1-frontier.pdf: accuracy (y) vs mean_rate (x, log scale).
 
@@ -213,16 +249,14 @@ def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
-    # Compute noise band: best selection-series accuracy +/- pooled acc_ci.
-    selection_rows = [r for r in rows if FAMILY.get(r.get("compressor", ""), "other") == "selection"]
-    if selection_rows:
-        best_acc = max(r["accuracy"] for r in selection_rows)
-        pooled_ci = (
-            sum(r.get("acc_ci", 0.0) for r in selection_rows) / len(selection_rows)
-        )
+    # Compute noise band: best extractive-plateau accuracy +/- mean acc_ci.
+    # full is excluded (ceiling, not plateau) — see _selection_plateau.
+    band = _selection_plateau(rows)
+    if band is not None:
+        best_acc, mean_ci = band
         ax.axhspan(
-            best_acc - pooled_ci,
-            best_acc + pooled_ci,
+            best_acc - mean_ci,
+            best_acc + mean_ci,
             alpha=0.08,
             color="gray",
             zorder=0,
@@ -232,6 +266,7 @@ def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
 
     for series_key in sorted(by_series):
         pts = sorted(by_series[series_key], key=lambda r: r["mean_rate"])
+        # all rows in a series share a compressor (_series_key encodes it)
         comp = pts[0].get("compressor", "")
         family = FAMILY.get(comp, "other")
 
@@ -276,9 +311,7 @@ def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
     ax.set_xlabel("context tokens (cl100k)")
     ax.set_ylabel("QA accuracy")
     ax.legend(fontsize=7, loc="lower right")
-    fig.tight_layout()
-    fig.savefig(path, format="pdf")
-    plt.close(fig)
+    _save_fig(fig, plt, path)
 
 
 def _write_escalation_fig(rows: list[dict[str, Any]], path: Path) -> None:
@@ -297,9 +330,8 @@ def _write_escalation_fig(rows: list[dict[str, Any]], path: Path) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    # Find budgets with >= 2 rows.
-    from collections import Counter
-
+    # Find budgets where >= 2 rows are present.
+    # Singleton budgets are skipped: a bar group with a single bar is unreadable.
     budget_counts: Counter[Any] = Counter(r.get("budget") for r in rows)
     eligible_budgets = sorted(
         b for b, cnt in budget_counts.items() if b is not None and cnt >= 2
@@ -310,9 +342,7 @@ def _write_escalation_fig(rows: list[dict[str, Any]], path: Path) -> None:
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.text(0.5, 0.5, "No eligible budgets", ha="center", va="center", transform=ax.transAxes)
         ax.set_ylabel("QA accuracy")
-        fig.tight_layout()
-        fig.savefig(path, format="pdf")
-        plt.close(fig)
+        _save_fig(fig, plt, path)
         return
 
     # Collect transform rows and extractive_relevance reference per budget.
@@ -379,9 +409,7 @@ def _write_escalation_fig(rows: list[dict[str, Any]], path: Path) -> None:
     ax.set_xlabel("budget (context tokens)")
     ax.set_ylabel("QA accuracy")
     ax.legend(fontsize=7)
-    fig.tight_layout()
-    fig.savefig(path, format="pdf")
-    plt.close(fig)
+    _save_fig(fig, plt, path)
 
 
 def _write_figures(rows: list[dict[str, Any]], dest: Path) -> None:
