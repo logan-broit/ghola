@@ -301,11 +301,23 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request) {
 		s.handleErr(w, r, err)
 		return
 	}
+	// Validate event.type at the HTTP boundary so an unrecognised type
+	// surfaces as 400 with the offending value named, not as an opaque
+	// 500 from SQLite's CHECK constraint.
+	if err := core.ValidateEventType(in.Event.Type); err != nil {
+		s.handleErr(w, r, err)
+		return
+	}
 	ev, err := s.core.Record(r.Context(), in)
 	if err != nil {
 		s.handleErr(w, r, err)
 		return
 	}
+	// Slim the response: the caller supplied the text; the embedding is
+	// a server-side artifact and ~20 KB of noise per call when echoed
+	// back. Zero it on the response copy — the full event (with
+	// embedding) lives in sietch and is returned by recall as needed.
+	ev.Embedding = nil
 	writeJSON(w, http.StatusOK, map[string]any{"event": ev})
 }
 

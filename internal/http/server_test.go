@@ -127,8 +127,10 @@ func TestServer_EndToEndLoop(t *testing.T) {
 		Event core.Event `json:"event"`
 	}
 	require.NoError(t, json.Unmarshal(body, &recResp))
-	assert.Equal(t, []float32{0.1, 0.2, 0.3, 0.4}, recResp.Event.Embedding,
-		"embedder output must be attached by Core.Record")
+	assert.Empty(t, recResp.Event.Embedding,
+		"/v1/record response must omit the embedding (server-side artifact; ~20 KB noise per call)")
+	assert.NotEmpty(t, recResp.Event.ID,
+		"record response must include the assigned event id")
 
 	// 3. /v1/recall — should surface the recorded event from sietch.
 	resp, body = post(t, srv, "/v1/recall", core.RecallInput{
@@ -406,4 +408,105 @@ func TestServer_ExpandSessionWorkspace_PassesThrough409(t *testing.T) {
 		WorkspaceID: "11111111-2222-3333-4444-555555555555",
 	})
 	assert.Equal(t, stdhttp.StatusConflict, resp.StatusCode)
+}
+
+// ---------------------------------------------------------------------
+// Bug fixes: event.type validation (Bug 1) + embedding omission (Bug 2)
+// ---------------------------------------------------------------------
+
+// TestServer_Record_InvalidEventType_Returns400 pins Bug 1: an event
+// whose type is not in the allowed set must return 400 (not 500) with
+// a message that names the offending value and the allowed set.
+func TestServer_Record_InvalidEventType_Returns400(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Start a session so we have a valid session_id.
+	cwd := "/test"
+	resp, body := post(t, srv, "/v1/session_start",
+		core.SessionStartInput{UserID: testUserID, Cwd: &cwd})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "setup: session_start body=%s", body)
+	var startResp struct {
+		Session core.Session `json:"session"`
+	}
+	require.NoError(t, json.Unmarshal(body, &startResp))
+	sessionID := startResp.Session.ID
+
+	text := "this is a decision"
+	resp, body = post(t, srv, "/v1/record", core.RecordInput{
+		SessionID: sessionID,
+		UserID:    testUserID,
+		Event:     core.Event{Type: "decision", Text: &text, RawEvent: []byte(`{}`)},
+	})
+	assert.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode,
+		"invalid event.type must be 400, not 500; body=%s", body)
+	bodyStr := string(body)
+	assert.Contains(t, bodyStr, "decision",
+		"error message must name the offending type value")
+	assert.Contains(t, bodyStr, "user",
+		"error message must list allowed types")
+	assert.Contains(t, bodyStr, "assistant",
+		"error message must list allowed types")
+}
+
+// TestServer_Record_ValidEventTypes_Return200 ensures none of the
+// four allowed types are accidentally rejected by the new validation.
+func TestServer_Record_ValidEventTypes_Return200(t *testing.T) {
+	for _, evType := range []string{"user", "assistant", "tool_result", "system"} {
+		evType := evType
+		t.Run(evType, func(t *testing.T) {
+			srv := newTestServer(t)
+			cwd := "/test"
+			resp, body := post(t, srv, "/v1/session_start",
+				core.SessionStartInput{UserID: testUserID, Cwd: &cwd})
+			require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "setup body=%s", body)
+			var startResp struct {
+				Session core.Session `json:"session"`
+			}
+			require.NoError(t, json.Unmarshal(body, &startResp))
+
+			text := "some text"
+			resp, body = post(t, srv, "/v1/record", core.RecordInput{
+				SessionID: startResp.Session.ID,
+				UserID:    testUserID,
+				Event:     core.Event{Type: evType, Text: &text, RawEvent: []byte(`{}`)},
+			})
+			assert.Equal(t, stdhttp.StatusOK, resp.StatusCode,
+				"type=%q must be accepted; body=%s", evType, body)
+		})
+	}
+}
+
+// TestServer_Record_ResponseOmitsEmbedding pins Bug 2: the /v1/record
+// response JSON must not contain an "embedding" key. Callers sent the
+// text; the embedding is a server-side artifact and ~20KB of noise per
+// call when echoed back.
+func TestServer_Record_ResponseOmitsEmbedding(t *testing.T) {
+	srv := newTestServer(t)
+
+	cwd := "/test"
+	resp, body := post(t, srv, "/v1/session_start",
+		core.SessionStartInput{UserID: testUserID, Cwd: &cwd})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "setup body=%s", body)
+	var startResp struct {
+		Session core.Session `json:"session"`
+	}
+	require.NoError(t, json.Unmarshal(body, &startResp))
+
+	text := "hello"
+	resp, body = post(t, srv, "/v1/record", core.RecordInput{
+		SessionID: startResp.Session.ID,
+		UserID:    testUserID,
+		Event:     core.Event{Type: "user", Text: &text, RawEvent: []byte(`{}`)},
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	// Unmarshal into a raw map so we can check key presence directly —
+	// a typed struct would silently swallow missing fields.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(body, &raw))
+	eventRaw, ok := raw["event"].(map[string]any)
+	require.True(t, ok, "response must have an 'event' object; got %s", body)
+	_, hasEmbedding := eventRaw["embedding"]
+	assert.False(t, hasEmbedding,
+		"/v1/record response must not include the 'embedding' field; body=%s", body)
 }
