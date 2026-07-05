@@ -166,6 +166,9 @@ type RecallInput struct {
 	// zero value means "caller did not set it" and triggers a validation
 	// error in channel mode so an accidental zero weight is rejected rather
 	// than silently producing a two-channel result.
+	// Validated against the server's RerankWeight at the Recall boundary;
+	// RerankWeight + ActivationWeight must not exceed 1 (default
+	// RerankWeight 0.5 implies ActivationWeight < 0.5).
 	ActivationWeight float64 `json:"activation_weight,omitempty"`
 }
 

@@ -38,6 +38,12 @@ package core
 // validation error is returned by Recall before reaching this
 // function). FuseScores does not re-validate — hot path.
 //
+// The fallback path (no rerank score) emits rrfNorm + wActivation*actNorm;
+// when wActivation is high and rrfNorm is large this can exceed 1.0 and
+// outscore fully-reranked hits. This is intentional — the "trust the RRF
+// prior" convention extended to the activation channel. Measurement output
+// containing scores > 1.0 is expected, not a bug.
+//
 // Returns the fused score map keyed by id; callers re-sort.
 func FuseScores(rrf, rerank, activation map[string]float64, wRerank, wActivation float64) map[string]float64 {
 	rrfMax := maxOrOne(rrf)
