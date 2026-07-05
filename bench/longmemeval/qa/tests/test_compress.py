@@ -878,6 +878,74 @@ def test_surprisal_scorer_normal_length_turn_sent_unmodified():
     assert fake_lm.received == short_text
 
 
+def test_surprisal_scorer_empty_turn_scores_zero_no_lm_call():
+    """Empty-string turn must score 0.0; the LM client must NOT be called for it.
+    A fake client that raises on empty/whitespace input proves the guard fires."""
+
+    class _StrictFakeLM:
+        """Raises if called with a prompt that has no non-whitespace content."""
+
+        def token_logprobs(self, text):
+            if not text.strip():
+                raise AssertionError(
+                    f"lm_client called with empty/whitespace prompt: {text!r}"
+                )
+            return [("x", -5.0)]
+
+    from lme_qa.compress import _SurprisalScorer
+
+    scorer = _SurprisalScorer(_StrictFakeLM(), query_mode="agnostic")
+    items = [("real", "some real text"), ("empty", "")]
+    scores = scorer("the query", items)
+
+    assert scores["real"] == pytest.approx(5.0)
+    assert scores["empty"] == pytest.approx(0.0)
+
+
+def test_surprisal_scorer_empty_turn_aware_mode_scores_zero_no_lm_call():
+    """In query_mode='aware' the scored prompt is query+turn; an empty TURN still
+    scores 0.0 and the LM client must not be called (the turn contributes nothing
+    even though the concatenation with the query would be non-empty)."""
+
+    class _StrictFakeLM:
+        def token_logprobs(self, text):
+            if not text.strip():
+                raise AssertionError(
+                    f"lm_client called with empty/whitespace prompt: {text!r}"
+                )
+            return [("x", -5.0)]
+
+    from lme_qa.compress import _SurprisalScorer
+
+    scorer = _SurprisalScorer(_StrictFakeLM(), query_mode="aware")
+    items = [("real", "some real text"), ("empty", "")]
+    scores = scorer("the query", items)
+
+    assert scores["real"] == pytest.approx(5.0)
+    assert scores["empty"] == pytest.approx(0.0)
+
+
+def test_surprisal_scorer_whitespace_only_turn_scores_zero_no_lm_call():
+    """Whitespace-only turn ('  \\n') is treated as empty: score 0.0, no LM call."""
+
+    class _StrictFakeLM:
+        def token_logprobs(self, text):
+            if not text.strip():
+                raise AssertionError(
+                    f"lm_client called with empty/whitespace prompt: {text!r}"
+                )
+            return [("x", -5.0)]
+
+    from lme_qa.compress import _SurprisalScorer
+
+    scorer = _SurprisalScorer(_StrictFakeLM(), query_mode="agnostic")
+    items = [("real", "some real text"), ("ws", "  \n")]
+    scores = scorer("the query", items)
+
+    assert scores["real"] == pytest.approx(5.0)
+    assert scores["ws"] == pytest.approx(0.0)
+
+
 # --- llm_distill (claude distiller, prose|structured, cached) ------------
 
 

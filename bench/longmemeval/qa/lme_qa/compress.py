@@ -391,6 +391,13 @@ class _SurprisalScorer:
     ) -> dict[str, float]:
         out: dict[str, float] = {}
         for sid, text in items:
+            # Guard: empty/whitespace turns contribute nothing; score 0.0 and
+            # skip the LM call entirely.  In aware mode the concatenation with
+            # the query would be non-empty, but the TURN still contributes
+            # nothing, so the guard is on `text` not `scored`.
+            if not text.strip():
+                out[sid] = 0.0
+                continue
             scored = f"{query}\n{text}" if self.query_mode == "aware" else text
             # Cap the scored text to the oracle's context budget. In aware
             # mode the query is prepended -- truncate the concatenated
