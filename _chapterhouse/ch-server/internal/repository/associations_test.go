@@ -501,3 +501,92 @@ func TestLookupAssociations_EmptySrcsReturnsEmptyMap(t *testing.T) {
 	require.NotNil(t, got, "empty input must return a non-nil map")
 	require.Len(t, got, 0)
 }
+
+// ---------------------------------------------------------------------
+// LookupAssociationsByDst
+// ---------------------------------------------------------------------
+
+// TestLookupAssociationsByDst_BulkByDstIDs pre-populates three directed
+// associations X->A, Y->B, Z->C, then bulk-fetches by dst IDs {A,B,C}
+// and asserts the returned map is keyed by dst_event_id with the correct
+// src in each value slice.
+func TestLookupAssociationsByDst_BulkByDstIDs(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	userID := uuid.New()
+	workspaceID := uuid.New()
+
+	srcs := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	dsts := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	for i := range srcs {
+		seedEventForAssoc(t, repo, srcs[i], userID)
+		seedEventForAssoc(t, repo, dsts[i], userID)
+		require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+			SrcEventID:      srcs[i],
+			DstEventID:      dsts[i],
+			AssociationType: "hebbian",
+			WorkspaceID:     workspaceID,
+		}))
+	}
+
+	got, err := repo.LookupAssociationsByDst(ctx, dsts, "hebbian", workspaceID)
+	require.NoError(t, err)
+	require.Len(t, got, 3, "all 3 dst events must appear as keys")
+
+	for i, dst := range dsts {
+		neighbors, ok := got[dst]
+		require.True(t, ok, "missing key for dst %d (%s)", i, dst)
+		require.Len(t, neighbors, 1, "dst %d should have exactly 1 incoming neighbor", i)
+		require.Equal(t, srcs[i], neighbors[0].SrcEventID)
+		require.Equal(t, dst, neighbors[0].DstEventID)
+		require.Equal(t, "hebbian", neighbors[0].AssociationType)
+		require.Equal(t, workspaceID, neighbors[0].WorkspaceID)
+	}
+}
+
+// TestLookupAssociationsByDst_FiltersByWorkspace mirrors the src-lookup
+// workspace filter test: a row stored under workspace B must NOT appear
+// when the lookup is scoped to workspace A.
+func TestLookupAssociationsByDst_FiltersByWorkspace(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	userID := uuid.New()
+	workspaceA, workspaceB := uuid.New(), uuid.New()
+
+	srcA, dstA := uuid.New(), uuid.New()
+	srcB, dstB := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{srcA, dstA, srcB, dstB} {
+		seedEventForAssoc(t, repo, id, userID)
+	}
+
+	require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+		SrcEventID: srcA, DstEventID: dstA,
+		AssociationType: "hebbian", WorkspaceID: workspaceA,
+	}))
+	require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+		SrcEventID: srcB, DstEventID: dstB,
+		AssociationType: "hebbian", WorkspaceID: workspaceB,
+	}))
+
+	gotA, err := repo.LookupAssociationsByDst(ctx, []uuid.UUID{dstA, dstB}, "hebbian", workspaceA)
+	require.NoError(t, err)
+	require.Len(t, gotA, 1, "only workspaceA's association should come back")
+	_, ok := gotA[dstA]
+	require.True(t, ok, "dstA must be in the result map")
+	_, ok = gotA[dstB]
+	require.False(t, ok, "dstB lives in workspaceB and must be filtered out")
+}
+
+// TestLookupAssociationsByDst_EmptyDstsReturnsEmptyMap pins the fast-path:
+// empty input yields a non-nil empty map without hitting the DB.
+func TestLookupAssociationsByDst_EmptyDstsReturnsEmptyMap(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	got, err := repo.LookupAssociationsByDst(ctx, nil, "hebbian", uuid.New())
+	require.NoError(t, err)
+	require.NotNil(t, got, "empty input must return a non-nil map")
+	require.Len(t, got, 0)
+}

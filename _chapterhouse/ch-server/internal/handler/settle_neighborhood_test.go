@@ -10,12 +10,14 @@ package handler_test
 //     interface boundary is the correct seam (same rationale as
 //     coActivationEnqueuer in episodic_test.go).
 //
-// Five required tests (TDD order):
+// Seven required tests (TDD order):
 //  1. TestSettleNeighborhood_HopCap        — path graph, distance-3 node absent
 //  2. TestSettleNeighborhood_NodeCapDeterministic — run twice, same graph
 //  3. TestSettleNeighborhood_Symmetrization — one-way edge yields both directions
 //  4. TestSettleNeighborhood_NormalizationContract — all outgoing sums <= 1
 //  5. TestSettleNeighborhood_EmptyInput    — empty seeds, no error
+//  6. TestSettleNeighborhood_ReverseOnlySeed — seed is dst-only, BFS still expands
+//  7. TestSettleNeighborhood_NoDoubleCount  — one row, A-B weight is w not 2w
 
 import (
 	"context"
@@ -60,6 +62,30 @@ func (f *fakeAssocLookup) LookupAssociations(
 	for _, id := range srcIDs {
 		if assocs, ok := f.adj[id]; ok {
 			out[id] = assocs
+		}
+	}
+	return out, nil
+}
+
+// LookupAssociationsByDst satisfies handler.AssocLookup.  It scans the
+// directed adjacency map for any row whose DstEventID matches one of the
+// requested dstIDs and returns the results keyed by dst_event_id.
+func (f *fakeAssocLookup) LookupAssociationsByDst(
+	ctx context.Context,
+	dstIDs []uuid.UUID,
+	assocType string,
+	workspaceID uuid.UUID,
+) (map[uuid.UUID][]repository.Association, error) {
+	wantSet := make(map[uuid.UUID]struct{}, len(dstIDs))
+	for _, id := range dstIDs {
+		wantSet[id] = struct{}{}
+	}
+	out := make(map[uuid.UUID][]repository.Association)
+	for _, assocs := range f.adj {
+		for _, a := range assocs {
+			if _, ok := wantSet[a.DstEventID]; ok {
+				out[a.DstEventID] = append(out[a.DstEventID], a)
+			}
 		}
 	}
 	return out, nil
@@ -293,4 +319,96 @@ func TestSettleNeighborhood_EmptyInput(t *testing.T) {
 	g2, err := handler.BuildSettleGraph(context.Background(), fake, []uuid.UUID{}, ws, "hebbian", p)
 	require.NoError(t, err)
 	assert.Empty(t, g2.Adj, "empty seeds slice must yield empty graph")
+}
+
+// ---------------------------------------------------------------------
+// Test 6: reverse-only seed (the query-anchor pathology P4 exists to fix)
+// ---------------------------------------------------------------------
+
+// TestSettleNeighborhood_ReverseOnlySeed models the exact failure case:
+// the seed node appears only as a dst in the association store (it was
+// chronologically last among its co-activated peers). Outgoing-only BFS
+// would find nothing; bidirectional BFS must find X at hop 1 and Y at hop 2.
+//
+// Store:   Y->X   X->seed   (seed has zero outgoing rows)
+// BFS from seed, HopCap=2:
+//   hop 1: LookupAssociationsByDst(seed) returns X->seed; X admitted.
+//   hop 2: LookupAssociationsByDst(X) returns Y->X; Y admitted.
+// Expected graph: {seed, X, Y} all present.
+func TestSettleNeighborhood_ReverseOnlySeed(t *testing.T) {
+	ws := uuid.New()
+	seed := uuid.New()
+	nodeX := uuid.New()
+	nodeY := uuid.New()
+
+	fake := &fakeAssocLookup{}
+	// Only inbound edges for seed and X — neither has any outgoing row.
+	fake.addEdge(nodeX, seed, 0.7, "hebbian", ws)
+	fake.addEdge(nodeY, nodeX, 0.5, "hebbian", ws)
+
+	p := defaultTestParams()
+	p.HopCap = 2
+
+	g, err := handler.BuildSettleGraph(context.Background(), fake, []uuid.UUID{seed}, ws, "hebbian", p)
+	require.NoError(t, err)
+
+	assert.Contains(t, g.Adj, seed, "seed must be in graph")
+	assert.Contains(t, g.Adj, nodeX, "X (hop-1 via reverse edge X->seed) must be in graph")
+	assert.Contains(t, g.Adj, nodeY, "Y (hop-2 via reverse edge Y->X) must be in graph")
+}
+
+// ---------------------------------------------------------------------
+// Test 7: no double-count when both endpoints are in the frontier
+// ---------------------------------------------------------------------
+
+// TestSettleNeighborhood_NoDoubleCount verifies that a single directed
+// row A->B accumulates weight w exactly once in the undirected graph,
+// even when both A and B are in the frontier at the same BFS hop (so the
+// row would appear in both the src-lookup and the dst-lookup results).
+//
+// Setup: seed = {A, B} in the same hop 0 frontier (both are seeds).
+// Store: one row A->B with weight 0.6.
+// Both LookupAssociations({A,B}) and LookupAssociationsByDst({A,B})
+// will return the same A->B row.  After deduplication the undirected
+// A-B weight must be exactly 0.6 (not 1.2).
+func TestSettleNeighborhood_NoDoubleCount(t *testing.T) {
+	ws := uuid.New()
+	nodeA := uuid.New()
+	nodeB := uuid.New()
+
+	fake := &fakeAssocLookup{}
+	fake.addEdge(nodeA, nodeB, 0.6, "hebbian", ws)
+
+	p := defaultTestParams()
+	p.HopCap = 1 // one hop — enough to expand from {A,B} but no more
+
+	// Seed both A and B so they are both in the initial frontier.
+	g, err := handler.BuildSettleGraph(context.Background(), fake, []uuid.UUID{nodeA, nodeB}, ws, "hebbian", p)
+	require.NoError(t, err)
+
+	require.Contains(t, g.Adj, nodeA, "nodeA must be in graph")
+	require.Contains(t, g.Adj, nodeB, "nodeB must be in graph")
+
+	// The undirected graph has A<->B with weight 0.6 (raw, before
+	// row-normalization). After row-normalization each node has only one
+	// neighbor so total outgoing = 0.6 (already <= 1 so divisor = 1.0).
+	// Check A->B weight.
+	var wAtoB float64
+	for _, e := range g.Adj[nodeA] {
+		if e.Dst == nodeB {
+			wAtoB = e.W
+		}
+	}
+	assert.InDelta(t, 0.6, wAtoB, 1e-9,
+		"A->B weight must be 0.6 (not 1.2); single DB row must not be double-counted")
+
+	// Symmetric: B->A must also be 0.6.
+	var wBtoA float64
+	for _, e := range g.Adj[nodeB] {
+		if e.Dst == nodeA {
+			wBtoA = e.W
+		}
+	}
+	assert.InDelta(t, 0.6, wBtoA, 1e-9,
+		"B->A weight must equal A->B (symmetrization); must not double-count")
 }

@@ -51,6 +51,17 @@ type AssocLookup interface {
 		assocType string,
 		workspaceID uuid.UUID,
 	) (map[uuid.UUID][]repository.Association, error)
+
+	// LookupAssociationsByDst fetches associations whose dst_event_id is
+	// in dstIDs, keyed by dst_event_id.  Used alongside LookupAssociations
+	// so the BFS traverses edges in both directions — storage is directed
+	// (src fired before dst) but the neighborhood must be undirected.
+	LookupAssociationsByDst(
+		ctx context.Context,
+		dstIDs []uuid.UUID,
+		assocType string,
+		workspaceID uuid.UUID,
+	) (map[uuid.UUID][]repository.Association, error)
 }
 
 // BuildSettleGraph expands seedIDs over Hebbian associations via
@@ -96,39 +107,88 @@ func BuildSettleGraph(
 	copy(frontier, seedIDs)
 
 	for hop := 0; hop < p.HopCap && len(frontier) > 0; hop++ {
-		assocMap, err := assocLookup.LookupAssociations(ctx, frontier, assocType, workspaceID)
+		assocBySrc, err := assocLookup.LookupAssociations(ctx, frontier, assocType, workspaceID)
 		if err != nil {
 			return primitives.SettleGraph{}, err
+		}
+		assocByDst, err := assocLookup.LookupAssociationsByDst(ctx, frontier, assocType, workspaceID)
+		if err != nil {
+			return primitives.SettleGraph{}, err
+		}
+
+		// Merge both direction maps, deduplicating by (src,dst,type) so the
+		// same DB row seen from both lookups is only accumulated once.
+		// A row appears in assocBySrc when its src is in the frontier, and in
+		// assocByDst when its dst is in the frontier.  When BOTH endpoints are
+		// in the frontier the same row appears in both maps.
+		type rowKey struct {
+			src, dst    uuid.UUID
+			assocType   string
+		}
+		seen := make(map[rowKey]struct{})
+		type assocEntry struct {
+			a       repository.Association
+			nodeKey uuid.UUID // the frontier node this edge is incident on
+		}
+		var allAssocs []assocEntry
+
+		for frontierID, assocs := range assocBySrc {
+			for _, a := range assocs {
+				k := rowKey{src: a.SrcEventID, dst: a.DstEventID, assocType: a.AssociationType}
+				if _, dup := seen[k]; dup {
+					continue
+				}
+				seen[k] = struct{}{}
+				allAssocs = append(allAssocs, assocEntry{a: a, nodeKey: frontierID})
+			}
+		}
+		for frontierID, assocs := range assocByDst {
+			for _, a := range assocs {
+				k := rowKey{src: a.SrcEventID, dst: a.DstEventID, assocType: a.AssociationType}
+				if _, dup := seen[k]; dup {
+					continue
+				}
+				seen[k] = struct{}{}
+				allAssocs = append(allAssocs, assocEntry{a: a, nodeKey: frontierID})
+			}
 		}
 
 		// Collect all new candidate nodes discovered this hop.
 		// We need to decide which ones to admit before we add them,
 		// because NodeCap may be hit mid-frontier.
 		type candidate struct {
-			id         uuid.UUID
-			maxWeight  float64
+			id        uuid.UUID
+			maxWeight float64
 		}
 		candidateMap := make(map[uuid.UUID]float64) // new nodes -> max weight to them
 
-		for srcID, assocs := range assocMap {
-			for _, a := range assocs {
-				// Accumulate the symmetric edge weight.
-				lo, hi := a.SrcEventID, a.DstEventID
-				if lo.String() > hi.String() {
-					lo, hi = hi, lo
-				}
-				undirected[edgeKey{lo, hi}] += a.Weight
+		for _, entry := range allAssocs {
+			a := entry.a
+			// Accumulate the symmetric edge weight.
+			lo, hi := a.SrcEventID, a.DstEventID
+			if lo.String() > hi.String() {
+				lo, hi = hi, lo
+			}
+			undirected[edgeKey{lo, hi}] += a.Weight
 
-				// Track the highest weight to each new node.
-				if _, known := nodeSet[a.DstEventID]; !known {
-					if a.Weight > candidateMap[a.DstEventID] {
-						candidateMap[a.DstEventID] = a.Weight
-					}
+			// The neighbor of the frontier node is whichever endpoint is NOT
+			// the frontier node itself.
+			var neighborID uuid.UUID
+			if a.SrcEventID == entry.nodeKey {
+				neighborID = a.DstEventID
+			} else {
+				neighborID = a.SrcEventID
+			}
+
+			// Track the highest weight to each new (not yet admitted) neighbor.
+			if _, known := nodeSet[neighborID]; !known {
+				if a.Weight > candidateMap[neighborID] {
+					candidateMap[neighborID] = a.Weight
 				}
-				// Also update maxIncident for src (it is already in nodeSet).
-				if a.Weight > maxIncident[srcID] {
-					maxIncident[srcID] = a.Weight
-				}
+			}
+			// Also update maxIncident for the frontier node (already in nodeSet).
+			if a.Weight > maxIncident[entry.nodeKey] {
+				maxIncident[entry.nodeKey] = a.Weight
 			}
 		}
 
