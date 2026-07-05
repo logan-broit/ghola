@@ -50,14 +50,20 @@ type coActivationEnqueuer interface {
 // pairs after a successful event upsert (Task C1). Defaulted to the
 // same *Repository as `repo` in NewEpisodicHandler; tests can swap in a
 // fake via WithCoActivationEnqueuer to exercise the failure branch.
+//
+// assocLookup is the seam the settle path (computeExpansion) uses to
+// build the BFS neighborhood graph. Defaulted to repo in
+// NewEpisodicHandler; tests can swap in a fakeAssocLookup so the settle
+// path runs without a real DB.
 type EpisodicHandler struct {
-	repo      *repository.Repository
-	embedder  embedding.Provider
-	assocRepo coActivationEnqueuer
+	repo        *repository.Repository
+	embedder    embedding.Provider
+	assocRepo   coActivationEnqueuer
+	assocLookup AssocLookup
 }
 
 func NewEpisodicHandler(repo *repository.Repository) *EpisodicHandler {
-	return &EpisodicHandler{repo: repo, assocRepo: repo}
+	return &EpisodicHandler{repo: repo, assocRepo: repo, assocLookup: repo}
 }
 
 // WithEmbedder attaches an embedding provider for the server-side
@@ -76,6 +82,16 @@ func (h *EpisodicHandler) WithEmbedder(p embedding.Provider) *EpisodicHandler {
 // best-effort failure branch in Ingest.
 func (h *EpisodicHandler) WithCoActivationEnqueuer(e coActivationEnqueuer) *EpisodicHandler {
 	h.assocRepo = e
+	return h
+}
+
+// WithAssocLookup overrides the default repo-backed AssocLookup used by
+// the settle expansion path in Query. Returns the handler for fluent
+// chaining. Production code never calls this — the default *Repository
+// wiring in NewEpisodicHandler satisfies the interface; tests inject a
+// fakeAssocLookup to exercise the settle path without a real DB.
+func (h *EpisodicHandler) WithAssocLookup(a AssocLookup) *EpisodicHandler {
+	h.assocLookup = a
 	return h
 }
 
@@ -298,6 +314,9 @@ type queryRequest struct {
 	// sub-list. Default off keeps the baseline cheap; ghola passes
 	// `true` only when the caller has asked for primitive enrichment.
 	Primitives bool `json:"primitives,omitempty"`
+	// Settle opts the response into the P4 recurrent-settle expansion
+	// sub-list. Absent (nil) means disabled; expansion never appears.
+	Settle *SettleRequest `json:"settle,omitempty"`
 }
 
 // ScoreBreakdown is the per-tier score envelope carried by every
@@ -527,6 +546,18 @@ func (h *EpisodicHandler) Query(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
+	// Settle expansion sub-list (P4). Best-effort: errors log and leave the
+	// field absent. Expansion is a separate sub-list — it is never merged
+	// into any tier list and is absent entirely when settle is disabled.
+	if req.Settle != nil && req.Settle.Enabled {
+		out.Expansion = computeExpansion(
+			r.Context(), h.repo, h.assocLookup,
+			userID, req.WorkspaceID,
+			out.Vector, out.FTS,
+			req.Settle.params(),
+		)
+	}
+
 	OK(w, out)
 }
 
@@ -659,6 +690,158 @@ func sortedHits(
 	return out
 }
 
+// computeExpansion runs the P4 recurrent-settle pipeline:
+//
+//  1. Build a seed mass from the vector + fts hit event IDs.
+//     Normalization: per-tier max-normalize each tier's Merged scores so
+//     both tiers contribute on the same scale, then for events that appear
+//     in BOTH tiers average the two normalized scores, then L1-normalize
+//     the seed vector so it sums to 1 (the personalized PageRank contract).
+//     Events with no score (missing from both tiers) get mass 0.
+//     Rationale: max-normalization is safe here because we only need
+//     relative ordering within the seed set; absolute score values vary
+//     across queries and between tiers, so normalizing per tier prevents
+//     one tier from dominating the seed mass solely due to score magnitude.
+//
+//  2. BuildSettleGraph over the Hebbian neighborhood (BFS, HopCap/NodeCap).
+//
+//  3. Settle to convergence.
+//
+//  4. TopExpansion: top-M non-seed nodes by activation.
+//
+//  5. Hydrate text for expansion IDs from PG.
+//
+// Best-effort: any error is logged and nil is returned; the caller's
+// `,omitempty` drops the field. Success — including empty — returns a
+// non-nil pointer so the wire distinguishes "requested, nothing found"
+// from "not requested".
+func computeExpansion(
+	ctx context.Context,
+	repo *repository.Repository,
+	assocLookup AssocLookup,
+	userID, workspaceID uuid.UUID,
+	vectorHits, ftsHits []MultiRankingHit,
+	p primitives.SettleParams,
+) *[]ExpansionHit {
+	// Step 1: build seed mass from vector + fts hits.
+	//
+	// Max-normalize each tier independently so neither tier's score
+	// magnitude dominates. For events in both tiers, average the two
+	// normalized scores. Then L1-normalize the seed vector.
+	seedRaw := make(map[uuid.UUID]float64)
+
+	// Per-tier max-normalize.
+	addNormalized := func(hits []MultiRankingHit) {
+		var maxScore float64
+		for _, h := range hits {
+			if h.EventID == nil {
+				continue
+			}
+			if h.Score.Merged > maxScore {
+				maxScore = h.Score.Merged
+			}
+		}
+		if maxScore <= 0 {
+			return
+		}
+		for _, h := range hits {
+			if h.EventID == nil {
+				continue
+			}
+			// Accumulate: for events in both tiers this will sum two
+			// normalized scores; we divide by tier count below.
+			seedRaw[*h.EventID] += h.Score.Merged / maxScore
+		}
+	}
+	addNormalized(vectorHits)
+	addNormalized(ftsHits)
+
+	// Determine how many tiers contributed to each event so we can
+	// average (divide by count of tiers that scored this event).
+	tierCount := make(map[uuid.UUID]int)
+	for _, h := range vectorHits {
+		if h.EventID != nil {
+			tierCount[*h.EventID]++
+		}
+	}
+	for _, h := range ftsHits {
+		if h.EventID != nil {
+			tierCount[*h.EventID]++
+		}
+	}
+	for id, tc := range tierCount {
+		if tc > 1 {
+			seedRaw[id] /= float64(tc)
+		}
+	}
+
+	// L1-normalize so seed vector sums to 1.
+	var total float64
+	for _, v := range seedRaw {
+		total += v
+	}
+	seeds := make(map[uuid.UUID]float64, len(seedRaw))
+	if total > 0 {
+		for id, v := range seedRaw {
+			seeds[id] = v / total
+		}
+	}
+
+	if len(seeds) == 0 {
+		empty := []ExpansionHit{}
+		return &empty
+	}
+
+	// Step 2: BFS neighborhood graph.
+	seedIDs := make([]uuid.UUID, 0, len(seeds))
+	for id := range seeds {
+		seedIDs = append(seedIDs, id)
+	}
+	g, err := BuildSettleGraph(ctx, assocLookup, seedIDs, workspaceID, "hebbian", p)
+	if err != nil {
+		slog.Warn("settle: BuildSettleGraph failed (best-effort, dropping expansion)",
+			"err", err.Error(),
+			"workspace_id", workspaceID,
+		)
+		return nil
+	}
+
+	// Step 3: settle to convergence.
+	act, _ := primitives.Settle(seeds, g, p)
+
+	// Step 4: top-M non-seed expansion nodes.
+	expansionIDs := primitives.TopExpansion(act, seeds, p.TopM)
+
+	// Always return a non-nil pointer (empty slice when no expansion).
+	result := make([]ExpansionHit, 0, len(expansionIDs))
+	if len(expansionIDs) == 0 {
+		return &result
+	}
+
+	// Step 5: hydrate text for expansion IDs.
+	texts, err := repo.GetEventTextByIDs(ctx, expansionIDs, userID, workspaceID)
+	if err != nil {
+		slog.Warn("settle: GetEventTextByIDs failed (best-effort, dropping expansion)",
+			"err", err.Error(),
+			"workspace_id", workspaceID,
+			"expansion_count", len(expansionIDs),
+		)
+		return nil
+	}
+
+	for _, id := range expansionIDs {
+		hit := ExpansionHit{
+			EventID:    id,
+			Activation: act[id],
+		}
+		if t, ok := texts[id]; ok {
+			hit.Text = &t
+		}
+		result = append(result, hit)
+	}
+	return &result
+}
+
 // ---------------------------------------------------------------------
 // Multi-ranking request/response types — wire shape for /v1/episodic/query.
 //
@@ -690,6 +873,53 @@ type MultiRankingRequest struct {
 	// the baseline cheap; the ghola client flips this on when the
 	// caller asks for primitive enrichment (D2).
 	Primitives bool `json:"primitives,omitempty"`
+	// Settle opts the response into the P4 recurrent-settle expansion
+	// sub-list.  When present and enabled:true, runs spreading activation
+	// over the Hebbian neighborhood seeded by the vector+fts hits and
+	// returns the top-M non-seed nodes as `response.expansion`.
+	// All params are optional — omitted fields take defaults from
+	// primitives.DefaultSettleParams().  Absent entirely (nil) means
+	// disabled; expansion is never present in the response.
+	Settle *SettleRequest `json:"settle,omitempty"`
+}
+
+// SettleRequest is the optional settle configuration block on
+// MultiRankingRequest.  Presence of this field (even with just
+// `{"enabled":true}`) enables the expansion sub-list.  All numeric
+// params are optional; zero values fall back to DefaultSettleParams().
+type SettleRequest struct {
+	Enabled  bool    `json:"enabled"`
+	Lambda   float64 `json:"lambda,omitempty"`
+	HopCap   int     `json:"hop_cap,omitempty"`
+	NodeCap  int     `json:"node_cap,omitempty"`
+	TopM     int     `json:"top_m,omitempty"`
+	Eps      float64 `json:"eps,omitempty"`
+	MaxIters int     `json:"max_iters,omitempty"`
+}
+
+// params builds a primitives.SettleParams from the request, applying
+// DefaultSettleParams() for any unset (zero-value) field.
+func (s *SettleRequest) params() primitives.SettleParams {
+	p := primitives.DefaultSettleParams()
+	if s.Lambda > 0 {
+		p.Lambda = s.Lambda
+	}
+	if s.HopCap > 0 {
+		p.HopCap = s.HopCap
+	}
+	if s.NodeCap > 0 {
+		p.NodeCap = s.NodeCap
+	}
+	if s.TopM > 0 {
+		p.TopM = s.TopM
+	}
+	if s.Eps > 0 {
+		p.Eps = s.Eps
+	}
+	if s.MaxIters > 0 {
+		p.MaxIters = s.MaxIters
+	}
+	return p
 }
 
 // MultiRankingHit is the shared hit shape across all per-tier sub-lists
@@ -735,11 +965,27 @@ type MultiRankingHit struct {
 // the second state. The pointer makes the absence/presence signal
 // explicit; nil is dropped by `,omitempty`, an addressable empty
 // slice marshals as `[]`.
+//
+// Expansion is the P4 recurrent-settle expansion sub-list. Same
+// pointer-to-slice three-state contract as Primitives. NOT part of
+// any tier list — it is a separate output surface.
 type MultiRankingResponse struct {
-	Vector        []MultiRankingHit   `json:"vector,omitempty"`
-	FTS           []MultiRankingHit   `json:"fts,omitempty"`
-	SessionVector []MultiRankingHit   `json:"session_vector,omitempty"`
-	Primitives    *[]MultiRankingHit  `json:"primitives,omitempty"`
+	Vector        []MultiRankingHit  `json:"vector,omitempty"`
+	FTS           []MultiRankingHit  `json:"fts,omitempty"`
+	SessionVector []MultiRankingHit  `json:"session_vector,omitempty"`
+	Primitives    *[]MultiRankingHit `json:"primitives,omitempty"`
+	Expansion     *[]ExpansionHit    `json:"expansion,omitempty"`
+}
+
+// ExpansionHit is one entry in the settle expansion sub-list.
+// Each entry is a non-seed node whose activation exceeded the seed
+// set after the recurrent settle converged.  Activations are in
+// descending order.  text is present when the event has a non-NULL
+// text column and the caller's workspace ACL grants access.
+type ExpansionHit struct {
+	EventID    uuid.UUID `json:"event_id"`
+	Activation float64   `json:"activation"`
+	Text       *string   `json:"text,omitempty"`
 }
 
 // ---------------------------------------------------------------------
