@@ -388,6 +388,147 @@ func TestClient_QueryEpisodicMulti_PrimitivesAbsentDecode(t *testing.T) {
 		"absent `primitives` on the wire must decode as a nil pointer (3-state contract: distinct from empty slice)")
 }
 
+// TestClient_QueryEpisodicMulti_SettleBlockSerialized pins the P4 (Task
+// 5) request-side wire contract: when the caller sets Settle=true, the
+// marshaled body must carry a `settle` object with `enabled:true` and
+// the non-zero SettleParams overrides mapped onto the chapterhouse
+// SettleRequest field names (lambda, hop_cap, node_cap, top_m, eps,
+// max_iters). Zero-valued params must be omitted so chapterhouse applies
+// its own DefaultSettleParams.
+func TestClient_QueryEpisodicMulti_SettleBlockSerialized(t *testing.T) {
+	var gotBody map[string]any
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/episodic/query": func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			require.NoError(t, json.Unmarshal(b, &gotBody))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	_, err := c.QueryEpisodicMulti(context.Background(), core.EpisodicMultiQuery{
+		UserID:      "00000000-0000-0000-0000-000000000001",
+		WorkspaceID: "00000000-0000-0000-0000-000000000002",
+		QueryText:   "k8s",
+		Limit:       10,
+		Rankings:    []string{"vector", "fts"},
+		Settle:      true,
+		SettleParams: core.SettleParams{
+			Lambda: 0.7,
+			HopCap: 3,
+			TopM:   25,
+			// NodeCap/Eps/MaxIters left zero — must be omitted so the
+			// server applies its own defaults.
+		},
+	})
+	require.NoError(t, err)
+
+	settle, ok := gotBody["settle"].(map[string]any)
+	require.True(t, ok, "settle must serialize as a JSON object, got %T", gotBody["settle"])
+	assert.Equal(t, true, settle["enabled"], "settle.enabled must be true when the caller opted in")
+	assert.InDelta(t, 0.7, settle["lambda"], 1e-9)
+	assert.EqualValues(t, 3, settle["hop_cap"])
+	assert.EqualValues(t, 25, settle["top_m"])
+	_, hasNodeCap := settle["node_cap"]
+	assert.False(t, hasNodeCap, "zero node_cap must be omitted so the server default applies")
+	_, hasEps := settle["eps"]
+	assert.False(t, hasEps, "zero eps must be omitted")
+	_, hasMaxIters := settle["max_iters"]
+	assert.False(t, hasMaxIters, "zero max_iters must be omitted")
+}
+
+// TestClient_QueryEpisodicMulti_SettleOmittedWhenOff pins that a
+// zero-value (off) Settle flag never serializes a `settle` block, so
+// the chapterhouse handler stays on the no-expansion path. Protects the
+// byte-identical settle-off contract at the wire layer.
+func TestClient_QueryEpisodicMulti_SettleOmittedWhenOff(t *testing.T) {
+	var gotBody map[string]any
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/episodic/query": func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			require.NoError(t, json.Unmarshal(b, &gotBody))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	_, err := c.QueryEpisodicMulti(context.Background(), core.EpisodicMultiQuery{
+		UserID:      "00000000-0000-0000-0000-000000000001",
+		WorkspaceID: "00000000-0000-0000-0000-000000000002",
+		Rankings:    []string{"vector"},
+	})
+	require.NoError(t, err)
+
+	_, present := gotBody["settle"]
+	assert.False(t, present, "settle block must be omitted when the flag is off")
+}
+
+// TestClient_QueryEpisodicMulti_ExpansionResponseDecode pins the
+// response-side wire contract for the P4 expansion sub-list. The server
+// emits `expansion:[{event_id, activation, text?}]`. The client projects
+// each onto core.ExpansionHit. Critically, an entry with an ABSENT text
+// field (Task 4 documented finding: text is best-effort-hydrated and may
+// be NULL/ACL-denied) must decode with Text == "" rather than dropping
+// the row — the drop decision belongs to core.Recall, not the client.
+func TestClient_QueryEpisodicMulti_ExpansionResponseDecode(t *testing.T) {
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/episodic/query": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"vector":[],
+				"expansion":[
+					{"event_id":"11111111-1111-1111-1111-111111111111","activation":0.42,"text":"bridge event text"},
+					{"event_id":"22222222-2222-2222-2222-222222222222","activation":0.31}
+				]
+			}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	resp, err := c.QueryEpisodicMulti(context.Background(), core.EpisodicMultiQuery{
+		UserID:      "00000000-0000-0000-0000-000000000001",
+		WorkspaceID: "00000000-0000-0000-0000-000000000002",
+		Rankings:    []string{"vector"},
+		Settle:      true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, resp.Expansion, 2, "both expansion entries must decode, including the text-less one")
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resp.Expansion[0].ID)
+	assert.InDelta(t, 0.42, resp.Expansion[0].Activation, 1e-9)
+	assert.Equal(t, "bridge event text", resp.Expansion[0].Text)
+	// Absent text field → empty string, entry retained (core drops it).
+	assert.Equal(t, "22222222-2222-2222-2222-222222222222", resp.Expansion[1].ID)
+	assert.InDelta(t, 0.31, resp.Expansion[1].Activation, 1e-9)
+	assert.Equal(t, "", resp.Expansion[1].Text,
+		"absent text must decode as empty string, not drop the entry")
+}
+
+// TestClient_QueryEpisodicMulti_ExpansionAbsentDecode pins that an
+// absent `expansion` key (settle off, OR settle on but the handler
+// dropped it on best-effort failure) decodes as a nil slice — no
+// expansion applied downstream.
+func TestClient_QueryEpisodicMulti_ExpansionAbsentDecode(t *testing.T) {
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/episodic/query": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"vector":[]}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	resp, err := c.QueryEpisodicMulti(context.Background(), core.EpisodicMultiQuery{
+		UserID:      "00000000-0000-0000-0000-000000000001",
+		WorkspaceID: "00000000-0000-0000-0000-000000000002",
+		Rankings:    []string{"vector"},
+		Settle:      true,
+	})
+	require.NoError(t, err)
+	assert.Nil(t, resp.Expansion, "absent expansion must decode as a nil slice")
+}
+
 // TestClient_QueryEpisodicMulti_RankingsOmittedWhenEmpty pins the
 // omitempty contract on the `rankings` field: a request without any
 // rankings (callers using QueryEpisodicMulti with an empty slice) must

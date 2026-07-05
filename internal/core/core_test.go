@@ -198,7 +198,12 @@ type fakeChapterhouse struct {
 	// QueryEpisodicMulti only surfaces this when q.Primitives=true — so
 	// tests that set primResp without flipping the flag still pin the
 	// "off → no primitives sub-list" property.
-	primResp    *[]core.RecallHit
+	primResp *[]core.RecallHit
+	// expResp drives the P4 expansion sub-list. QueryEpisodicMulti only
+	// surfaces it when q.Settle is true (mirrors the chapterhouse handler
+	// contract: no settle block → no expansion). nil → EpisodicMultiResult
+	// .Expansion stays nil (settle off, or best-effort settle failure).
+	expResp     []core.ExpansionHit
 	shareID     string
 	forgetCount int
 	err         error
@@ -261,6 +266,12 @@ func (f *fakeChapterhouse) QueryEpisodicMulti(_ context.Context, q core.Episodic
 	if q.Primitives && f.primResp != nil {
 		copyHits := append([]core.RecallHit(nil), (*f.primResp)...)
 		out.Primitives = &copyHits
+	}
+	// Expansion is opt-in via q.Settle — even if expResp is set, the
+	// settle flag must be on for the sub-list to surface. Mirrors the
+	// chapterhouse handler contract.
+	if q.Settle && f.expResp != nil {
+		out.Expansion = append([]core.ExpansionHit(nil), f.expResp...)
 	}
 	return out, nil
 }
@@ -1209,6 +1220,227 @@ func TestRecall_PrimitivesNilSubListNoOp(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out.Hits, 1)
 	assert.Equal(t, "e1", out.Hits[0].ID)
+}
+
+// ---------------------------------------------------------------------
+// P4 recurrent-settle expansion (Task 5, config A).
+// ---------------------------------------------------------------------
+
+// TestRecall_SettleBogusModeRejected pins the validation contract:
+// Settle must be one of "", "expand", "channel". Any other value fails
+// with ErrValidation so the HTTP/MCP boundary maps it to a 400.
+func TestRecall_SettleBogusModeRejected(t *testing.T) {
+	c, _, _, _ := newCore()
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		Settle:    "bogus",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation,
+		"an invalid settle mode must surface as a validation error (400 at the boundary)")
+}
+
+// TestRecall_SettleExpandPlumbsToMultiQuery pins that a non-empty settle
+// mode flips the settle flag on the chapterhouse multi-query and forwards
+// the params passthrough.
+func TestRecall_SettleExpandPlumbsToMultiQuery(t *testing.T) {
+	c, _, ch, _ := newCore()
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:    "kubernetes",
+		Settle:       "expand",
+		SettleParams: core.SettleParams{Lambda: 0.7, TopM: 25},
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.multiQueries, 1)
+	assert.True(t, ch.multiQueries[0].Settle,
+		"a non-empty settle mode must set Settle=true on the multi-query")
+	assert.InDelta(t, 0.7, ch.multiQueries[0].SettleParams.Lambda, 1e-9,
+		"settle params must propagate to the multi-query")
+	assert.EqualValues(t, 25, ch.multiQueries[0].SettleParams.TopM)
+}
+
+// TestRecall_SettleDefaultOff pins the byte-identical off contract at the
+// wire level: an omitted Settle must leave the multi-query settle flag
+// false so the chapterhouse handler stays on the no-expansion path.
+func TestRecall_SettleDefaultOff(t *testing.T) {
+	c, _, ch, _ := newCore()
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.multiQueries, 1)
+	assert.False(t, ch.multiQueries[0].Settle,
+		"settle must default off on the multi-query")
+}
+
+// TestRecall_SettleOffByteIdenticalToPreP4 is the regression test: with
+// Settle unset, recall output (hits + TierCounts) must match the pre-P4
+// pipeline exactly — even when the fake has an expansion sub-list staged
+// (it must NOT surface because the settle flag is off). Guards against an
+// accidental on-by-default expansion or a stray "expansion" TierCounts
+// key leaking into every recall.
+func TestRecall_SettleOffByteIdenticalToPreP4(t *testing.T) {
+	c, s, ch, _ := newCore()
+	s.vectorHits["sess"] = []core.RecallHit{{Tier: "working", Score: 0.9, ID: "w1"}}
+	ch.episResp = []core.RecallHit{{Tier: "episodic", Score: 0.5, ID: "e1"}}
+	ch.semResp = []core.RecallHit{{Tier: "semantic", Score: 0.7, ID: "m1"}}
+	// Stage an expansion sub-list that must NOT surface (settle off).
+	ch.expResp = []core.ExpansionHit{{ID: "x1", Activation: 0.99, Text: "expansion text"}}
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		SessionID: "sess", UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		// Settle intentionally omitted.
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Hits, 3, "only the three RRF-tier hits surface; expansion must not leak")
+	assert.Equal(t, "w1", out.Hits[0].ID)
+	assert.Equal(t, "e1", out.Hits[1].ID)
+	assert.Equal(t, "m1", out.Hits[2].ID)
+	// TierCounts must be byte-identical to the pre-P4 map — no "expansion" key.
+	assert.Equal(t, map[string]int{
+		"working": 1, "episodic": 1, "keyword": 0,
+		"session_vector": 0, "semantic": 1, "primitives": 0,
+	}, out.TierCounts, "settle-off TierCounts must not carry an expansion key")
+}
+
+// TestRecall_SettleExpandStrongRerankHitEntersTopK pins config A's whole
+// premise: a text-bearing expansion candidate with ZERO RRF mass can be
+// pulled into the final top-K purely by cross-encoder score, and a weak
+// expansion candidate cannot. Two expansion hits are staged; the stub
+// reranker scores one high (above an RRF hit) and one low. The final
+// order must place the strong expansion hit at the top and exclude the
+// weak one under a tight limit.
+func TestRecall_SettleExpandStrongRerankHitEntersTopK(t *testing.T) {
+	c, _, ch, _ := newCore()
+	// One real RRF hit from episodic.
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.5, ID: "e1", Content: "episodic content"},
+	}
+	// Two expansion candidates, both text-bearing (rrf=0).
+	ch.expResp = []core.ExpansionHit{
+		{ID: "x-strong", Activation: 0.9, Text: "strong expansion text"},
+		{ID: "x-weak", Activation: 0.1, Text: "weak expansion text"},
+	}
+
+	// Stub reranker: strong expansion hit scores highest, the RRF hit
+	// middling, the weak expansion hit near zero.
+	srv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"scores":[
+			{"id":"x-strong","score":0.95},
+			{"id":"e1","score":0.50},
+			{"id":"x-weak","score":0.01}
+		]}`))
+	}))
+	defer srv.Close()
+	c.Truthsayer = truthsayer.New(srv.URL).WithHTTPClient(srv.Client())
+	c.RerankWeight = 1.0 // pure rerank exposes the rrf=0 expansion path cleanly
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		Limit:     2, // top-2 so the weak expansion hit is squeezed out
+		Settle:    "expand",
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Hits, 2, "limited to top-2")
+	assert.Equal(t, "x-strong", out.Hits[0].ID,
+		"a strong-rerank expansion hit lands top despite rrf=0")
+	assert.Equal(t, "expansion", out.Hits[0].Tier,
+		"expansion provenance is carried on the Tier field")
+	assert.Equal(t, "e1", out.Hits[1].ID, "the RRF hit takes the second slot")
+	for _, h := range out.Hits {
+		assert.NotEqual(t, "x-weak", h.ID,
+			"a weak-rerank expansion hit must not enter the top-K")
+	}
+}
+
+// TestRecall_SettleExpandDropsEmptyTextHits pins the Task 4 finding
+// handling: expansion entries with empty text are dropped from the pool
+// (they can neither be reranked nor consumed). Only the text-bearing
+// expansion hit reaches the reranker as a candidate.
+func TestRecall_SettleExpandDropsEmptyTextHits(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.5, ID: "e1", Content: "episodic content"},
+	}
+	ch.expResp = []core.ExpansionHit{
+		{ID: "x-with-text", Activation: 0.9, Text: "has text"},
+		{ID: "x-no-text", Activation: 0.8, Text: ""}, // dropped
+	}
+
+	var gotBody map[string]any
+	srv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"scores":[]}`))
+	}))
+	defer srv.Close()
+	c.Truthsayer = truthsayer.New(srv.URL).WithHTTPClient(srv.Client())
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		Limit:     10,
+		Settle:    "expand",
+	})
+	require.NoError(t, err)
+
+	// The text-less expansion hit must never appear in the output.
+	for _, h := range out.Hits {
+		assert.NotEqual(t, "x-no-text", h.ID, "empty-text expansion hit must be dropped")
+	}
+	// Reranker candidates: e1 + x-with-text only (2), NOT x-no-text.
+	cands, ok := gotBody["candidates"].([]any)
+	require.True(t, ok)
+	ids := map[string]bool{}
+	for _, cv := range cands {
+		ids[cv.(map[string]any)["id"].(string)] = true
+	}
+	assert.True(t, ids["x-with-text"], "text-bearing expansion hit is a rerank candidate")
+	assert.True(t, ids["e1"], "the RRF hit is a rerank candidate")
+	assert.False(t, ids["x-no-text"], "empty-text expansion hit is not sent to the reranker")
+}
+
+// TestRecall_SettleExpandDedupsAgainstPool pins the dedup contract: an
+// expansion hit whose id already sits in the fused RRF pool must not be
+// duplicated. The pool entry (with its real RRF mass) is kept; the
+// expansion overlay only contributes activation (for Task 6). Here the
+// same event_id appears both as an episodic RRF hit and as an expansion
+// hit — the output must contain exactly one entry for it, and that entry
+// must keep its episodic provenance (not be relabeled "expansion").
+func TestRecall_SettleExpandDedupsAgainstPool(t *testing.T) {
+	c, _, ch, _ := newCore()
+	shared := "shared-evt"
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.9, ID: shared, Content: "episodic content"},
+	}
+	ch.expResp = []core.ExpansionHit{
+		{ID: shared, Activation: 0.9, Text: "expansion duplicate text"},
+	}
+
+	// No reranker: RRF-only path keeps this test focused on dedup.
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		Limit:     10,
+		Settle:    "expand",
+	})
+	require.NoError(t, err)
+
+	n := 0
+	for _, h := range out.Hits {
+		if h.ID == shared {
+			n++
+			assert.Equal(t, "episodic", h.Tier,
+				"the pooled RRF entry wins dedup; provenance stays episodic")
+		}
+	}
+	assert.Equal(t, 1, n, "an expansion hit already in the pool must not duplicate")
 }
 
 // TestRecall_CrossEncoderRerankReorders pins the Stage 2/3 happy path:

@@ -141,6 +141,15 @@ type EpisodicMultiQuery struct {
 	// type (chapterhouse.QueryEpisodicMultiRequest) carries
 	// `omitempty` so a zero-value request never serializes the flag.
 	Primitives bool
+	// Settle, when true, asks the chapterhouse handler to run the P4
+	// recurrent-settle spreading activation over the Hebbian graph
+	// seeded by the vector+fts hits and return an `expansion` sub-list.
+	// SettleParams carries the tuning overrides; zero fields fall back
+	// to chapterhouse's DefaultSettleParams(). The wire request
+	// (chapterhouse.QueryEpisodicMultiRequest.Settle) is a pointer block
+	// that is only marshaled when this flag is set.
+	Settle       bool
+	SettleParams SettleParams
 }
 
 // EpisodicMultiResult carries the parallel ranked sub-lists returned
@@ -168,6 +177,28 @@ type EpisodicMultiResult struct {
 	FTS           []RecallHit
 	SessionVector []RecallHit
 	Primitives    *[]RecallHit
+	// Expansion is the P4 recurrent-settle sub-list (Task 4 contract):
+	// non-seed nodes surfaced by spreading activation, activation-
+	// descending. nil when the caller didn't set Settle OR the
+	// chapterhouse handler dropped the field on a best-effort settle
+	// failure — either way, no expansion is applied (no error). A
+	// non-nil (possibly empty) slice means settle ran. Entries MAY have
+	// an empty Text: the Task 4 handler hydrates text best-effort, and a
+	// row whose text column is NULL / ACL-denied surfaces with Text == ""
+	// (documented Task 4 finding). Recall drops those (see below).
+	Expansion []ExpansionHit
+}
+
+// ExpansionHit is one entry in the settle expansion sub-list, projected
+// from chapterhouse's wire ExpansionHit. Text is empty when the
+// chapterhouse handler could not hydrate the event's text (NULL column
+// or ACL denial) — a documented Task 4 finding. Such text-less entries
+// are dropped by Recall because they can neither be scored by the
+// cross-encoder nor consumed by the caller.
+type ExpansionHit struct {
+	ID         string
+	Activation float64
+	Text       string
 }
 
 // SemanticQuery is the request shape for /v1/semantic/query.
