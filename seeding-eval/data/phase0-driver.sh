@@ -33,10 +33,10 @@ EVENT_BUCKETS="${DATA_DIR}/event_buckets.json"
 RESULTS_NOPRIM="${DATA_DIR}/results-baseline-noprim"
 RESULTS_PRIM="${DATA_DIR}/results-baseline-prim"
 
-WORKSPACE="e256f781-c7cc-42c4-8539-ed4e944158c0"
+WORKSPACE="a4f8bdd2-65c0-44b6-990d-ef2d1f8dc479"
 USER_ID="00000000-0000-0000-0000-000000000001"
 REPO="vercel/next.js"
-N_RESOLVED=50
+N_RESOLVED=750
 STRATEGY="merged-prs"
 
 CHAPTERHOUSE_URL="http://localhost:8080"
