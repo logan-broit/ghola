@@ -1,0 +1,8 @@
+# Large generated artifacts — not committed; regenerate with phase0-driver.sh
+cache/
+*.jsonl
+results-baseline-noprim/
+results-baseline-prim/
+import-logs-imported.txt
+bundle-dir/
+phase0.log
