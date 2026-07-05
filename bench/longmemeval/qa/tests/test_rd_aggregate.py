@@ -648,8 +648,9 @@ def test_render_latex_table_two_rows(tmp_path):
     assert "extractive\\_relevance" in tex   # underscore escaped
     assert "100.0" in tex and "0.0" in tex   # the two accuracy percents
     assert tex.count("\\\\") >= 2            # one line terminator per data row
-    # rows sorted by mean_rate: extractive (993) before truncate (1000)
-    assert tex.index("extractive") < tex.index("truncate")
+    # rows grouped by family, then FAMILY insertion order: truncate (index 0)
+    # comes before extractive (index 3) — both are selection family
+    assert tex.index("truncate") < tex.index("extractive")
     # rate CI is present in the rate cell (n=1 -> CI=0.0)
     assert "993.0 $\\pm$ 0.0" in tex
     assert "1000.0 $\\pm$ 0.0" in tex
@@ -709,3 +710,43 @@ def test_render_latex_table_variant_folding(tmp_path):
     tex_b = rd_aggregate.render_latex_table(rows_b)
     # Extra-label row: distill_model=opus -> variant "opus"
     assert "opus" in tex_b
+
+
+def test_render_latex_table_family_grouping(tmp_path):
+    """Rows from both families plus a full row (budget=None) are grouped:
+    all selection rows precede all transform rows; full is the last selection
+    row (budget None sorts last within its compressor); exactly one extra
+    \\midrule between the blocks (total \\midrule count = 2: header + separator).
+    """
+    out = tmp_path / "out"
+    # selection family
+    _write_leaf(out, "truncate_tokens", 1000, 0, [("q1", 950, False), ("q2", 970, False)])
+    _write_leaf(out, "extractive_relevance", 1000, 0, [("q1", 980, True), ("q2", 990, False)])
+    _write_leaf(out, "full", None, 0, [("q1", 2200, True), ("q2", 2100, True)])
+    # transform family
+    _write_leaf(out, "llm_distill", 1000, 0, [("q1", 850, True), ("q2", 860, True)])
+
+    rows = rd_aggregate.aggregate_many([(out, {})])
+    tex = rd_aggregate.render_latex_table(rows)
+
+    # All selection compressors must appear before any transform compressor.
+    last_selection_pos = max(
+        tex.index("truncate\\_tokens"),
+        tex.index("extractive\\_relevance"),
+        tex.index("full"),
+    )
+    first_transform_pos = tex.index("llm\\_distill")
+    assert last_selection_pos < first_transform_pos, (
+        "transform row appeared before end of selection block"
+    )
+
+    # full (budget=None) must appear after extractive_relevance in the table
+    # (full is position 5 in FAMILY; extractive is position 3).
+    assert tex.index("full") > tex.index("extractive\\_relevance"), (
+        "full should come after extractive_relevance (FAMILY order)"
+    )
+
+    # Exactly two \midrule lines: one after the header, one between families.
+    assert tex.count(r"\midrule") == 2, (
+        f"expected 2 \\midrule (header + 1 separator), got {tex.count(chr(92) + 'midrule')}"
+    )

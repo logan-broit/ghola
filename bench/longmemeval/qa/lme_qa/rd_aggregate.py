@@ -78,6 +78,30 @@ _OPTIONAL_FIXED: list[tuple[str, str]] = [
     ("prune_level", "prune_level"),
 ]
 
+#: Maps every known compressor name to its family: "selection" or "transform".
+#: Unknown compressors fall back to "other".
+#: INSERTION ORDER is the canonical within-family display order for the paper table.
+FAMILY: dict[str, str] = {
+    # selection family — relevance/selection strategies that choose a subset
+    "truncate_tokens": "selection",
+    "topk_sessions": "selection",
+    "lexical_relevance": "selection",
+    "extractive_relevance": "selection",
+    "extractive_relevance_expanded": "selection",
+    "full": "selection",
+    # transform family — methods that rewrite/distil context
+    "statistical_prune": "transform",
+    "graph_community": "transform",
+    "perplexity_prune": "transform",
+    "llm_distill": "transform",
+}
+
+# Canonical family display order for the paper table.
+_FAMILY_ORDER: list[str] = ["selection", "transform", "other"]
+
+# Within-family compressor order derived from FAMILY insertion order.
+_COMPRESSOR_ORDER: dict[str, int] = {comp: i for i, comp in enumerate(FAMILY)}
+
 
 @dataclass(frozen=True)
 class _LeafSetting:
@@ -628,6 +652,20 @@ def _variant_cell(r: dict[str, Any]) -> str:
     return _latex_escape(", ".join(tokens))
 
 
+def _latex_table_sort_key(r: dict[str, Any]) -> tuple:
+    """Sort key for render_latex_table: family blocks, then FAMILY insertion
+    order within a family, then budget ascending (None last), then variant asc.
+    """
+    comp = r.get("compressor", "")
+    family = FAMILY.get(comp, "other")
+    family_rank = _FAMILY_ORDER.index(family) if family in _FAMILY_ORDER else len(_FAMILY_ORDER)
+    comp_rank = _COMPRESSOR_ORDER.get(comp, len(_COMPRESSOR_ORDER))
+    budget = r.get("budget")
+    budget_sort = (1, 0) if budget is None else (0, budget)
+    variant = _variant_cell(r)
+    return (family_rank, comp_rank, budget_sort, variant)
+
+
 def render_latex_table(rows: list[dict[str, Any]]) -> str:
     """Render the frontier as a booktabs LaTeX tabular for the paper's Table 1.
 
@@ -635,10 +673,13 @@ def render_latex_table(rows: list[dict[str, Any]]) -> str:
     The 'variant' column folds all hyperparameter + extra-label fields into
     a compact comma-joined string so the table fits in 6 columns.
 
-    Rows are sorted by mean_rate ascending.
+    Rows are grouped by family (selection, then transform, then other);
+    within a family, compressors follow the canonical FAMILY insertion order;
+    within a compressor, budgets ascend with None last; ties broken by variant
+    string ascending. A \\midrule is emitted between non-empty family blocks.
     Missing variant fields render as '--'. LaTeX-special characters are escaped.
     """
-    rows = sorted(rows, key=lambda r: r["mean_rate"])
+    rows = sorted(rows, key=_latex_table_sort_key)
 
     col_headers: list[str] = [
         "compressor", "variant", "budget", "n", r"mean\_rate", "accuracy"
@@ -652,25 +693,37 @@ def render_latex_table(rows: list[dict[str, Any]]) -> str:
     lines.append(" & ".join(col_headers) + r" \\")
     lines.append(r"\midrule")
 
+    # Group rows by family to emit \midrule between non-empty blocks.
+    rows_by_family: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        cells: list[str] = []
+        comp = r.get("compressor", "")
+        family = FAMILY.get(comp, "other")
+        rows_by_family.setdefault(family, []).append(r)
 
-        cells.append(_latex_escape(r["compressor"]))
-        cells.append(_variant_cell(r))
+    # Emit families in canonical order; \midrule only between non-empty blocks.
+    non_empty_families = [f for f in _FAMILY_ORDER if f in rows_by_family]
+    for fam_idx, fam in enumerate(non_empty_families):
+        if fam_idx > 0:
+            lines.append(r"\midrule")
+        for r in rows_by_family[fam]:
+            cells: list[str] = []
 
-        budget_val = r["budget"]
-        cells.append("--" if budget_val is None else str(budget_val))
+            cells.append(_latex_escape(r["compressor"]))
+            cells.append(_variant_cell(r))
 
-        cells.append(str(r["n"]))
+            budget_val = r["budget"]
+            cells.append("--" if budget_val is None else str(budget_val))
 
-        rate_ci = r["rate_ci"]
-        cells.append(f"{r['mean_rate']:.1f} $\\pm$ {rate_ci:.1f}")
+            cells.append(str(r["n"]))
 
-        acc_pct = r["accuracy"] * 100.0
-        ci_pct = r["acc_ci"] * 100.0
-        cells.append(f"{acc_pct:.1f} $\\pm$ {ci_pct:.1f}")
+            rate_ci = r["rate_ci"]
+            cells.append(f"{r['mean_rate']:.1f} $\\pm$ {rate_ci:.1f}")
 
-        lines.append(" & ".join(cells) + r" \\")
+            acc_pct = r["accuracy"] * 100.0
+            ci_pct = r["acc_ci"] * 100.0
+            cells.append(f"{acc_pct:.1f} $\\pm$ {ci_pct:.1f}")
+
+            lines.append(" & ".join(cells) + r" \\")
 
     lines.append(r"\bottomrule")
     lines.append(r"\end{tabular}")

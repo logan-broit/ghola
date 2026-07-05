@@ -46,27 +46,15 @@ from pathlib import Path
 from typing import Any
 
 from . import rd_aggregate
+from .rd_aggregate import FAMILY
 
 # ---------------------------------------------------------------------------
 # Figure family classification
 # ---------------------------------------------------------------------------
-
-#: Maps every known compressor name to its family: "selection" or "transform".
-#: Unknown compressors fall back to "other".
-FAMILY: dict[str, str] = {
-    # selection family — relevance/selection strategies that choose a subset
-    "truncate_tokens": "selection",
-    "topk_sessions": "selection",
-    "lexical_relevance": "selection",
-    "extractive_relevance": "selection",
-    "extractive_relevance_expanded": "selection",
-    "full": "selection",
-    # transform family — methods that rewrite/distil context
-    "statistical_prune": "transform",
-    "graph_community": "transform",
-    "perplexity_prune": "transform",
-    "llm_distill": "transform",
-}
+# FAMILY is defined in rd_aggregate (canonical insertion-order dict used for
+# both figure coloring and the paper table's family-grouped sort).
+# Re-exported here so existing figure code and tests can still import it as
+# ``paper_artifacts.FAMILY``.
 
 
 @dataclass
