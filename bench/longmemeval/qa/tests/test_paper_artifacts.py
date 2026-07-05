@@ -354,3 +354,48 @@ def test_humanize_series_extractive_expanded_with_reserve():
     r = {"compressor": "extractive_relevance_expanded", "expansion_reserve": 0.3,
          "query_mode": None}
     assert paper_artifacts._humanize_series(r) == "extractive + expansion (r=0.3)"
+
+
+def _make_budget_row(compressor: str, budget: int, accuracy: float = 0.70) -> dict:
+    """Minimal row dict with budget for _escalation_budgets tests."""
+    return {"compressor": compressor, "budget": budget, "accuracy": accuracy}
+
+
+def test_escalation_budgets_excludes_selection_only_budget():
+    """_escalation_budgets must exclude a budget that has only selection-family
+    rows (e.g. budget 4000 with extractive_relevance + truncate_tokens only)
+    and include budgets that have at least one transform-family row.
+
+    Regression: the old cnt >= 2 predicate included 4000 because both
+    extractive_relevance and truncate_tokens are present there, producing an
+    empty bar group in fig2 with no transform bars.
+    """
+    rows = [
+        # budget 4000: selection-only (extractive + truncate), no transforms
+        _make_budget_row("extractive_relevance", 4000, 0.86),
+        _make_budget_row("truncate_tokens", 4000, 0.39),
+        # budget 1000: has a transform row
+        _make_budget_row("llm_distill", 1000, 0.73),
+        _make_budget_row("extractive_relevance", 1000, 0.85),
+        # budget 2000: has a transform row
+        _make_budget_row("statistical_prune", 2000, 0.67),
+    ]
+    result = paper_artifacts._escalation_budgets(rows)
+    assert 4000 not in result, "budget 4000 is selection-only; must be excluded"
+    assert 1000 in result, "budget 1000 has a transform row; must be included"
+    assert 2000 in result, "budget 2000 has a transform row; must be included"
+    assert result == sorted(result), "_escalation_budgets must return a sorted list"
+
+
+def test_escalation_budgets_empty_rows():
+    """Empty row list returns empty budget list."""
+    assert paper_artifacts._escalation_budgets([]) == []
+
+
+def test_escalation_budgets_all_selection():
+    """All-selection rows return no eligible budgets."""
+    rows = [
+        _make_budget_row("extractive_relevance", 1000),
+        _make_budget_row("truncate_tokens", 1000),
+    ]
+    assert paper_artifacts._escalation_budgets(rows) == []

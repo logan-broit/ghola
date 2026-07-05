@@ -750,3 +750,32 @@ def test_render_latex_table_family_grouping(tmp_path):
     assert tex.count(r"\midrule") == 2, (
         f"expected 2 \\midrule (header + 1 separator), got {tex.count(chr(92) + 'midrule')}"
     )
+
+
+def test_variant_cell_oracle_model_strips_instruct_suffix():
+    """_variant_cell strips a trailing '-Instruct' suffix from oracle_model for
+    display only (reduces the overfull hbox from Qwen2.5-1.5B-Instruct).
+
+    The raw oracle_model value on the row must not be modified.
+    """
+    row_with_instruct = {
+        "compressor": "perplexity_prune",
+        "budget": 500,
+        "expansion_reserve": None,
+        "query_mode": "agnostic",
+        "output_form": None,
+        "prune_level": None,
+        "oracle_model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "edge_metric": None,
+    }
+    cell = rd_aggregate._variant_cell(row_with_instruct)
+    # Row data is unchanged.
+    assert row_with_instruct["oracle_model"] == "Qwen/Qwen2.5-1.5B-Instruct"
+    # Display: '-Instruct' suffix stripped, slash escaped for LaTeX.
+    assert "Instruct" not in cell, f"'-Instruct' should be stripped; got: {cell!r}"
+    assert "Qwen2.5-1.5B" in cell.replace(r"\_", "_").replace(r"\&", "&").replace("/", "/")
+
+    # A model without '-Instruct' suffix is rendered verbatim.
+    row_no_instruct = dict(row_with_instruct, oracle_model="some-model-base")
+    cell_no_instruct = rd_aggregate._variant_cell(row_no_instruct)
+    assert "some-model-base" in cell_no_instruct.replace(r"\_", "_")

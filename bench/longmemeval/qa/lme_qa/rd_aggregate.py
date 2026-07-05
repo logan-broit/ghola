@@ -642,7 +642,10 @@ def _variant_cell(r: dict[str, Any]) -> str:
     for field in ("query_mode", "output_form", "edge_metric", "oracle_model", "prune_level"):
         val = r.get(field)
         if val is not None:
-            tokens.append(str(val))
+            display = str(val)
+            if field == "oracle_model" and display.endswith("-Instruct"):
+                display = display[: -len("-Instruct")]
+            tokens.append(display)
     for k in sorted(r.keys() - _STANDARD_ROW_KEYS):
         val = r.get(k)
         if val is not None:

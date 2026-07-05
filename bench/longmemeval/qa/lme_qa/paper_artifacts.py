@@ -374,13 +374,30 @@ def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
     _save_fig(fig, plt, path)
 
 
+def _escalation_budgets(rows: list[dict[str, Any]]) -> list:
+    """Return sorted list of budgets eligible for the escalation figure.
+
+    A budget is eligible only if it has at least one transform-family row.
+    Budgets that appear only in selection-family rows (e.g. budget 4000 with
+    extractive + truncate only) are excluded: they would produce an empty bar
+    group with no transform bars to compare.
+    """
+    transform_budgets: set[Any] = {
+        r.get("budget")
+        for r in rows
+        if FAMILY.get(r.get("compressor", ""), "other") == "transform"
+        and r.get("budget") is not None
+    }
+    return sorted(transform_budgets)
+
+
 def _write_escalation_fig(rows: list[dict[str, Any]], path: Path) -> None:
     """Write fig2-escalation.pdf: transform accuracy vs selection reference at
     matched budgets.
 
-    For each budget present in >= 2 rows: grouped bars of every transform-family
-    row, plus a horizontal reference line at extractive_relevance accuracy for
-    that budget (if present).
+    For each budget that has at least one transform-family row: grouped bars of
+    every transform-family row, plus a horizontal reference line at
+    extractive_relevance accuracy for that budget (if present).
 
     Raises on any failure (caller catches and warns).
     """
@@ -390,12 +407,10 @@ def _write_escalation_fig(rows: list[dict[str, Any]], path: Path) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    # Find budgets where >= 2 rows are present.
-    # Singleton budgets are skipped: a bar group with a single bar is unreadable.
-    budget_counts: Counter[Any] = Counter(r.get("budget") for r in rows)
-    eligible_budgets = sorted(
-        b for b, cnt in budget_counts.items() if b is not None and cnt >= 2
-    )
+    # Find budgets that have at least one transform-family row.
+    # Budgets present only in selection rows (e.g. 4000 with extractive +
+    # truncate) are excluded: they would render an empty bar group.
+    eligible_budgets = _escalation_budgets(rows)
 
     if not eligible_budgets:
         # Nothing to plot — write an empty figure rather than error.
