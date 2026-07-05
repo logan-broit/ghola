@@ -180,11 +180,13 @@ log "ingesting ${BUNDLE_LINES} threads into workspace ${WORKSPACE}..."
 CHAPTERHOUSE_API_KEY=$(docker inspect docker-compose-ghola-1 \
     --format '{{range .Config.Env}}{{println .}}{{end}}' \
     | grep '^CHAPTERHOUSE_API_KEY=' | cut -d= -f2-)
-export CHAPTERHOUSE_API_KEY
 if [ -z "${CHAPTERHOUSE_API_KEY}" ]; then
-    log "ERROR: could not obtain CHAPTERHOUSE_API_KEY from ghola container"
-    exit 1
+    # Local stack runs AUTH_PROVIDER=default + CHAPTERHOUSE_REQUIRE_KEY=false:
+    # the server ignores the Bearer key; import-logs only requires non-empty.
+    CHAPTERHOUSE_API_KEY="local-dev-noauth"
+    log "container key empty; using local-dev placeholder (server auth is off)"
 fi
+export CHAPTERHOUSE_API_KEY
 
 cd "${WORKTREE_ROOT}"
 go run ./cmd/import-logs \
