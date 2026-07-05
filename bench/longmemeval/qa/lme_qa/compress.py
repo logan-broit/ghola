@@ -7,7 +7,10 @@ the query and a target token budget, and returns rendered text in the SAME
 format ``build_context`` produces (via the shared ``context.render_sessions``).
 
 The budget is approximate by design (see ``tokenize``): it is only the control
-knob. The plotted rate is the reader's real ``usage.input_tokens``.
+knob. The plotted rate is the emitted-context token count (cl100k) measured at
+build time -- NOT the reader's ``usage.input_tokens``, which on the
+claude-code backend is fixed harness overhead (~3279 tokens regardless of
+payload).
 """
 
 from __future__ import annotations
@@ -509,8 +512,11 @@ def _llm_distill(
     renders the selected sessions to the canonical reader text, then hands that
     to a ``distill.Distiller`` which asks claude to compress it to
     ``target_tokens``. There is NO hard truncation here — the budget is the
-    distiller's instruction, and the plotted rate is the reader's real token
-    count (the budget is approximate by design, like every compressor).
+    distiller's instruction, and the plotted rate is the emitted-context token
+    count (cl100k) measured at build time -- NOT the reader's
+    ``usage.input_tokens`` (fixed claude-code harness overhead, ~3279 tokens
+    regardless of payload). The budget is approximate by design, like every
+    compressor.
 
     ``output_form`` ("prose" | "structured") and ``query_mode`` ("agnostic" |
     "aware") are the two distiller knobs the sweep varies. ``distiller`` is
