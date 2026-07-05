@@ -123,7 +123,7 @@ from seeding_eval.modules import primary_bucket
 
 # Load cached extracts
 def _repo_slug(r):
-    return r.replace("/", "_")
+    return r.replace("/", "__")
 
 repo_dir = cache_dir / _repo_slug(repo)
 
@@ -174,6 +174,17 @@ log "cases and event_buckets written"
 # ---------------------------------------------------------------------------
 log "--- Step C: import-logs ingest ---"
 log "ingesting ${BUNDLE_LINES} threads into workspace ${WORKSPACE}..."
+
+# Auth: lift the API key from the running ghola container's env at exec time
+# (never written to disk or logs; import-logs reads it from the process env).
+CHAPTERHOUSE_API_KEY=$(docker inspect docker-compose-ghola-1 \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | grep '^CHAPTERHOUSE_API_KEY=' | cut -d= -f2-)
+export CHAPTERHOUSE_API_KEY
+if [ -z "${CHAPTERHOUSE_API_KEY}" ]; then
+    log "ERROR: could not obtain CHAPTERHOUSE_API_KEY from ghola container"
+    exit 1
+fi
 
 cd "${WORKTREE_ROOT}"
 go run ./cmd/import-logs \
