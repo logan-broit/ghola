@@ -2041,3 +2041,173 @@ func TestGCSession_RemovesOrphanFile(t *testing.T) {
 	assert.True(t, removed, "schema-only orphan -> remove")
 	assert.Equal(t, []string{id}, s.removeSessions)
 }
+
+// ---------------------------------------------------------------------------
+// Task 6 — three-way score fusion (config B / "channel" mode)
+// ---------------------------------------------------------------------------
+
+// TestRecall_SettleChannelZeroActivationWeightRejected pins the
+// validation contract: channel mode with ActivationWeight == 0 (the zero
+// value, i.e. caller forgot to set it) must surface as ErrValidation so
+// the HTTP/MCP boundary maps it to a 400 rather than silently producing a
+// two-channel result under a "channel" label.
+func TestRecall_SettleChannelZeroActivationWeightRejected(t *testing.T) {
+	c, _, _, _ := newCore()
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:        "kubernetes",
+		Settle:           "channel",
+		ActivationWeight: 0, // zero value — forgot to set it
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation,
+		"channel mode with ActivationWeight=0 must surface as a validation error (400)")
+}
+
+// TestRecall_SettleChannelWeightSumExceedsOneRejected pins the guard:
+// c.RerankWeight + ActivationWeight > 1 must surface as ErrValidation.
+// Default c.RerankWeight is 0.5 so ActivationWeight=0.6 pushes the sum
+// to 1.1, which would yield a negative rrfWeight in FuseScores.
+func TestRecall_SettleChannelWeightSumExceedsOneRejected(t *testing.T) {
+	c, _, _, _ := newCore()
+	// c.RerankWeight defaults to 0.5; 0.5 + 0.6 = 1.1 > 1.
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:        "kubernetes",
+		Settle:           "channel",
+		ActivationWeight: 0.6,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation,
+		"rerank_weight+activation_weight > 1 must surface as a validation error (400)")
+}
+
+// TestRecall_SettleExpandIgnoresActivationWeight pins mode isolation: in
+// "expand" mode ActivationWeight is present in the input struct but must
+// be completely ignored by the fusion path. The output must be identical
+// to a plain expand recall with ActivationWeight=0 — the activation
+// channel must NOT be applied when the mode is "expand".
+func TestRecall_SettleExpandIgnoresActivationWeight(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.5, ID: "e1", Content: "episodic content"},
+	}
+	ch.expResp = []core.ExpansionHit{
+		{ID: "x1", Activation: 0.9, Text: "expansion text"},
+	}
+
+	srv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Both candidates score equally so only the rrf+rerank blend
+		// determines the output, not activation.
+		_, _ = w.Write([]byte(`{"scores":[
+			{"id":"e1","score":0.5},
+			{"id":"x1","score":0.5}
+		]}`))
+	}))
+	defer srv.Close()
+	c.Truthsayer = truthsayer.New(srv.URL).WithHTTPClient(srv.Client())
+	c.RerankWeight = 0.5
+
+	// Recall with "expand" + non-zero ActivationWeight: activation must be ignored.
+	withAW, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:        "kubernetes",
+		Settle:           "expand",
+		ActivationWeight: 0.2, // must be a no-op in expand mode
+	})
+	require.NoError(t, err)
+
+	// Recall with "expand" + zero ActivationWeight: must produce identical scores.
+	withoutAW, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:        "kubernetes",
+		Settle:           "expand",
+		ActivationWeight: 0,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, len(withAW.Hits), len(withoutAW.Hits),
+		"expand mode: hit count must be identical regardless of ActivationWeight")
+	for i := range withAW.Hits {
+		assert.Equal(t, withAW.Hits[i].ID, withoutAW.Hits[i].ID,
+			"expand mode: hit order must be identical regardless of ActivationWeight")
+		assert.InDelta(t, withAW.Hits[i].Score, withoutAW.Hits[i].Score, 1e-12,
+			"expand mode: hit scores must be identical regardless of ActivationWeight")
+	}
+}
+
+// TestRecall_SettleChannelActivationLiftsByRawID is the end-to-end
+// re-keying regression + channel-mode lift test. It verifies that:
+//
+//  1. activationByID is keyed by RAW hit ID (not hitKey) — the expansion
+//     hit's final score must reflect its activation score. Under the pre-
+//     Step-0 bug (hitKey keying) the lookup in FuseScores would miss every
+//     expansion entry and the channel mode would silently produce the same
+//     result as expand mode.
+//
+//  2. Config B property: an expansion hit with high activation outranks an
+//     equally-reranked pool hit that has no activation.
+//
+// Setup: one pool hit "e1" (episodic, RRF mass), one expansion hit "xact"
+// (rrf=0, same rerank score as e1, activation=1.0). With channel mode and
+// wActivation=0.3, xact's activation term must tip it above e1.
+//
+//   c.RerankWeight=0.3, wActivation=0.3.
+//   Both hits get rerank score 0.5.
+//   rrfMax = rrf(e1) = 1/61 ≈ 0.0164 (single-tier, k=60, rank=1 → 1/(60+1)).
+//   xact: rrfByID=0.
+//
+//   rrfNorm(e1)   = 1.0   (it's the only nonzero rrf entry → max = itself)
+//   rrfNorm(xact) = 0.0
+//   rerankNorm both = 1.0 (same score, max=0.5/0.5=1)
+//   actNorm(e1)   = 0.0  (absent from activation map)
+//   actNorm(xact) = 1.0
+//
+//   e1:   (1-0.3-0.3)*1.0 + 0.3*1.0 + 0.3*0.0 = 0.4 + 0.3 = 0.70
+//   xact: (1-0.3-0.3)*0.0 + 0.3*1.0 + 0.3*1.0 = 0.0 + 0.3 + 0.3 = 0.60
+//
+// Hmm — e1 still wins because its rrf mass (0.4) > xact's activation gain.
+// Make wActivation higher so xact wins:
+//
+//   c.RerankWeight=0.1, wActivation=0.5.
+//   e1:   (1-0.1-0.5)*1.0 + 0.1*1.0 + 0.5*0.0 = 0.4 + 0.1 = 0.50
+//   xact: (1-0.1-0.5)*0.0 + 0.1*1.0 + 0.5*1.0 = 0.0 + 0.1 + 0.5 = 0.60
+//   xact wins by 0.10. This is the re-keying regression proof.
+func TestRecall_SettleChannelActivationLiftsByRawID(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.8, ID: "e1", Content: "episodic content"},
+	}
+	ch.expResp = []core.ExpansionHit{
+		{ID: "xact", Activation: 1.0, Text: "expansion with high activation"},
+	}
+
+	srv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Both candidates get the same rerank score — activation is the tie-breaker.
+		_, _ = w.Write([]byte(`{"scores":[
+			{"id":"e1","score":0.5},
+			{"id":"xact","score":0.5}
+		]}`))
+	}))
+	defer srv.Close()
+	c.Truthsayer = truthsayer.New(srv.URL).WithHTTPClient(srv.Client())
+
+	// c.RerankWeight=0.1, wActivation=0.5 → xact wins (see comment above).
+	c.RerankWeight = 0.1
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:        "kubernetes",
+		Settle:           "channel",
+		ActivationWeight: 0.5,
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Hits, 2, "both hits must surface")
+	assert.Equal(t, "xact", out.Hits[0].ID,
+		"xact must rank first: activation (0.5) outweighs e1's rrf advantage when wActivation=0.5")
+	assert.Equal(t, "e1", out.Hits[1].ID)
+	assert.InDelta(t, 0.60, out.Hits[0].Score, 1e-9, "xact score: 0*0.4 + 0.1*1 + 0.5*1 = 0.60")
+	assert.InDelta(t, 0.50, out.Hits[1].Score, 1e-9, "e1 score:   1.0*0.4 + 0.1*1 + 0.5*0 = 0.50")
+}
