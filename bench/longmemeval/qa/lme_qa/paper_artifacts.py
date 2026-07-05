@@ -213,6 +213,41 @@ def _selection_plateau(rows: list[dict[str, Any]]) -> tuple[float, float] | None
     return (best_acc, mean_ci)
 
 
+def _humanize_series(row: dict[str, Any]) -> str:
+    """Human-readable legend label for a plot series.
+
+    Maps known compressors + settings to readable names; falls back to the
+    raw ``_series_key`` for unknown compressors.
+    """
+    comp = row.get("compressor", "")
+    if comp == "extractive_relevance":
+        return "extractive (neural)"
+    if comp == "extractive_relevance_expanded":
+        r = row.get("expansion_reserve")
+        if r is not None:
+            return f"extractive + expansion (r={r:.1f})"
+        return "extractive + expansion"
+    if comp == "lexical_relevance":
+        return "BM25"
+    if comp == "truncate_tokens":
+        return "truncate"
+    if comp == "topk_sessions":
+        return "top-k sessions"
+    if comp == "statistical_prune":
+        return "IDF prune"
+    if comp == "graph_community":
+        return "Leiden coverage"
+    if comp == "perplexity_prune":
+        return "surprisal prune"
+    if comp == "llm_distill":
+        qmode = row.get("query_mode") or "agnostic"
+        dm = row.get("distill_model")
+        if dm:
+            return f"distill ({dm}, {qmode})"
+        return f"distill ({qmode})"
+    return rd_aggregate._series_key(row)
+
+
 def _save_fig(fig: Any, plt: Any, path: Path) -> None:
     """Save *fig* to *path* as PDF, then close it unconditionally.
 
@@ -227,11 +262,12 @@ def _save_fig(fig: Any, plt: Any, path: Path) -> None:
 
 
 def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
-    """Write fig1-frontier.pdf: accuracy (y) vs mean_rate (x, log scale).
+    """Write fig1-frontier.pdf: accuracy (y) vs mean_rate (x, linear scale).
 
-    One series per ``_series_key``; selection family gets filled markers,
-    transform family open markers, other a distinct style (diamond).
-    The ``full`` compressor row is drawn as a large star and annotated.
+    One series per ``_series_key``; families distinguished by color (selection=C0,
+    transform=C1, other=C2); individual series within a family distinguished by
+    marker + linestyle. The ``full`` compressor is drawn as a dashed horizontal
+    reference line at its accuracy, labeled in the legend with the actual values.
     A noise band spans +/- the pooled ``acc_ci`` around the best selection
     series accuracy.
 
@@ -262,11 +298,34 @@ def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
             zorder=0,
         )
 
-    full_point: tuple[float, float] | None = None
+    # Family colors: one color per family, consistent across series.
+    _FAMILY_COLOR = {"selection": "C0", "transform": "C1", "other": "C2"}
+    # Per-family marker/linestyle cycling so series within a family are distinct.
+    _SELECTION_STYLES: list[dict[str, Any]] = [
+        {"marker": "o", "linestyle": "-"},
+        {"marker": "^", "linestyle": "-"},
+        {"marker": "s", "linestyle": "-"},
+        {"marker": "D", "linestyle": "-"},
+        {"marker": "v", "linestyle": "--"},
+    ]
+    _TRANSFORM_STYLES: list[dict[str, Any]] = [
+        {"marker": "o", "linestyle": "--", "markerfacecolor": "none"},
+        {"marker": "^", "linestyle": "--", "markerfacecolor": "none"},
+        {"marker": "D", "linestyle": ":", "markerfacecolor": "none"},
+        {"marker": "v", "linestyle": "-.", "markerfacecolor": "none"},
+        {"marker": "p", "linestyle": "--", "markerfacecolor": "none"},
+    ]
+    _OTHER_STYLES: list[dict[str, Any]] = [
+        {"marker": "D", "linestyle": ":", "markerfacecolor": "none"},
+    ]
+    _family_style_idx: dict[str, int] = {"selection": 0, "transform": 0, "other": 0}
+
+    full_acc: float | None = None
+    full_rate: float | None = None
+    max_non_full_rate: float = 0.0
 
     for series_key in sorted(by_series):
         pts = sorted(by_series[series_key], key=lambda r: r["mean_rate"])
-        # all rows in a series share a compressor (_series_key encodes it)
         comp = pts[0].get("compressor", "")
         family = FAMILY.get(comp, "other")
 
@@ -274,40 +333,53 @@ def _write_frontier_fig(rows: list[dict[str, Any]], path: Path) -> None:
         ys = [p["accuracy"] for p in pts]
 
         if comp == "full":
-            # Draw as a large star later (after all series, so it is on top).
-            full_point = (xs[0], ys[0])
+            full_acc = ys[0]
+            full_rate = xs[0]
             continue
 
+        # Track max non-full rate for x-axis limit.
+        max_non_full_rate = max(max_non_full_rate, max(xs))
+
+        color = _FAMILY_COLOR[family]
+        idx = _family_style_idx[family]
         if family == "selection":
-            kwargs: dict[str, Any] = {"marker": "o", "linestyle": "-"}
+            styles = _SELECTION_STYLES
         elif family == "transform":
-            kwargs = {"marker": "o", "linestyle": "--", "markerfacecolor": "none"}
+            styles = _TRANSFORM_STYLES
         else:
-            kwargs = {"marker": "D", "linestyle": ":", "markerfacecolor": "none"}
+            styles = _OTHER_STYLES
 
-        ax.plot(xs, ys, label=series_key, **kwargs)
+        kwargs: dict[str, Any] = dict(styles[idx % len(styles)])
 
-    # Draw the full-context star on top.
-    if full_point is not None:
-        ax.plot(
-            [full_point[0]],
-            [full_point[1]],
-            marker="*",
-            markersize=14,
-            linestyle="none",
+        # Query-aware llm_distill: filled square marker to stand out.
+        is_aware = comp == "llm_distill" and pts[0].get("query_mode") == "aware"
+        if is_aware:
+            kwargs = {"marker": "s", "linestyle": "--"}
+        else:
+            _family_style_idx[family] = idx + 1
+
+        label = _humanize_series(pts[0])
+        ax.plot(xs, ys, color=color, label=label, **kwargs)
+
+    # Set linear x-axis limits: 0 to max non-full rate * 1.08.
+    x_max = max_non_full_rate * 1.08 if max_non_full_rate > 0 else 1.0
+    ax.set_xlim(0, x_max)
+
+    # Draw the full-context dashed reference line.
+    if full_acc is not None and full_rate is not None:
+        full_label = (
+            f"full context ({full_acc * 100:.1f}% at "
+            f"{int(round(full_rate)):,} tok)"
+        )
+        ax.axhline(
+            y=full_acc,
+            linestyle="--",
             color="black",
-            zorder=5,
-            label="full",
-        )
-        ax.annotate(
-            "full context",
-            xy=full_point,
-            xytext=(6, 6),
-            textcoords="offset points",
-            fontsize=8,
+            linewidth=1.2,
+            zorder=4,
+            label=full_label,
         )
 
-    ax.set_xscale("log")
     ax.set_xlabel("context tokens (cl100k)")
     ax.set_ylabel("QA accuracy")
     ax.legend(fontsize=7, loc="lower right")

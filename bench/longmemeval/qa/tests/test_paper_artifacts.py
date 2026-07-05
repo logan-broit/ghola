@@ -282,3 +282,75 @@ def test_selection_plateau_no_ci_field_defaults_zero():
     center, halfwidth = result
     assert center == pytest.approx(0.72)
     assert halfwidth == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _humanize_series tests
+# ---------------------------------------------------------------------------
+
+
+def test_humanize_series_known_compressors():
+    """_humanize_series maps known compressors to readable labels."""
+    from lme_qa import rd_aggregate as _rd
+
+    # extractive_relevance -> "extractive (neural)"
+    r = {"compressor": "extractive_relevance", "query_mode": None}
+    assert paper_artifacts._humanize_series(r) == "extractive (neural)"
+
+    # topk_sessions -> "top-k sessions"
+    r2 = {"compressor": "topk_sessions", "query_mode": None}
+    assert paper_artifacts._humanize_series(r2) == "top-k sessions"
+
+    # llm_distill aware opus -> "distill (opus, aware)"
+    r3 = {
+        "compressor": "llm_distill", "query_mode": "aware", "distill_model": "opus",
+        "output_form": None, "expansion_reserve": None,
+    }
+    assert paper_artifacts._humanize_series(r3) == "distill (opus, aware)"
+
+    # Unknown compressor -> falls back to series key
+    r4 = {
+        "compressor": "unknown_comp", "query_mode": "agnostic",
+        "output_form": None, "edge_metric": None, "oracle_model": None,
+        "expansion_reserve": None,
+    }
+    result = paper_artifacts._humanize_series(r4)
+    assert result == _rd._series_key(r4)
+
+
+def test_humanize_series_extractive_expanded_with_reserve():
+    """extractive_relevance_expanded with a reserve shows r=X.X."""
+    r = {
+        "compressor": "extractive_relevance_expanded",
+        "expansion_reserve": 0.3,
+        "query_mode": None,
+    }
+    assert paper_artifacts._humanize_series(r) == "extractive + expansion (r=0.3)"
+
+
+def test_humanize_series_known_compressors():
+    """_humanize_series maps known compressors to readable labels."""
+    from lme_qa import rd_aggregate as _rd
+
+    assert paper_artifacts._humanize_series(
+        {"compressor": "extractive_relevance", "query_mode": None}
+    ) == "extractive (neural)"
+    assert paper_artifacts._humanize_series(
+        {"compressor": "topk_sessions", "query_mode": None}
+    ) == "top-k sessions"
+    assert paper_artifacts._humanize_series(
+        {"compressor": "llm_distill", "query_mode": "aware", "distill_model": "opus",
+         "output_form": None, "expansion_reserve": None}
+    ) == "distill (opus, aware)"
+    # Unknown compressor -> falls back to series key
+    r4 = {"compressor": "unknown_comp", "query_mode": "agnostic",
+          "output_form": None, "edge_metric": None, "oracle_model": None,
+          "expansion_reserve": None}
+    assert paper_artifacts._humanize_series(r4) == _rd._series_key(r4)
+
+
+def test_humanize_series_extractive_expanded_with_reserve():
+    """extractive_relevance_expanded with a reserve shows r=X.X."""
+    r = {"compressor": "extractive_relevance_expanded", "expansion_reserve": 0.3,
+         "query_mode": None}
+    assert paper_artifacts._humanize_series(r) == "extractive + expansion (r=0.3)"

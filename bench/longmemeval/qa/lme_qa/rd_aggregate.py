@@ -604,45 +604,47 @@ def _latex_escape(s: str) -> str:
     return s
 
 
+def _variant_cell(r: dict[str, Any]) -> str:
+    """Compact variant string for the table's single 'variant' column.
+
+    Combines all non-null hyperparameter fields (in schema order) plus any
+    extra label keys (sorted) into a comma-separated string of tokens.
+    Empty (all None/absent) returns '--'. LaTeX-escaped.
+    """
+    tokens: list[str] = []
+    reserve = r.get("expansion_reserve")
+    if reserve is not None:
+        tokens.append(f"r={reserve:.1f}")
+    for field in ("query_mode", "output_form", "edge_metric", "oracle_model", "prune_level"):
+        val = r.get(field)
+        if val is not None:
+            tokens.append(str(val))
+    for k in sorted(r.keys() - _STANDARD_ROW_KEYS):
+        val = r.get(k)
+        if val is not None:
+            tokens.append(str(val))
+    if not tokens:
+        return "--"
+    return _latex_escape(", ".join(tokens))
+
+
 def render_latex_table(rows: list[dict[str, Any]]) -> str:
     """Render the frontier as a booktabs LaTeX tabular for the paper's Table 1.
 
-    Columns: compressor, budget, then any optional hyperparameter/label columns
-    that are non-empty in at least one row (same optional-column discovery as
-    ``render_markdown``), then n, mean_rate, accuracy with CI.
+    Columns: compressor, variant, budget, n, mean_rate, accuracy.
+    The 'variant' column folds all hyperparameter + extra-label fields into
+    a compact comma-joined string so the table fits in 6 columns.
 
-    Rows are sorted by mean_rate ascending (matching ``render_markdown``).
-    Missing optional values render as ``--``. LaTeX-special characters in text
-    cells are escaped.
+    Rows are sorted by mean_rate ascending.
+    Missing variant fields render as '--'. LaTeX-special characters are escaped.
     """
-    # Rows already come in sorted by mean_rate from aggregate_many, but sort
-    # defensively to match render_markdown's guarantee.
     rows = sorted(rows, key=lambda r: r["mean_rate"])
 
-    # Optional fixed hyperparameter columns (module-level _OPTIONAL_FIXED).
-    # Headers are LaTeX-escaped here so the shared constant stays plain-text.
-    active_optional: list[tuple[str, str]] = [
-        (key, _latex_escape(header))
-        for key, header in _OPTIONAL_FIXED
-        if any(r.get(key) for r in rows)
+    col_headers: list[str] = [
+        "compressor", "variant", "budget", "n", r"mean\_rate", "accuracy"
     ]
-
-    # Extra label keys from aggregate_many (e.g. distill_model), sorted.
-    extra_keys: list[str] = sorted(
-        {k for r in rows for k in r if k not in _STANDARD_ROW_KEYS}
-    )
-
-    # Build the full ordered column list: (row_key_or_None, header_text)
-    # compressor and budget are always present.
-    col_headers: list[str] = (
-        [r"compressor", "budget"]
-        + [hdr for _, hdr in active_optional]
-        + [_latex_escape(k) for k in extra_keys]
-        + ["n", r"mean\_rate", "accuracy"]
-    )
-
     n_cols = len(col_headers)
-    col_spec = "l" * n_cols  # all left-aligned; caller can tweak in the paper
+    col_spec = "l" * n_cols
 
     lines: list[str] = []
     lines.append(r"\begin{tabular}{" + col_spec + r"}")
@@ -653,36 +655,17 @@ def render_latex_table(rows: list[dict[str, Any]]) -> str:
     for r in rows:
         cells: list[str] = []
 
-        # compressor
         cells.append(_latex_escape(r["compressor"]))
+        cells.append(_variant_cell(r))
 
-        # budget
         budget_val = r["budget"]
         cells.append("--" if budget_val is None else str(budget_val))
 
-        # active optional fixed columns
-        for key, _hdr in active_optional:
-            val = r.get(key)
-            if val is None:
-                cells.append("--")
-            elif isinstance(val, float):
-                cells.append(f"{val:.1f}")
-            else:
-                cells.append(_latex_escape(str(val)))
-
-        # extra label columns
-        for k in extra_keys:
-            val = r.get(k)
-            cells.append("--" if val is None else _latex_escape(str(val)))
-
-        # n
         cells.append(str(r["n"]))
 
-        # mean_rate: one decimal +/- CI one decimal (same style as accuracy cell)
         rate_ci = r["rate_ci"]
         cells.append(f"{r['mean_rate']:.1f} $\\pm$ {rate_ci:.1f}")
 
-        # accuracy: percent one decimal +/- CI as percent one decimal
         acc_pct = r["accuracy"] * 100.0
         ci_pct = r["acc_ci"] * 100.0
         cells.append(f"{acc_pct:.1f} $\\pm$ {ci_pct:.1f}")

@@ -642,6 +642,9 @@ def test_render_latex_table_two_rows(tmp_path):
     rows = rd_aggregate.aggregate_many([(tmp_path, {})])
     tex = rd_aggregate.render_latex_table(rows)
     assert "\\begin{tabular}" in tex and "\\toprule" in tex and "\\bottomrule" in tex
+    # 6 columns: compressor, variant, budget, n, mean_rate, accuracy
+    assert "llllll" in tex
+    assert "variant" in tex
     assert "extractive\\_relevance" in tex   # underscore escaped
     assert "100.0" in tex and "0.0" in tex   # the two accuracy percents
     assert tex.count("\\\\") >= 2            # one line terminator per data row
@@ -650,10 +653,12 @@ def test_render_latex_table_two_rows(tmp_path):
     # rate CI is present in the rate cell (n=1 -> CI=0.0)
     assert "993.0 $\\pm$ 0.0" in tex
     assert "1000.0 $\\pm$ 0.0" in tex
+    # both rows have no hyperparams set -> variant is "--"
+    assert "--" in tex
 
 
 def test_render_latex_table_extra_label_column(tmp_path):
-    """Extra label key produces a column; rows without the label render '--'."""
+    """Extra label key folds into the variant column; no separate column header."""
     out_a = tmp_path / "a"
     out_b = tmp_path / "b"
     # llm_distill labelled with distill_model=opus; n=2 -> rate_ci > 0
@@ -664,13 +669,43 @@ def test_render_latex_table_extra_label_column(tmp_path):
         [(out_a, {"distill_model": "opus"}, ["llm_distill"]), (out_b, {})]
     )
     tex = rd_aggregate.render_latex_table(rows)
-    # Column header must be present (underscore escaped)
-    assert "distill\\_model" in tex
-    # The labelled row value must appear
+    # 6-column table — no separate distill_model column header
+    assert "llllll" in tex
+    assert "distill\\_model" not in tex   # NOT a column header anymore
+    # 'variant' is the folded column header
+    assert "variant" in tex
+    # The labelled row has opus in its variant cell
     assert "opus" in tex
-    # The unlabelled row renders '--' in that column
+    # The unlabelled row renders '--' in the variant cell
     assert "--" in tex
     # rate CI is present in each rate cell (n=2 -> CI > 0; $\pm$ always appears)
     # llm_distill mean_rate=810, truncate mean_rate=510; both cells have $\pm$
     assert "810.0 $\\pm$" in tex
     assert "510.0 $\\pm$" in tex
+
+
+def test_render_latex_table_variant_folding(tmp_path):
+    """Variant column folds: fixed hyperparams in schema order, extra labels sorted."""
+    # Row with query_mode=aware, output_form=prose -> variant "aware, prose"
+    _write_sidecar_leaf(
+        tmp_path,
+        "llm_distill__b1000__qaware__ofprose",
+        {
+            "compressor": "llm_distill", "budget": 1000,
+            "expansion_reserve": None, "query_mode": "aware",
+            "output_form": "prose", "prune_level": None,
+            "oracle_model": None, "edge_metric": None,
+        },
+        0,
+        [("q1", 600, True), ("q2", 620, True)],
+    )
+    rows_a = rd_aggregate.aggregate(tmp_path)
+    tex_a = rd_aggregate.render_latex_table(rows_a)
+    assert "aware, prose" in tex_a
+
+    out_b = tmp_path / "b"
+    _write_leaf(out_b, "llm_distill", 1000, 0, [("q1", 800, True), ("q2", 820, True)])
+    rows_b = rd_aggregate.aggregate_many([(out_b, {"distill_model": "opus"}, ["llm_distill"])])
+    tex_b = rd_aggregate.render_latex_table(rows_b)
+    # Extra-label row: distill_model=opus -> variant "opus"
+    assert "opus" in tex_b
