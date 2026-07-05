@@ -181,7 +181,7 @@ Stated plainly:
   claude-code path strips MCP servers, tools, and plugins so the reader
   cannot reach context the benchmark withholds.
 
-### Rate-distortion frontier (P5 distillation, first measurement 2026-06-22)
+### Rate-distortion frontier (P5 distillation, final grid 2026-07-05)
 
 Distillation framed as rate-distortion compression of memory against the
 reader's prior: how few tokens of context can we hand the reader and still
@@ -192,45 +192,86 @@ accuracy-vs-tokens trade; the best compressor sits furthest upper-left.
 
 n=120 (20/question-type, stratified subset of LongMemEval-S), reader+judge
 `claude-opus-4-8` via Claude Code, context from the `2026-05-17` retrieve run.
+Full methodology in [`docs/paper/`](paper/).
 
 ![Rate-distortion frontier](assets/p5-rate-distortion-frontier.png)
 
-| compressor | rate (tok) | accuracy | ±95% CI |
-|---|---|---|---|
-| **full** (no compression) | **22,760** | **83.3%** | ±6.7 |
-| extractive_relevance @1000 | 993 | 85.0% | ±6.4 |
-| extractive_relevance @2000 | 1,994 | 85.0% | ±6.4 |
-| extractive_relevance @4000 | 3,994 | 85.8% | ±6.3 |
-| truncate_tokens @1000 | 1,000 | 25.0% | ±7.8 |
-| truncate_tokens @2000 | 2,000 | 25.0% | ±7.8 |
-| truncate_tokens @4000 | 4,000 | 39.2% | ±8.8 |
-| topk_sessions @2000 | 403 | 43.3% | ±8.9 |
+Rate is the emitted-context token count (cl100k) -- the memory payload the
+reader receives, measured at build time. It is NOT the reader's
+`usage.input_tokens` (which is fixed claude-code harness overhead, ~3279
+tokens regardless of payload). Sorted by mean rate, cheapest first.
+
+| compressor | budget | mean rate | accuracy | ±95% CI |
+|---|---|---|---|---|
+| **full** (no compression) | -- | **22,760** | **83.3%** | ±6.7 |
+| llm_distill aware (opus) | 1k | 562 | 90.8% | ±5.2 |
+| llm_distill aware (opus) | 2k | 664 | 92.5% | ±4.7 |
+| llm_distill agnostic (haiku) | 1k | 614 | 59.2% | ±8.8 |
+| llm_distill agnostic (haiku) | 2k | 769 | 63.3% | ±8.7 |
+| llm_distill agnostic (opus) | 1k | 1,018 | 73.3% | ±7.9 |
+| llm_distill agnostic (opus) | 2k | 1,285 | 77.5% | ±7.5 |
+| topk_sessions | 2k | 403 | 43.3% | ±8.9 |
+| extractive_relevance_expanded (reserve 0.3) | 1k | 868 | 75.0% | ±7.8 |
+| extractive_relevance_expanded (reserve 0.5) | 1k | 870 | 78.3% | ±7.4 |
+| extractive_relevance_expanded (reserve 0.3) | 2k | 1,871 | 84.2% | ±6.6 |
+| extractive_relevance (pooled x4) | 2k | 1,994 | 87.3% | ±5.0 |
+| extractive_relevance | 1k | 993 | 85.0% | ±6.4 |
+| extractive_relevance | 2k | 1,994 | 85.0% | ±5.0 |
+| extractive_relevance | 4k | 3,994 | 85.8% | ±6.3 |
+| lexical_relevance (BM25) | 1k | 994 | 75.0% | ±7.8 |
+| lexical_relevance (BM25) | 2k | 1,994 | 82.7% | ±6.1 |
+| statistical_prune | 1k | 996 | 57.5% | ±8.9 |
+| statistical_prune | 2k | 1,996 | 66.7% | ±8.5 |
+| perplexity_prune (Qwen2.5-1.5B) | 1k | 995 | 46.7% | ±8.9 |
+| perplexity_prune (Qwen2.5-1.5B) | 2k | 1,995 | 56.7% | ±8.9 |
+| graph_community (jaccard) | 1k | 996 | 61.7% | ±8.7 |
+| graph_community (jaccard) | 2k | 1,996 | 56.7% | ±8.9 |
+| truncate_tokens | 1k | 1,000 | 25.0% | ±7.8 |
+| truncate_tokens | 2k | 2,000 | 25.0% | ±7.8 |
+| truncate_tokens | 4k | 4,000 | 39.2% | ±8.8 |
+
+**Paired analysis (extractive vs BM25 @2k):** Per-question accuracy diff
++4.6pp in favor of extractive (17 extractive-only correct, 15 BM25-only
+correct, 88 tied). 95% CI [-1.1, +10.2]. Cross-sample reader std ~1.8pp.
+Conclusion: statistically indistinguishable at n=120.
 
 What it shows:
 
 - **Relevance-aware selection recovers full-context accuracy at ~1,000
-  tokens — a ~23x reduction at no measurable cost.** `extractive_relevance`
+  tokens -- a ~23x reduction at no measurable cost.** `extractive_relevance`
   (score each retrieved turn against the question with the bge-reranker, keep
   the highest until the budget) holds 85.0% at 993 tokens vs full-context
   83.3% at 22,760 tokens; the two CIs overlap, so the reduction is free. The
-  curve is flat from 1k–4k — ~1k is the knee.
+  curve is flat from 1k-4k -- ~1k is the knee.
 - **Relevance is the whole game.** At an equal ~1,000-token budget,
   relevance-aware selection scores 85.0% vs blind `truncate_tokens` at 25.0%
-  — a **+60pp** gap. Truncation keeps the chronologically-oldest turns, which
+  -- a **+60pp** gap. Truncation keeps the chronologically-oldest turns, which
   are almost never the evidence. `topk_sessions` (whole-session granularity)
   also lags badly (43.3%): at a tight budget the oldest session alone often
   overflows it, emitting little or nothing.
+- **Selection is the free near-optimum.** `extractive_relevance` and
+  `lexical_relevance` (BM25) are statistically indistinguishable at 2k (paired
+  +4.6pp CI [-1.1, +10.2]). Query-agnostic transformations
+  (`perplexity_prune`, `statistical_prune`, `graph_community`) lose at every
+  scale -- Qwen2.5-1.5B surprisal scoring places below free IDF, falsifying
+  the prediction that surprisal would identify and prune low-information turns.
+- **Query-aware frontier distillation matches or exceeds selection at half
+  the emitted tokens.** `llm_distill aware (opus)` reaches 90.8% at 562
+  tokens and 92.5% at 664 tokens -- above extractive's plateau -- but costs
+  one frontier call per query reading the full ~22.8k context. Three caveats:
+  (1) the query-aware distiller and the opus judge share a model family
+  (closed evaluation loop); (2) prompted summarization may leak the answer into
+  the distilled text; (3) the cost model inverts at scale -- selection stays
+  free, distillation scales with query volume.
 - **Less may be slightly better, not just cheaper.** extractive at 1k
-  edges full (85.0 vs 83.3, within CI) — consistent with 22k tokens of
+  edges full (85.0 vs 83.3, within CI) -- consistent with 22k tokens of
   mostly-irrelevant context diluting the evidence that ~1k of relevant turns
   presents cleanly.
 
-This is the Stage-A baseline frontier. Stage B (`perplexity_prune`,
-`llm_distill`) aims to push the knee below ~1k by removing redundancy *inside*
-the relevant turns. Reproduce with `lme-qa-sweep` → `lme-qa-rd` (see
+Reproduce with `lme-qa-sweep` -> `lme-qa-rd` (see
 [`bench/longmemeval/README.md`](../bench/longmemeval/README.md)); rate is the
 emitted-context token count, **not** the reader's `usage.input_tokens` (which
-on the claude-code backend is fixed harness overhead).
+on the claude-code backend is fixed harness overhead ~3279 tokens).
 
 Caveats: n=120 subset (not the full 500); QA accuracy is a different metric
 from the retrieval R@k above and must not be cross-compared; the rate unit is
