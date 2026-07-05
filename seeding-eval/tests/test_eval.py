@@ -262,6 +262,27 @@ def test_aggregate_empty_inputs_zero_filled():
     assert report.failures == ()
 
 
+def test_aggregate_records_settle_config():
+    """The settle config is recorded verbatim on the report so
+    report.json is self-describing about its P4 run-matrix cell."""
+    report = _aggregate(
+        [], [], n_total=0, n_held_out=0, run_id="r", config_hash="c",
+        settle="channel", activation_weight=0.2,
+    )
+    assert report.settle == "channel"
+    assert report.activation_weight == pytest.approx(0.2)
+
+
+def test_aggregate_settle_defaults_off():
+    """Omitting the settle kwargs records the off defaults — existing
+    callers (and pre-P4 reports) stay byte-identical."""
+    report = _aggregate(
+        [], [], n_total=0, n_held_out=0, run_id="r", config_hash="c"
+    )
+    assert report.settle == "off"
+    assert report.activation_weight is None
+
+
 def test_aggregate_h1_per_bucket_groups_by_ground_truth_bucket():
     """Per-bucket entropy means are grouped by the case's first
     module_path_bucket (its ground-truth bucket)."""

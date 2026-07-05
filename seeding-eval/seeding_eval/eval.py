@@ -108,6 +108,8 @@ def _aggregate(
     n_held_out: int,
     run_id: str,
     config_hash: str,
+    settle: str = "off",
+    activation_weight: float | None = None,
 ) -> RunReport:
     """Build a RunReport from per-case scoring records.
 
@@ -116,6 +118,10 @@ def _aggregate(
     Per-era H3 entries are emitted only when all three variants have at
     least one successful case for that era, matching the per-bucket
     rule for H1.
+
+    ``settle`` / ``activation_weight`` are recorded verbatim on the
+    report so report.json is self-describing about the P4 run-matrix
+    cell that produced it.
 
     Pure function: no I/O, no side effects on inputs, deterministic.
     """
@@ -191,6 +197,8 @@ def _aggregate(
         h2=h2,
         h3=h3,
         failures=tuple(failures),
+        settle=settle,
+        activation_weight=activation_weight,
     )
 
 
@@ -275,7 +283,10 @@ def _default_run_id() -> str:
     return f"{ts}-{sha}"
 
 
-def _default_config_hash(*, k: int, primitives: bool = False) -> str:
+def _default_config_hash(
+    *, k: int, primitives: bool = False,
+    settle: str | None = None, activation_weight: float | None = None
+) -> str:
     """Hash of the inputs that affect results, so longitudinal runs can
     be grouped by configuration. Keep the input set small and stable.
 
@@ -292,6 +303,8 @@ def _default_config_hash(*, k: int, primitives: bool = False) -> str:
         "h3_mode=tags_any_filter",
         f"held_out_pct={HELD_OUT_FRACTION_PERCENT}",
         f"primitives={'true' if primitives else 'false'}",
+        f"settle={settle or 'off'}",
+        f"activation_weight={activation_weight if activation_weight is not None else 'none'}",
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
@@ -305,6 +318,8 @@ def run_eval(
     event_buckets: dict[str, str] | None = None,
     k: int = 20,
     primitives: bool = False,
+    settle: str | None = None,
+    activation_weight: float | None = None,
     run_id: str | None = None,
     config_hash: str | None = None,
 ) -> tuple[RunReport, list[dict]]:
@@ -325,14 +340,33 @@ def run_eval(
     Hebbian sub-list into RRF as a 6th tier. Default False keeps the
     legacy 5-tier ranking byte-identical.
 
+    ``settle`` is the settle mode forwarded to every ghola.recall() call:
+    None (off, default — byte-identical to pre-P4 pipeline), "expand"
+    (config A), or "channel" (config B). See GholaClient.recall for details.
+
+    ``activation_weight`` is the activation weight for channel mode (0, 1];
+    harness default 0.2 — the harness applies this explicitly because core
+    rejects zero in channel mode (an accidental zero weight is rejected rather
+    than silently producing a two-channel result). Ignored in non-channel modes.
+
     The orchestration is single-threaded by design — the eval set is
     small (held-out ≈ 20% of ~50 cases) and parallelism would obscure
     failure attribution. YAGNI on async until volume forces it.
     """
+    # activation_weight is only meaningful in channel mode. Normalize it
+    # away otherwise so (a) baseline/expand recall wire bodies stay
+    # byte-identical to pre-P4 runs (the client omits the field when None)
+    # and (b) config_hash doesn't fork on a knob that had no effect.
+    if settle != "channel":
+        activation_weight = None
+
     if run_id is None:
         run_id = _default_run_id()
     if config_hash is None:
-        config_hash = _default_config_hash(k=k, primitives=primitives)
+        config_hash = _default_config_hash(
+            k=k, primitives=primitives,
+            settle=settle, activation_weight=activation_weight,
+        )
 
     held_out = [c for c in cases if c.held_out]
     case_results: list[_CaseResult] = []
@@ -354,6 +388,8 @@ def run_eval(
                     k=k,
                     tags_any=tags_any,
                     primitives=primitives,
+                    settle=settle,
+                    activation_weight=activation_weight,
                 )
             except Exception as exc:  # noqa: BLE001 — record, don't drop
                 err = f"{type(exc).__name__}: {exc}"
@@ -428,6 +464,8 @@ def run_eval(
         n_held_out=len(held_out),
         run_id=run_id,
         config_hash=config_hash,
+        settle=settle or "off",
+        activation_weight=activation_weight,
     )
     return report, traces
 
@@ -516,6 +554,10 @@ def render_markdown(report: RunReport) -> str:
     lines.append("")
     lines.append(f"**Run ID**: {report.run_id}")
     lines.append(f"**Config hash**: {report.config_hash}")
+    settle_line = f"**Settle**: {report.settle}"
+    if report.activation_weight is not None:
+        settle_line += f" (activation_weight={report.activation_weight})"
+    lines.append(settle_line)
     lines.append(
         f"**Cases**: {report.n_cases} total, {report.n_held_out} held out"
     )
@@ -703,6 +745,30 @@ def main() -> None:
             "ranking, byte-identical wire shape."
         ),
     )
+    parser.add_argument(
+        "--settle",
+        choices=["off", "expand", "channel"],
+        default="off",
+        help=(
+            "Settle mode: off (default — byte-identical to pre-P4 pipeline), "
+            "expand (config A: spreading activation sub-list), or channel "
+            "(config B: activation in score fusion)."
+        ),
+    )
+    parser.add_argument(
+        "--activation-weight",
+        type=float,
+        # DEFAULT 0.2 — the harness applies the design default explicitly
+        # because core rejects zero in channel mode so an accidental omission
+        # doesn't silently produce a two-channel result.
+        default=0.2,
+        help=(
+            "Activation weight for channel mode (0, 1]; default 0.2. "
+            "Validated at the Recall boundary: rerank_weight + activation_weight "
+            "must not exceed 1 (server default rerank_weight=0.5 implies < 0.5). "
+            "Ignored when settle != channel."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -727,6 +793,8 @@ def main() -> None:
             event_buckets=event_buckets,
             k=args.k,
             primitives=args.primitives,
+            settle=None if args.settle == "off" else args.settle,
+            activation_weight=args.activation_weight,
         )
 
     _write_outputs(args.out_dir, report, traces)

@@ -64,3 +64,17 @@ Requires:
 - Docker stack up: postgres :5432, chapterhouse :8080, ghola :7421
 - seeding-eval/.venv present (`cd seeding-eval && python3 -m venv .venv && .venv/bin/pip install -e .`)
 - Go toolchain for `go run ./cmd/import-logs`
+
+## Task 8 run matrix
+
+Three run configurations for the P4 evaluation sweep:
+
+| Config | `--settle` | `--activation-weight` | Notes |
+|--------|------------|----------------------|-------|
+| baseline | off (default) | n/a | Pre-P4 pipeline; byte-identical wire shape |
+| expand | expand | n/a | Config A: spreading activation sub-list appended to rerank pool with zero RRF mass |
+| channel@0.2 | channel | 0.2 | Config B: activation as third score-fusion channel (harness default) |
+
+**Score > 1.0 note**: The fallback path in `FuseScores` emits `rrfNorm + wActivation*actNorm`; when activation is high and RRF rank is strong, scores can exceed 1.0 and outscore fully-reranked hits. This is intentional — the "trust the RRF prior" convention extended to the activation channel. Measurement output containing scores > 1.0 is expected.
+
+**ActivationWeight bound**: `RerankWeight + ActivationWeight` must not exceed 1 (server default `RerankWeight = 0.5` implies `ActivationWeight < 0.5`). The harness default `--activation-weight 0.2` satisfies this bound.

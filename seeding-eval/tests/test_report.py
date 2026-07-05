@@ -113,3 +113,42 @@ def test_empty_failures():
     s = report_to_json(rep_clean)
     rebuilt = report_from_json(s)
     assert rebuilt.failures == ()
+
+
+def test_report_settle_fields_default_off():
+    """A report built without settle kwargs records the off defaults —
+    pre-P4 constructor calls stay valid."""
+    rep = _sample_report()
+    assert rep.settle == "off"
+    assert rep.activation_weight is None
+
+
+def test_report_settle_fields_round_trip():
+    """settle + activation_weight survive the JSON round-trip so runs
+    are self-describing about their P4 run-matrix cell."""
+    rep = _sample_report()
+    rep_channel = RunReport(
+        run_id=rep.run_id, config_hash=rep.config_hash,
+        n_cases=rep.n_cases, n_held_out=rep.n_held_out,
+        h1=rep.h1, h2=rep.h2, h3=rep.h3,
+        failures=rep.failures,
+        settle="channel",
+        activation_weight=0.2,
+    )
+    s = report_to_json(rep_channel)
+    parsed = json.loads(s)
+    assert parsed["settle"] == "channel"
+    assert parsed["activation_weight"] == 0.2
+    rebuilt = report_from_json(s)
+    assert rebuilt == rep_channel
+
+
+def test_report_from_json_defaults_missing_settle_fields():
+    """Legacy report.json files written before the P4 settle fields
+    existed reconstruct with the off defaults instead of failing."""
+    data = json.loads(report_to_json(_sample_report()))
+    del data["settle"]
+    del data["activation_weight"]
+    rebuilt = report_from_json(json.dumps(data))
+    assert rebuilt.settle == "off"
+    assert rebuilt.activation_weight is None

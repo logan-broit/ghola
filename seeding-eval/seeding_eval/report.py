@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import typing
-from dataclasses import dataclass, asdict, fields, is_dataclass
+from dataclasses import MISSING, dataclass, asdict, fields, is_dataclass
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,13 @@ class RunReport:
     h2: H2Result
     h3: H3Result
     failures: tuple[CaseFailure, ...]
+    # Settle config (P4, Task 7): recorded verbatim so runs are
+    # self-describing -- an operator reading report.json can tell which
+    # run-matrix cell ({baseline, expand, channel@w}) produced it without
+    # reversing config_hash. Defaults keep pre-P4 reports constructible
+    # and their JSON round-trippable (missing keys reconstruct to these).
+    settle: str = "off"
+    activation_weight: float | None = None
 
 
 def report_to_json(report: RunReport) -> str:
@@ -89,6 +96,13 @@ def _reconstruct(cls, data):
     hints = typing.get_type_hints(cls)
     kwargs = {}
     for f in fields(cls):
+        if f.name not in data and f.default is not MISSING:
+            # Fields added after a report was written (e.g. the P4 settle
+            # block) reconstruct to their declared default so legacy
+            # report.json files stay loadable. Required (default-less)
+            # fields still fail loud below.
+            kwargs[f.name] = f.default
+            continue
         v = data[f.name]  # KeyError on missing field -- raise loud
         kwargs[f.name] = _coerce(hints[f.name], v)
     return cls(**kwargs)
