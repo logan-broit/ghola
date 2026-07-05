@@ -89,6 +89,10 @@ func BuildSettleGraph(
 
 	// undirected holds the accumulated symmetric weight for each pair.
 	// Keys are ordered (min, max) so A-B and B-A map to the same entry.
+	// SUM accumulation: the two directed weights A->B and B->A are
+	// independent Hebbian evidence, so both are summed.  This assumes a
+	// single assocType per call — mixing types in one graph would require
+	// assocType in edgeKey to avoid conflating hebbian with contradicts etc.
 	type edgeKey struct{ lo, hi uuid.UUID }
 	undirected := make(map[edgeKey]float64)
 
@@ -106,6 +110,8 @@ func BuildSettleGraph(
 	frontier := make([]uuid.UUID, len(seedIDs))
 	copy(frontier, seedIDs)
 
+	// Each hop costs two DB round-trips: one LookupAssociations (src in frontier)
+	// and one LookupAssociationsByDst (dst in frontier) for undirected traversal.
 	for hop := 0; hop < p.HopCap && len(frontier) > 0; hop++ {
 		assocBySrc, err := assocLookup.LookupAssociations(ctx, frontier, assocType, workspaceID)
 		if err != nil {
@@ -122,8 +128,8 @@ func BuildSettleGraph(
 		// assocByDst when its dst is in the frontier.  When BOTH endpoints are
 		// in the frontier the same row appears in both maps.
 		type rowKey struct {
-			src, dst    uuid.UUID
-			assocType   string
+			src, dst  uuid.UUID
+			assocType string
 		}
 		seen := make(map[rowKey]struct{})
 		type assocEntry struct {
