@@ -155,17 +155,18 @@ type RecallInput struct {
 	Settle string `json:"settle,omitempty"`
 	// SettleParams passes the settle tuning knobs through to chapterhouse.
 	// Any zero field means "server default" (chapterhouse's
-	// DefaultSettleParams). Ignored entirely when Settle == "".
+	// DefaultSettleParams). Ignored entirely when settle resolves to off.
 	SettleParams SettleParams `json:"settle_params,omitempty"`
 	// ActivationWeight is the settle activation's share of the final fused
 	// score when Settle == "channel" (config B). Range (0, 1]; validation
 	// in Recall requires 0 < ActivationWeight and RerankWeight +
 	// ActivationWeight <= 1. Ignored in all other settle modes and when
-	// Settle == "" — neither parsed nor applied. Default 0.2 is applied by
-	// the caller (e.g. bench harness) when channel mode is requested; the
-	// zero value means "caller did not set it" and triggers a validation
-	// error in channel mode so an accidental zero weight is rejected rather
-	// than silently producing a two-channel result.
+	// settle resolves to off — neither parsed nor applied. The zero value
+	// means "caller did not set it": Recall substitutes the server default
+	// (Config.ActivationWeight, 0.40) before validation, so an omitted
+	// weight rides the server default rather than erroring. A caller that
+	// wants near-zero activation influence must say so explicitly
+	// (e.g. 0.001).
 	// Validated against the server's RerankWeight at the Recall boundary;
 	// RerankWeight + ActivationWeight must not exceed 1 (default
 	// RerankWeight 0.5 implies ActivationWeight < 0.5).

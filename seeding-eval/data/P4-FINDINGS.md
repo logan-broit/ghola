@@ -127,7 +127,9 @@ the SCORE (config B), not pass through a text-pair validator.
 Remaining leg before shipping as anything but an opt-in flag: the
 LongMemEval R@5 >= 96.9% gate under channel mode (the bench retrieval
 harness does not yet carry the settle flag; flag-off default is
-byte-identical and needs no gate).
+byte-identical and needs no gate). (Superseded 2026-07-06: the harness
+gained the flag, the gate ran and PASSED, and the default flipped to
+channel@0.40 — see the settle-gate section below.)
 
 ## Activation-weight sweep (2026-07-05, repaired bed)
 
