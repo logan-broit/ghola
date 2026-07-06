@@ -145,6 +145,37 @@ func tools() []toolSpec {
 							"not exceed 1 (default rerank_weight 0.5 implies activation_weight < 0.5). "+
 							"Ignored in other modes."),
 				),
+				mcppkg.WithObject("settle_params",
+					mcppkg.Description(
+						"Optional settle tuning knobs; omit for server defaults. "+
+							"Ignored when settle is off. Each field omitted uses the server default."),
+					mcppkg.Properties(map[string]any{
+						"lambda": map[string]any{
+							"type":        "number",
+							"description": "Damping/decay contraction, open interval (0, 1); omit for server default (0.7).",
+						},
+						"eps": map[string]any{
+							"type":        "number",
+							"description": "L1 convergence threshold, must be > 0; omit for server default (1e-6).",
+						},
+						"max_iters": map[string]any{
+							"type":        "integer",
+							"description": "Hard iteration stop, must be > 0; omit for server default (20).",
+						},
+						"hop_cap": map[string]any{
+							"type":        "integer",
+							"description": "Neighborhood hop radius, must be > 0; omit for server default (3).",
+						},
+						"node_cap": map[string]any{
+							"type":        "integer",
+							"description": "Neighborhood node ceiling, (0, 20000]; omit for server default (2000).",
+						},
+						"top_m": map[string]any{
+							"type":        "integer",
+							"description": "Expansion candidates returned, must be > 0; omit for server default (25).",
+						},
+					}),
+				),
 			),
 			Path: "/v1/recall",
 		},

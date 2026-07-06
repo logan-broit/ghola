@@ -220,6 +220,75 @@ func TestProxy_RecallForwardsSettle(t *testing.T) {
 		1e-9, "activation_weight must be forwarded verbatim to the ghola daemon")
 }
 
+// TestProxy_RecallForwardsSettleParams pins that the settle_params tuning
+// block passes through the bridge verbatim as a nested object so the ghola
+// daemon can validate and forward it to chapterhouse.
+func TestProxy_RecallForwardsSettleParams(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	fg.response["/v1/recall"] = `{"hits":[],"tier_counts":{}}`
+
+	s := newClient(t, hs.URL)
+
+	callTool(t, s, "recall", map[string]any{
+		"user_id":    "u1",
+		"workspace":  "00000000-0000-0000-0000-0000000000ff",
+		"query_text": "kubernetes",
+		"settle":     "expand",
+		"settle_params": map[string]any{
+			"lambda":   0.7,
+			"top_m":    25,
+			"node_cap": 2000,
+		},
+	})
+
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	require.Len(t, fg.calls, 1)
+	assert.Equal(t, "/v1/recall", fg.calls[0].Path)
+	sp, ok := fg.calls[0].Body["settle_params"].(map[string]any)
+	require.True(t, ok, "settle_params must be forwarded as a nested object")
+	assert.InDelta(t, 0.7, sp["lambda"], 1e-9,
+		"settle_params.lambda must be forwarded verbatim to the ghola daemon")
+	assert.InDelta(t, 25, sp["top_m"], 1e-9,
+		"settle_params.top_m must be forwarded verbatim to the ghola daemon")
+	assert.InDelta(t, 2000, sp["node_cap"], 1e-9,
+		"settle_params.node_cap must be forwarded verbatim to the ghola daemon")
+}
+
+// TestTools_RecallSchemaExposesSettleParams pins that the recall tool
+// schema declares settle_params as an object with the six documented
+// sub-properties, so agents can discover the tuning knobs.
+func TestTools_RecallSchemaExposesSettleParams(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	_ = fg
+	s := newClient(t, hs.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	list, err := s.Client().ListTools(ctx, mcppkg.ListToolsRequest{})
+	require.NoError(t, err)
+
+	var recall *mcppkg.Tool
+	for i := range list.Tools {
+		if list.Tools[i].Name == "recall" {
+			recall = &list.Tools[i]
+			break
+		}
+	}
+	require.NotNil(t, recall, "recall tool must be present")
+
+	prop, ok := recall.InputSchema.Properties["settle_params"].(map[string]any)
+	require.True(t, ok, "recall schema must declare a settle_params property")
+	assert.Equal(t, "object", prop["type"], "settle_params must be an object")
+	subs, ok := prop["properties"].(map[string]any)
+	require.True(t, ok, "settle_params must declare sub-properties")
+	for _, want := range []string{"lambda", "eps", "max_iters", "hop_cap", "node_cap", "top_m"} {
+		assert.Contains(t, subs, want,
+			"settle_params must document the %q knob", want)
+	}
+}
+
 // TestProxy_SurfacesDaemonError returns an MCP error result when
 // the daemon HTTP call fails (401 / 500 / ...).
 func TestProxy_SurfacesDaemonError(t *testing.T) {
