@@ -216,9 +216,9 @@ const hebbianSaturationK = 5.0
 
 // UpsertAssociation folds one co-activation event into
 // semantic.associations. INSERT … ON CONFLICT (src_event_id,
-// dst_event_id, association_type) DO UPDATE SET co_activations =
-// co_activations + 1, weight = 1 - exp(-co_activations / 5.0),
-// updated_at = now().
+// dst_event_id, association_type, workspace_id) DO UPDATE SET
+// co_activations = co_activations + 1,
+// weight = 1 - exp(-co_activations / 5.0), updated_at = now().
 //
 // The Weight / CoActivations / UpdatedAt fields on the input are
 // ignored on both branches — weight is always derived from the
@@ -248,7 +248,7 @@ func upsertAssociation(ctx context.Context, q pgxExecer, assoc Association) erro
 			(src_event_id, dst_event_id, association_type, weight, co_activations, workspace_id, updated_at)
 		VALUES
 			($1, $2, $3, $4, 1, $5, now())
-		ON CONFLICT (src_event_id, dst_event_id, association_type) DO UPDATE SET
+		ON CONFLICT (src_event_id, dst_event_id, association_type, workspace_id) DO UPDATE SET
 			co_activations = semantic.associations.co_activations + 1,
 			weight         = 1 - exp(-(semantic.associations.co_activations + 1)::float / $6),
 			updated_at     = now()
