@@ -418,8 +418,8 @@ func TestLookupAssociations_BulkByEventIDs(t *testing.T) {
 // TestLookupAssociations_FiltersByWorkspace pins the workspace
 // boundary: the same (src, dst, type) tuple stored under workspace B
 // must NOT come back when the lookup is scoped to workspace A. The
-// table's PK doesn't include workspace_id, so the filter is the only
-// thing keeping these from cross-leaking.
+// PK includes workspace_id (migration 011), so the two rows can coexist
+// and workspace isolation is enforced at both the storage and query layers.
 func TestLookupAssociations_FiltersByWorkspace(t *testing.T) {
 	repo := newAssociationsRepo(t)
 	ctx := t.Context()
@@ -427,10 +427,9 @@ func TestLookupAssociations_FiltersByWorkspace(t *testing.T) {
 	userID := uuid.New()
 	workspaceA, workspaceB := uuid.New(), uuid.New()
 
-	// One src per workspace; same association_type. (Same src across
-	// workspaces would conflict on the PK because workspace_id isn't
-	// in it — that's a real-world data-model property worth honoring
-	// in the test rather than papering over.)
+	// Use distinct src/dst pairs to keep this test's coverage orthogonal
+	// to TestUpsertAssociation_WorkspaceIsolation (which deliberately uses
+	// the same src/dst pair across workspaces to prove the PK fix).
 	srcA, dstA := uuid.New(), uuid.New()
 	srcB, dstB := uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{srcA, dstA, srcB, dstB} {
@@ -459,8 +458,8 @@ func TestLookupAssociations_FiltersByWorkspace(t *testing.T) {
 // associations on the same (src, dst) pair under different types
 // ('hebbian' and 'contradicts') and asserts a lookup with
 // assocType="hebbian" returns only the hebbian row. The table's PK
-// includes association_type, so both rows can coexist on the same
-// (src, dst).
+// includes association_type (and workspace_id), so both rows can
+// coexist on the same (src, dst, workspace).
 func TestLookupAssociations_FiltersByAssociationType(t *testing.T) {
 	repo := newAssociationsRepo(t)
 	ctx := t.Context()
@@ -500,4 +499,214 @@ func TestLookupAssociations_EmptySrcsReturnsEmptyMap(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got, "empty input must return a non-nil map")
 	require.Len(t, got, 0)
+}
+
+// ---------------------------------------------------------------------
+// LookupAssociationsByDst
+// ---------------------------------------------------------------------
+
+// TestLookupAssociationsByDst_BulkByDstIDs pre-populates three directed
+// associations X->A, Y->B, Z->C, then bulk-fetches by dst IDs {A,B,C}
+// and asserts the returned map is keyed by dst_event_id with the correct
+// src in each value slice.
+func TestLookupAssociationsByDst_BulkByDstIDs(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	userID := uuid.New()
+	workspaceID := uuid.New()
+
+	srcs := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	dsts := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	for i := range srcs {
+		seedEventForAssoc(t, repo, srcs[i], userID)
+		seedEventForAssoc(t, repo, dsts[i], userID)
+		require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+			SrcEventID:      srcs[i],
+			DstEventID:      dsts[i],
+			AssociationType: "hebbian",
+			WorkspaceID:     workspaceID,
+		}))
+	}
+
+	got, err := repo.LookupAssociationsByDst(ctx, dsts, "hebbian", workspaceID)
+	require.NoError(t, err)
+	require.Len(t, got, 3, "all 3 dst events must appear as keys")
+
+	for i, dst := range dsts {
+		neighbors, ok := got[dst]
+		require.True(t, ok, "missing key for dst %d (%s)", i, dst)
+		require.Len(t, neighbors, 1, "dst %d should have exactly 1 incoming neighbor", i)
+		require.Equal(t, srcs[i], neighbors[0].SrcEventID)
+		require.Equal(t, dst, neighbors[0].DstEventID)
+		require.Equal(t, "hebbian", neighbors[0].AssociationType)
+		require.Equal(t, workspaceID, neighbors[0].WorkspaceID)
+	}
+}
+
+// TestLookupAssociationsByDst_FiltersByWorkspace mirrors the src-lookup
+// workspace filter test: a row stored under workspace B must NOT appear
+// when the lookup is scoped to workspace A.
+func TestLookupAssociationsByDst_FiltersByWorkspace(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	userID := uuid.New()
+	workspaceA, workspaceB := uuid.New(), uuid.New()
+
+	srcA, dstA := uuid.New(), uuid.New()
+	srcB, dstB := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{srcA, dstA, srcB, dstB} {
+		seedEventForAssoc(t, repo, id, userID)
+	}
+
+	require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+		SrcEventID: srcA, DstEventID: dstA,
+		AssociationType: "hebbian", WorkspaceID: workspaceA,
+	}))
+	require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+		SrcEventID: srcB, DstEventID: dstB,
+		AssociationType: "hebbian", WorkspaceID: workspaceB,
+	}))
+
+	gotA, err := repo.LookupAssociationsByDst(ctx, []uuid.UUID{dstA, dstB}, "hebbian", workspaceA)
+	require.NoError(t, err)
+	require.Len(t, gotA, 1, "only workspaceA's association should come back")
+	_, ok := gotA[dstA]
+	require.True(t, ok, "dstA must be in the result map")
+	_, ok = gotA[dstB]
+	require.False(t, ok, "dstB lives in workspaceB and must be filtered out")
+}
+
+// TestLookupAssociationsByDst_EmptyDstsReturnsEmptyMap pins the fast-path:
+// empty input yields a non-nil empty map without hitting the DB.
+func TestLookupAssociationsByDst_EmptyDstsReturnsEmptyMap(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	got, err := repo.LookupAssociationsByDst(ctx, nil, "hebbian", uuid.New())
+	require.NoError(t, err)
+	require.NotNil(t, got, "empty input must return a non-nil map")
+	require.Len(t, got, 0)
+}
+
+// ---------------------------------------------------------------------
+// Workspace-isolation upsert bug: associations PK was missing workspace_id
+// ---------------------------------------------------------------------
+
+// TestUpsertAssociation_WorkspaceIsolation is the regression test for the
+// workspace-capture bug: when two workspaces share the same (src, dst,
+// association_type) tuple, the ON CONFLICT on the old PK
+// (src_event_id, dst_event_id, association_type) causes workspace B's
+// upsert to increment workspace A's row rather than inserting its own.
+//
+// The fix (migration 011) adds workspace_id to the PK so each workspace
+// owns its associations independently.
+//
+// Assertions:
+//   - After upserts from workspace A and workspace B, TWO rows exist.
+//   - Each row has co_activations=1 and its own workspace_id.
+//   - LookupAssociations scoped to workspace B returns the pair.
+func TestUpsertAssociation_WorkspaceIsolation(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	userID := uuid.New()
+	src, dst := uuid.New(), uuid.New()
+	seedEventForAssoc(t, repo, src, userID)
+	seedEventForAssoc(t, repo, dst, userID)
+
+	workspaceA := uuid.New()
+	workspaceB := uuid.New()
+
+	// Upsert the same (src, dst, 'hebbian') pair under each workspace.
+	require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+		SrcEventID: src, DstEventID: dst,
+		AssociationType: "hebbian", WorkspaceID: workspaceA,
+	}))
+	require.NoError(t, repo.UpsertAssociation(ctx, repository.Association{
+		SrcEventID: src, DstEventID: dst,
+		AssociationType: "hebbian", WorkspaceID: workspaceB,
+	}))
+
+	// Two distinct rows must exist — one per workspace.
+	var rowCount int
+	require.NoError(t, repo.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM semantic.associations
+		WHERE src_event_id = $1 AND dst_event_id = $2 AND association_type = 'hebbian'
+	`, src, dst).Scan(&rowCount))
+	require.Equal(t, 2, rowCount,
+		"each workspace must own a distinct association row; "+
+			"count=1 means workspace B captured workspace A's row (bug)")
+
+	// Each row must have co_activations=1 — neither should have been incremented
+	// by the other workspace's upsert.
+	type wsRow struct {
+		workspaceID   uuid.UUID
+		coActivations int
+	}
+	rows, err := repo.Pool().Query(ctx, `
+		SELECT workspace_id, co_activations FROM semantic.associations
+		WHERE src_event_id = $1 AND dst_event_id = $2 AND association_type = 'hebbian'
+		ORDER BY workspace_id
+	`, src, dst)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var got []wsRow
+	for rows.Next() {
+		var r wsRow
+		require.NoError(t, rows.Scan(&r.workspaceID, &r.coActivations))
+		got = append(got, r)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, got, 2)
+	for _, r := range got {
+		require.Equal(t, 1, r.coActivations,
+			"workspace %s should have co_activations=1, not %d "+
+				"(>1 means another workspace's upsert incremented this row)",
+			r.workspaceID, r.coActivations)
+	}
+
+	// LookupAssociations scoped to workspace B must return the pair.
+	gotB, err := repo.LookupAssociations(ctx, []uuid.UUID{src}, "hebbian", workspaceB)
+	require.NoError(t, err)
+	require.Len(t, gotB, 1, "workspaceB lookup must return 1 src key")
+	neighbors, ok := gotB[src]
+	require.True(t, ok, "src must be present in workspaceB's result map")
+	require.Len(t, neighbors, 1)
+	require.Equal(t, workspaceB, neighbors[0].WorkspaceID,
+		"neighbor must belong to workspaceB, not workspaceA")
+	require.Equal(t, 1, neighbors[0].CoActivations)
+}
+
+// TestUpsertAssociation_SameWorkspaceIncrements confirms that the
+// standard increment path still works after the PK fix: two upserts
+// from the same workspace on the same pair yield one row with
+// co_activations=2.
+func TestUpsertAssociation_SameWorkspaceIncrements(t *testing.T) {
+	repo := newAssociationsRepo(t)
+	ctx := t.Context()
+
+	userID := uuid.New()
+	src, dst := uuid.New(), uuid.New()
+	seedEventForAssoc(t, repo, src, userID)
+	seedEventForAssoc(t, repo, dst, userID)
+
+	workspaceID := uuid.New()
+	assoc := repository.Association{
+		SrcEventID: src, DstEventID: dst,
+		AssociationType: "hebbian", WorkspaceID: workspaceID,
+	}
+	require.NoError(t, repo.UpsertAssociation(ctx, assoc))
+	require.NoError(t, repo.UpsertAssociation(ctx, assoc))
+
+	var rowCount, co int
+	require.NoError(t, repo.Pool().QueryRow(ctx, `
+		SELECT count(*), max(co_activations) FROM semantic.associations
+		WHERE src_event_id = $1 AND dst_event_id = $2
+		  AND association_type = 'hebbian' AND workspace_id = $3
+	`, src, dst, workspaceID).Scan(&rowCount, &co))
+	require.Equal(t, 1, rowCount, "same workspace must yield one row, not two")
+	require.Equal(t, 2, co, "two upserts in the same workspace must set co_activations=2")
 }

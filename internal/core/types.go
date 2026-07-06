@@ -140,6 +140,50 @@ type RecallInput struct {
 	// here and the RRF tier is simply absent — no error, no fallback
 	// noise.
 	Primitives bool `json:"primitives,omitempty"`
+	// Settle opts recall into the P4 recurrent-settle expansion. Values:
+	//   ""        — off (default): byte-identical to the pre-P4 pipeline.
+	//   "expand"  — config A: chapterhouse runs spreading activation over
+	//               the Hebbian graph and returns an `expansion` sub-list;
+	//               Recall appends those text-bearing hits to the rerank
+	//               pool with zero RRF mass so they can only enter the
+	//               final top-K via cross-encoder score.
+	//   "channel" — config B (Task 6): same expansion, but activation
+	//               additionally participates in score fusion as a third
+	//               channel. Task 5 carries the activation map to the
+	//               fusion seam but does NOT change fusion behavior yet.
+	// Any other value is rejected with ErrValidation. Validated in Recall.
+	Settle string `json:"settle,omitempty"`
+	// SettleParams passes the settle tuning knobs through to chapterhouse.
+	// Any zero field means "server default" (chapterhouse's
+	// DefaultSettleParams). Ignored entirely when Settle == "".
+	SettleParams SettleParams `json:"settle_params,omitempty"`
+	// ActivationWeight is the settle activation's share of the final fused
+	// score when Settle == "channel" (config B). Range (0, 1]; validation
+	// in Recall requires 0 < ActivationWeight and RerankWeight +
+	// ActivationWeight <= 1. Ignored in all other settle modes and when
+	// Settle == "" — neither parsed nor applied. Default 0.2 is applied by
+	// the caller (e.g. bench harness) when channel mode is requested; the
+	// zero value means "caller did not set it" and triggers a validation
+	// error in channel mode so an accidental zero weight is rejected rather
+	// than silently producing a two-channel result.
+	// Validated against the server's RerankWeight at the Recall boundary;
+	// RerankWeight + ActivationWeight must not exceed 1 (default
+	// RerankWeight 0.5 implies ActivationWeight < 0.5).
+	ActivationWeight float64 `json:"activation_weight,omitempty"`
+}
+
+// SettleParams is the passthrough tuning block for the P4 recurrent
+// settle. Zero-valued fields fall back to chapterhouse's
+// DefaultSettleParams() server-side — this struct never applies its own
+// defaults, it only forwards non-zero overrides so a single source of
+// truth (the chapterhouse settle package) owns the defaults.
+type SettleParams struct {
+	Lambda   float64 `json:"lambda,omitempty"`
+	HopCap   int     `json:"hop_cap,omitempty"`
+	NodeCap  int     `json:"node_cap,omitempty"`
+	TopM     int     `json:"top_m,omitempty"`
+	Eps      float64 `json:"eps,omitempty"`
+	MaxIters int     `json:"max_iters,omitempty"`
 }
 
 // RecallHit is one merged result across all tiers with attribution.

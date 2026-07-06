@@ -39,30 +39,30 @@ type EpisodicSession struct {
 // EpisodicEvent mirrors episodic.events + the OpenAPI Event DTO. The
 // JSON tags match the wire format used by the ghola local service.
 type EpisodicEvent struct {
-	ID             uuid.UUID       `json:"id"`
-	ParentID       *uuid.UUID      `json:"parent_id,omitempty"`
-	SessionID      uuid.UUID       `json:"session_id"`
-	UserID         uuid.UUID       `json:"user_id"`
-	RequestID      *string         `json:"request_id,omitempty"`
-	Type           string          `json:"type"`
-	Role           *string         `json:"role,omitempty"`
-	Text           *string         `json:"text,omitempty"`
-	ToolName       *string         `json:"tool_name,omitempty"`
-	ToolUseID      *string         `json:"tool_use_id,omitempty"`
-	ToolInput      json.RawMessage `json:"tool_input,omitempty"`
-	ToolOutput     json.RawMessage `json:"tool_output,omitempty"`
-	BookmarkLabel  *string         `json:"bookmark_label,omitempty"`
-	Cwd            *string         `json:"cwd,omitempty"`
-	GitBranch      *string         `json:"git_branch,omitempty"`
-	AgentID        *string         `json:"agent_id,omitempty"`
-	IsSidechain    bool            `json:"is_sidechain"`
-	Model          *string         `json:"model,omitempty"`
-	RawEvent       json.RawMessage `json:"raw_event"`
-	Embedding      []float64       `json:"embedding,omitempty"`
-	Entities       []string        `json:"entities,omitempty"`
-	Tags           []string        `json:"tags,omitempty"`
-	SourceDevice   *string         `json:"source_device,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	ID            uuid.UUID       `json:"id"`
+	ParentID      *uuid.UUID      `json:"parent_id,omitempty"`
+	SessionID     uuid.UUID       `json:"session_id"`
+	UserID        uuid.UUID       `json:"user_id"`
+	RequestID     *string         `json:"request_id,omitempty"`
+	Type          string          `json:"type"`
+	Role          *string         `json:"role,omitempty"`
+	Text          *string         `json:"text,omitempty"`
+	ToolName      *string         `json:"tool_name,omitempty"`
+	ToolUseID     *string         `json:"tool_use_id,omitempty"`
+	ToolInput     json.RawMessage `json:"tool_input,omitempty"`
+	ToolOutput    json.RawMessage `json:"tool_output,omitempty"`
+	BookmarkLabel *string         `json:"bookmark_label,omitempty"`
+	Cwd           *string         `json:"cwd,omitempty"`
+	GitBranch     *string         `json:"git_branch,omitempty"`
+	AgentID       *string         `json:"agent_id,omitempty"`
+	IsSidechain   bool            `json:"is_sidechain"`
+	Model         *string         `json:"model,omitempty"`
+	RawEvent      json.RawMessage `json:"raw_event"`
+	Embedding     []float64       `json:"embedding,omitempty"`
+	Entities      []string        `json:"entities,omitempty"`
+	Tags          []string        `json:"tags,omitempty"`
+	SourceDevice  *string         `json:"source_device,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 // IngestEpisodicBatch upserts one session + its events in a single
@@ -739,6 +739,58 @@ LIMIT $4
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
+}
+
+// GetEventTextByIDs bulk-fetches event text for a set of event IDs, scoped
+// to the given user and workspace.  Returns a map from event_id to text
+// (only IDs with a non-NULL text column are included).
+//
+// Workspace ACL is enforced via the session_workspaces join, matching the
+// defense-in-depth pattern used by QueryEpisodicEventsByVector and
+// QueryEpisodicKeyword — an event that does not belong to the workspace is
+// silently omitted (same as a miss).
+//
+// Empty ids returns a non-nil empty map without hitting the DB.
+func (r *Repository) GetEventTextByIDs(
+	ctx context.Context,
+	ids []uuid.UUID,
+	userID, workspaceID uuid.UUID,
+) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string)
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	const q = `
+		SELECT e.id, e.text
+		FROM episodic.events e
+		JOIN episodic.sessions s ON s.id = e.session_id
+		JOIN episodic.session_workspaces sw ON sw.session_id = s.id
+		WHERE e.id = ANY($1::uuid[])
+		  AND s.user_id = $2
+		  AND sw.workspace_id = $3
+		  AND e.text IS NOT NULL
+	`
+	rows, err := r.pool.Query(ctx, q, ids, userID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("get event text by ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			text string
+		)
+		if err := rows.Scan(&id, &text); err != nil {
+			return nil, fmt.Errorf("scan event text row: %w", err)
+		}
+		out[id] = text
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate event text rows: %w", err)
+	}
+	return out, nil
 }
 
 // nullableJSONB returns the raw bytes unchanged when non-empty, and

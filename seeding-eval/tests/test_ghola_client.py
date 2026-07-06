@@ -98,3 +98,61 @@ def test_recall_passes_primitives_flag() -> None:
     assert body["workspace"] == "ws-1"
     assert body["user_id"] == "user-1"
     assert body["limit"] == 20
+
+
+def test_recall_settle_off_omits_settle_field() -> None:
+    """settle=None (default) is omitted — same omitempty contract as primitives.
+    Older callers remain byte-identical."""
+    captured: list[httpx.Request] = []
+    with _capturing_client(captured) as client:
+        client.recall(
+            query="hello",
+            workspace_id="ws-1",
+            user_id="user-1",
+            k=20,
+        )
+
+    assert len(captured) == 1
+    body = json.loads(captured[0].content)
+    assert "settle" not in body
+    assert "activation_weight" not in body
+    assert "settle_params" not in body
+
+
+def test_recall_settle_expand_passes_field() -> None:
+    """settle="expand" puts ``"settle": "expand"`` on the wire."""
+    captured: list[httpx.Request] = []
+    with _capturing_client(captured) as client:
+        client.recall(
+            query="hello",
+            workspace_id="ws-1",
+            user_id="user-1",
+            k=20,
+            settle="expand",
+        )
+
+    assert len(captured) == 1
+    body = json.loads(captured[0].content)
+    assert body.get("settle") == "expand"
+    assert "activation_weight" not in body
+
+
+def test_recall_settle_channel_passes_weight() -> None:
+    """settle="channel" + activation_weight=0.2 both reach the wire."""
+    captured: list[httpx.Request] = []
+    with _capturing_client(captured) as client:
+        client.recall(
+            query="hello",
+            workspace_id="ws-1",
+            user_id="user-1",
+            k=20,
+            settle="channel",
+            activation_weight=0.2,
+        )
+
+    assert len(captured) == 1
+    body = json.loads(captured[0].content)
+    assert body.get("settle") == "channel"
+    assert abs(body.get("activation_weight", -1) - 0.2) < 1e-9, (
+        f"activation_weight must be 0.2 on the wire, got {body.get('activation_weight')}"
+    )

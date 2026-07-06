@@ -379,6 +379,104 @@ func TestServer_Recall_PrimitivesDefaultsOff(t *testing.T) {
 		"primitives must default to false when absent from the request body")
 }
 
+// TestServer_Recall_SettleOffByDefault pins that omitting the settle field
+// produces byte-identical output to the pre-P4 pipeline (Settle=="" maps to
+// EpisodicMultiQuery.Settle=false so chapterhouse never runs spreading activation).
+func TestServer_Recall_SettleOffByDefault(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":    testUserID,
+		"workspace":  "00000000-0000-0000-0000-0000000000ff",
+		"query_text": "kubernetes",
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	require.Len(t, rch.multiQueries, 1, "single multi-ranking call")
+	assert.False(t, rch.multiQueries[0].Settle,
+		"settle must be false when omitted from the request — pre-P4 byte-identical path")
+}
+
+// TestServer_Recall_SettleExpandReachesMultiQuery — T7 wire-level pin.
+// POSTing /v1/recall with {"settle":"expand"} must propagate through the
+// HTTP DTO into RecallInput and out to the chapterhouse multi-ranking
+// request as Settle=true. Config A: spreading activation only; activation
+// is not folded into score fusion.
+func TestServer_Recall_SettleExpandReachesMultiQuery(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":    testUserID,
+		"workspace":  "00000000-0000-0000-0000-0000000000ff",
+		"query_text": "kubernetes",
+		"settle":     "expand",
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	require.Len(t, rch.multiQueries, 1, "single multi-ranking call")
+	assert.True(t, rch.multiQueries[0].Settle,
+		"multi-ranking request must receive Settle=true when settle=expand is requested")
+}
+
+// TestServer_Recall_SettleChannelWithWeightReachesMultiQuery — T7 wire-level pin.
+// POSTing /v1/recall with {"settle":"channel","activation_weight":0.2} must
+// reach the chapterhouse multi-ranking request with Settle=true. Activation
+// weight is consumed by ghola-side score fusion, not forwarded to chapterhouse.
+func TestServer_Recall_SettleChannelWithWeightReachesMultiQuery(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":           testUserID,
+		"workspace":         "00000000-0000-0000-0000-0000000000ff",
+		"query_text":        "kubernetes",
+		"settle":            "channel",
+		"activation_weight": 0.2,
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	require.Len(t, rch.multiQueries, 1, "single multi-ranking call")
+	assert.True(t, rch.multiQueries[0].Settle,
+		"multi-ranking request must receive Settle=true when settle=channel is requested")
+}
+
+// TestServer_Recall_SettleBogusMode400 pins that an unknown settle mode is
+// rejected at the Recall boundary with a 400. core.Recall validates the mode
+// and returns ErrValidation, which the HTTP layer maps to 400.
+func TestServer_Recall_SettleBogusMode400(t *testing.T) {
+	srv := newTestServer(t)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":   testUserID,
+		"workspace": "00000000-0000-0000-0000-0000000000ff",
+		"settle":    "fly",
+	})
+	require.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode,
+		"unknown settle mode must return 400; body=%s", body)
+}
+
+// TestServer_Recall_SettleChannelWeightSumExceeds400 pins the coupling: when
+// settle=channel is requested with activation_weight=0.6 and the server's
+// default RerankWeight is 0.5, their sum (1.1) exceeds 1 and Recall rejects
+// the request with a 400. The error message must mention both weights so the
+// caller knows which constraint was violated.
+func TestServer_Recall_SettleChannelWeightSumExceeds400(t *testing.T) {
+	srv := newTestServer(t) // default Core: RerankWeight=0.5
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":           testUserID,
+		"workspace":         "00000000-0000-0000-0000-0000000000ff",
+		"settle":            "channel",
+		"activation_weight": 0.6,
+	})
+	require.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode,
+		"rerank_weight+activation_weight > 1 must return 400; body=%s", body)
+	assert.Contains(t, string(body), "rerank_weight",
+		"error message must mention rerank_weight so the caller knows the constraint")
+}
+
 // conflict409Chapterhouse is a test fake that satisfies
 // ChapterhouseClient and returns *StatusError{409} from
 // AddSessionWorkspace — proves the HTTP handler maps 409 from

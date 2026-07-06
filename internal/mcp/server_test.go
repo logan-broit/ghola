@@ -192,6 +192,34 @@ func TestProxy_RecallForwardsCwd(t *testing.T) {
 		"recall must forward cwd so core can derive the workspace")
 }
 
+// TestProxy_RecallForwardsSettle pins the T7 surface: when settle and
+// activation_weight are passed to the recall tool, the bridge must forward
+// them verbatim in the proxied JSON body so the ghola daemon can validate
+// and apply them.
+func TestProxy_RecallForwardsSettle(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	fg.response["/v1/recall"] = `{"hits":[],"tier_counts":{}}`
+
+	s := newClient(t, hs.URL)
+
+	callTool(t, s, "recall", map[string]any{
+		"user_id":           "u1",
+		"workspace":         "00000000-0000-0000-0000-0000000000ff",
+		"query_text":        "kubernetes",
+		"settle":            "channel",
+		"activation_weight": 0.2,
+	})
+
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	require.Len(t, fg.calls, 1)
+	assert.Equal(t, "/v1/recall", fg.calls[0].Path)
+	assert.Equal(t, "channel", fg.calls[0].Body["settle"],
+		"settle must be forwarded verbatim to the ghola daemon")
+	assert.InDelta(t, 0.2, fg.calls[0].Body["activation_weight"],
+		1e-9, "activation_weight must be forwarded verbatim to the ghola daemon")
+}
+
 // TestProxy_SurfacesDaemonError returns an MCP error result when
 // the daemon HTTP call fails (401 / 500 / ...).
 func TestProxy_SurfacesDaemonError(t *testing.T) {

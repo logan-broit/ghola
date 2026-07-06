@@ -391,6 +391,29 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	if in.Limit <= 0 {
 		in.Limit = 10
 	}
+	// Settle mode validation. "" is off (default); "expand" (config A)
+	// and "channel" (config B) opt into the P4 recurrent-settle
+	// expansion. Reject anything else with the boundary-400 validation
+	// error style the rest of Recall uses (errors.Is(err, ErrValidation)).
+	switch in.Settle {
+	case "", "expand", "channel":
+	default:
+		return RecallResult{}, fmt.Errorf("%w: settle must be one of \"\", \"expand\", \"channel\", got %q", ErrValidation, in.Settle)
+	}
+	// Channel-mode weight validation. ActivationWeight is only meaningful
+	// (and only applied) in "channel" mode. Validate here so a missing or
+	// out-of-range weight surfaces as a 400 at the boundary rather than
+	// silently producing a mis-blended result. c.RerankWeight+wActivation
+	// <= 1 is the mathematical invariant — the rrfWeight floor would go
+	// negative otherwise, producing nonsensical scores.
+	if in.Settle == "channel" {
+		if in.ActivationWeight <= 0 {
+			return RecallResult{}, fmt.Errorf("%w: activation_weight must be > 0 in channel mode, got %v", ErrValidation, in.ActivationWeight)
+		}
+		if c.RerankWeight+in.ActivationWeight > 1.0 {
+			return RecallResult{}, fmt.Errorf("%w: rerank_weight (%v) + activation_weight (%v) must be <= 1", ErrValidation, c.RerankWeight, in.ActivationWeight)
+		}
+	}
 
 	// Default to all three tiers when the caller didn't say.
 	if !in.IncludeSietch && !in.IncludeEpisode && !in.IncludeSemant {
@@ -486,6 +509,11 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		// seeded set has no associations among themselves) — RRF treats
 		// this as a tier with zero entries, a clean no-op.
 		primitivesHits []RecallHit
+		// expansionHits is the P4 recurrent-settle sub-list (config A/B).
+		// Unlike primitivesHits it is NOT an RRF tier — it is appended to
+		// the rerank pool after fusion (see the seam below). nil when
+		// settle was off or the handler dropped it.
+		expansionHits []ExpansionHit
 
 		sietchVectorDur  time.Duration
 		sietchFTSDur     time.Duration
@@ -583,6 +611,12 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 				TagsAny:        in.TagsAny,
 				Rankings:       rankings,
 				Primitives:     in.Primitives,
+				// Any non-empty Settle mode ("expand"/"channel") carries
+				// the settle block; the params passthrough forwards the
+				// tuning knobs (zero → chapterhouse default). Config A vs B
+				// diverges only in ghola-side fusion, not in the query.
+				Settle:       in.Settle != "",
+				SettleParams: in.SettleParams,
 			})
 			episodicMultiDur = time.Since(s)
 			if err != nil {
@@ -607,6 +641,15 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			if res.Primitives != nil {
 				primitivesHits = *res.Primitives
 			}
+			// Expansion (P4): the settle sub-list. Captured here so the
+			// post-fan-out seam (after the RRF pool loop, before rerank)
+			// can append it. nil when settle was off OR the handler
+			// dropped it on best-effort failure — either way the seam
+			// treats it as "no expansion". This shares the "episodic"
+			// degrade bucket with the other sub-lists: a QueryEpisodicMulti
+			// failure sinks expansion too, which is correct (no episodic
+			// call, no seeds, no expansion).
+			expansionHits = res.Expansion
 		})
 	}
 
@@ -793,6 +836,85 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		timings["rrf_dedup"] = ms(time.Since(rrfStart))
 	}
 
+	// P4 recurrent-settle expansion seam (Task 5). AFTER the fused pool
+	// is built, BEFORE rerank: append the settle expansion candidates so
+	// the cross-encoder can pull a graph-reachable-but-not-query-near hit
+	// into the final top-K. Each expansion hit enters with rrfByID = 0
+	// (zero RRF mass — config A's whole premise: it can only surface via
+	// rerank score). activationByID retains the settle activation so
+	// Task 6 (config B / "channel") can blend it as a third fusion
+	// channel; config A ignores it. The map is threaded into
+	// rerankAndFuse — the cleanest seam, since that is where FuseScores
+	// (the function Task 6 extends) is called.
+	//
+	// activationByID is always allocated (nil-safe, cheap) so the
+	// rerankAndFuse signature is uniform whether or not settle ran.
+	activationByID := make(map[string]float64)
+	if in.Settle != "" && len(expansionHits) > 0 {
+		// Dedup against the existing pool by hitKey(). Expansion hits are
+		// event-grain (chapterhouse hydrates event ids), so build the
+		// pool key set using hitKey() for tier-aware namespacing. However,
+		// activationByID is keyed by RAW hit ID (not hitKey) because
+		// FuseScores, rrfByID, and rerankByID all use raw IDs — a hitKey
+		// lookup in FuseScores would silently miss every entry (Step 0 fix).
+		poolKeys := make(map[string]struct{}, len(hits))
+		for _, h := range hits {
+			poolKeys[hitKey(h)] = struct{}{}
+		}
+		var droppedNoText, deduped, appended int
+		for _, e := range expansionHits {
+			eh := RecallHit{
+				// "expansion" is the provenance label: RecallHit has no
+				// separate source field, Tier carries provenance across
+				// the whole pipeline (dedup, TierCounts, output). A new
+				// tier string keeps expansion hits distinguishable from
+				// the six RRF tiers in TierCounts and downstream telemetry.
+				Tier:    "expansion",
+				ID:      e.ID,
+				Content: e.Text,
+			}
+			poolKey := hitKey(eh) // tier-namespaced, for pool dedup only
+			// Drop text-less expansion entries. Per the Task 4 finding,
+			// chapterhouse hydrates expansion text best-effort and an
+			// entry whose event text is NULL / ACL-denied surfaces with
+			// empty text. Such a hit can neither be scored by the
+			// cross-encoder (no text to embed) nor consumed by the caller
+			// (no content to return), so it has no path into the final
+			// top-K — carrying it would only inflate the pool. Record its
+			// activation for Task 6 even so, then drop it from the pool.
+			if e.Text == "" {
+				activationByID[e.ID] = e.Activation // raw ID — matches FuseScores key space
+				droppedNoText++
+				continue
+			}
+			if _, exists := poolKeys[poolKey]; exists {
+				// Already in the pool from an RRF tier — keep the existing
+				// entry, just retain the activation for Task 6's channel.
+				activationByID[e.ID] = e.Activation // raw ID
+				deduped++
+				continue
+			}
+			// Append WITHOUT truncating the pool (experiment-first: during
+			// P4 measurement the rerank pool is deliberately allowed to
+			// exceed RerankTopK so no text-bearing expansion candidate is
+			// dropped before the cross-encoder sees it). If measurement
+			// shows the wide pool hurts latency or quality, capping here
+			// is the lever.
+			hits = append(hits, eh)
+			rrfByID[eh.ID] = 0
+			activationByID[eh.ID] = e.Activation // raw ID — matches rrfByID key space
+			poolKeys[poolKey] = struct{}{}
+			appended++
+		}
+		slog.DebugContext(ctx, "settle expansion merged into rerank pool",
+			"mode", in.Settle,
+			"expansion_returned", len(expansionHits),
+			"appended", appended,
+			"deduped", deduped,
+			"dropped_no_text", droppedNoText,
+			"pool_size", len(hits))
+	}
+
 	// Stage 2/3: cross-encoder rerank + score fusion. Only runs when
 	// Truthsayer is configured AND there's a non-empty query string
 	// (the cross-encoder is a query-vs-document model — without a
@@ -804,7 +926,7 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		if in.IncludeTimings {
 			rerankStart = time.Now()
 		}
-		hits = c.rerankAndFuse(ctx, in.QueryText, hits, rrfByID)
+		hits = c.rerankAndFuse(ctx, in.QueryText, hits, rrfByID, activationByID, in.Settle, in.ActivationWeight)
 		if in.IncludeTimings {
 			timings["rerank"] = ms(time.Since(rerankStart))
 		}
@@ -816,6 +938,14 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	}
 
 	counts := map[string]int{"working": 0, "episodic": 0, "keyword": 0, "session_vector": 0, "semantic": 0, "primitives": 0}
+	// Only surface the "expansion" count key when settle is on, so a
+	// settle-off recall returns a TierCounts map byte-identical to the
+	// pre-P4 pipeline (the regression contract). When settle ran, the
+	// key is present even at zero so callers can tell "settle ran, no
+	// expansion survived" from "settle never ran".
+	if in.Settle != "" {
+		counts["expansion"] = 0
+	}
 	for _, h := range hits {
 		counts[h.Tier]++
 	}
@@ -834,7 +964,17 @@ func ms(d time.Duration) float64 {
 // fusion) on the post-RRF candidate pool. On any error the function
 // returns the input hits unchanged with a warn log — recall never
 // fails because rerank is unavailable.
-func (c *Core) rerankAndFuse(ctx context.Context, query string, hits []RecallHit, rrfByID map[string]float64) []RecallHit {
+//
+// activationByID carries the P4 settle activation keyed by raw hit ID
+// (NOT hitKey — FuseScores, rrfByID, and rerankByID all use raw IDs).
+// settleMode and wActivation gate the third fusion channel:
+//   - settleMode == "channel": activation is blended as a third score
+//     channel with weight wActivation (validated > 0 and
+//     c.RerankWeight + wActivation <= 1 by Recall before this call).
+//   - settleMode == "expand" or "": activation is ignored; FuseScores
+//     receives nil activation and wActivation=0, producing the same
+//     two-channel result as the pre-Task-6 pipeline (regression guard).
+func (c *Core) rerankAndFuse(ctx context.Context, query string, hits []RecallHit, rrfByID map[string]float64, activationByID map[string]float64, settleMode string, wActivation float64) []RecallHit {
 	// Build candidates only for hits that have text the reranker can
 	// score. Skip no-text hits (semantic mnemes today; possibly other
 	// tiers in the future) — sending them as empty-text candidates
@@ -872,7 +1012,17 @@ func (c *Core) rerankAndFuse(ctx context.Context, query string, hits []RecallHit
 	for _, s := range scored {
 		rerankByID[s.ID] = s.Score
 	}
-	fused := FuseScores(rrfByID, rerankByID, c.RerankWeight)
+	// Channel mode ("channel"): pass activation as the third channel.
+	// All other modes ("expand", ""): nil activation + wActivation=0
+	// so FuseScores produces a two-channel result byte-identical to the
+	// pre-Task-6 pipeline (regression invariant pinned in tests).
+	var actMap map[string]float64
+	var wAct float64
+	if settleMode == "channel" {
+		actMap = activationByID
+		wAct = wActivation
+	}
+	fused := FuseScores(rrfByID, rerankByID, actMap, c.RerankWeight, wAct)
 
 	for i := range hits {
 		if v, ok := fused[hits[i].ID]; ok {

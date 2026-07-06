@@ -216,9 +216,9 @@ const hebbianSaturationK = 5.0
 
 // UpsertAssociation folds one co-activation event into
 // semantic.associations. INSERT … ON CONFLICT (src_event_id,
-// dst_event_id, association_type) DO UPDATE SET co_activations =
-// co_activations + 1, weight = 1 - exp(-co_activations / 5.0),
-// updated_at = now().
+// dst_event_id, association_type, workspace_id) DO UPDATE SET
+// co_activations = co_activations + 1,
+// weight = 1 - exp(-co_activations / 5.0), updated_at = now().
 //
 // The Weight / CoActivations / UpdatedAt fields on the input are
 // ignored on both branches — weight is always derived from the
@@ -248,7 +248,7 @@ func upsertAssociation(ctx context.Context, q pgxExecer, assoc Association) erro
 			(src_event_id, dst_event_id, association_type, weight, co_activations, workspace_id, updated_at)
 		VALUES
 			($1, $2, $3, $4, 1, $5, now())
-		ON CONFLICT (src_event_id, dst_event_id, association_type) DO UPDATE SET
+		ON CONFLICT (src_event_id, dst_event_id, association_type, workspace_id) DO UPDATE SET
 			co_activations = semantic.associations.co_activations + 1,
 			weight         = 1 - exp(-(semantic.associations.co_activations + 1)::float / $6),
 			updated_at     = now()
@@ -320,6 +320,65 @@ func (r *Repository) LookupAssociations(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate association rows: %w", err)
+	}
+	return out, nil
+}
+
+// LookupAssociationsByDst bulk-fetches associations whose dst_event_id
+// is in dstIDs, filtered to the given association_type and workspace_id.
+// Returns a map keyed by dst_event_id; a dst with no associations is
+// omitted from the map.
+//
+// This is the reverse-direction complement to LookupAssociations.
+// Temporally-directed storage writes rows as (src, dst) where src fired
+// first. A node that is chronologically last among its co-activated peers
+// appears only as a dst and has zero outgoing rows. Without this method
+// the BFS builder strands such nodes after one hop. Pairing the two
+// lookups per hop gives the builder undirected traversal over what is
+// stored as a directed graph.
+//
+// Workspace scoping and empty-input semantics match LookupAssociations.
+func (r *Repository) LookupAssociationsByDst(
+	ctx context.Context,
+	dstIDs []uuid.UUID,
+	assocType string,
+	workspaceID uuid.UUID,
+) (map[uuid.UUID][]Association, error) {
+	out := make(map[uuid.UUID][]Association)
+	if len(dstIDs) == 0 {
+		return out, nil
+	}
+
+	const lookupSQL = `
+		SELECT src_event_id, dst_event_id, association_type, weight, co_activations, workspace_id, updated_at
+		FROM semantic.associations
+		WHERE dst_event_id = ANY($1::uuid[])
+		  AND association_type = $2
+		  AND workspace_id = $3
+	`
+	rows, err := r.pool.Query(ctx, lookupSQL, dstIDs, assocType, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("lookup associations by dst: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var a Association
+		if err := rows.Scan(
+			&a.SrcEventID,
+			&a.DstEventID,
+			&a.AssociationType,
+			&a.Weight,
+			&a.CoActivations,
+			&a.WorkspaceID,
+			&a.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan association row (by dst): %w", err)
+		}
+		out[a.DstEventID] = append(out[a.DstEventID], a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate association rows (by dst): %w", err)
 	}
 	return out, nil
 }

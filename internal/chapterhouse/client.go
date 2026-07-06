@@ -159,6 +159,26 @@ type QueryEpisodicMultiRequest struct {
 	// server's default-false bool semantics keep the legacy path
 	// untouched for callers that don't opt in.
 	Primitives bool `json:"primitives,omitempty"`
+	// Settle opts the response into the P4 recurrent-settle expansion
+	// sub-list. Pointer + omitempty so a settle-off request never
+	// serializes the block (byte-identical to the pre-P4 wire), and the
+	// chapterhouse handler treats the field's presence + enabled:true as
+	// the discriminator. Mirrors chapterhouse's MultiRankingRequest.Settle.
+	Settle *settleReq `json:"settle,omitempty"`
+}
+
+// settleReq mirrors chapterhouse's SettleRequest — the optional settle
+// configuration block. Presence enables the expansion sub-list; numeric
+// params are omitempty so zero values fall back to the server's
+// DefaultSettleParams() rather than forcing a client-side default.
+type settleReq struct {
+	Enabled  bool    `json:"enabled"`
+	Lambda   float64 `json:"lambda,omitempty"`
+	HopCap   int     `json:"hop_cap,omitempty"`
+	NodeCap  int     `json:"node_cap,omitempty"`
+	TopM     int     `json:"top_m,omitempty"`
+	Eps      float64 `json:"eps,omitempty"`
+	MaxIters int     `json:"max_iters,omitempty"`
 }
 
 // MultiRankingScore mirrors chapterhouse's ScoreBreakdown: the per-
@@ -209,10 +229,28 @@ type QueryEpisodicMultiHit struct {
 // (D3+) need to tell "primitives never ran" from "primitives ran and
 // found nothing" — the latter is a real signal about the seeded set.
 type QueryEpisodicMultiResponse struct {
-	Vector        []QueryEpisodicMultiHit   `json:"vector,omitempty"`
-	FTS           []QueryEpisodicMultiHit   `json:"fts,omitempty"`
-	SessionVector []QueryEpisodicMultiHit   `json:"session_vector,omitempty"`
-	Primitives    *[]QueryEpisodicMultiHit  `json:"primitives,omitempty"`
+	Vector        []QueryEpisodicMultiHit  `json:"vector,omitempty"`
+	FTS           []QueryEpisodicMultiHit  `json:"fts,omitempty"`
+	SessionVector []QueryEpisodicMultiHit  `json:"session_vector,omitempty"`
+	Primitives    *[]QueryEpisodicMultiHit `json:"primitives,omitempty"`
+	// Expansion is the P4 recurrent-settle sub-list. Absent (omitempty on
+	// the server) → nil here; a present but empty settle run → empty
+	// slice. NOT a tier list — it is a separate output surface consumed
+	// by core.Recall's rerank-pool expansion (config A/B). Mirrors
+	// chapterhouse's MultiRankingResponse.Expansion.
+	Expansion *[]expansionHitWire `json:"expansion,omitempty"`
+}
+
+// expansionHitWire mirrors chapterhouse's ExpansionHit: event_id +
+// activation are always present; text is a pointer + omitempty so an
+// entry whose text column is NULL / ACL-denied (Task 4 documented
+// finding) decodes with a nil pointer, which the client projects to an
+// empty Text string rather than dropping the row (core.Recall owns the
+// drop decision).
+type expansionHitWire struct {
+	EventID    uuid.UUID `json:"event_id"`
+	Activation float64   `json:"activation"`
+	Text       *string   `json:"text,omitempty"`
 }
 
 type shareReq struct {
@@ -312,6 +350,22 @@ func (c *Client) QueryEpisodicMulti(ctx context.Context, q core.EpisodicMultiQue
 		t := true
 		includeShared = &t
 	}
+	// Settle: marshal a block only when the caller opted in, so a
+	// settle-off request stays byte-identical to the pre-P4 wire. Zero
+	// params serialize as omitted (omitempty) so chapterhouse applies
+	// DefaultSettleParams — the client never injects its own defaults.
+	var settle *settleReq
+	if q.Settle {
+		settle = &settleReq{
+			Enabled:  true,
+			Lambda:   q.SettleParams.Lambda,
+			HopCap:   q.SettleParams.HopCap,
+			NodeCap:  q.SettleParams.NodeCap,
+			TopM:     q.SettleParams.TopM,
+			Eps:      q.SettleParams.Eps,
+			MaxIters: q.SettleParams.MaxIters,
+		}
+	}
 	body := QueryEpisodicMultiRequest{
 		UserID:         q.UserID,
 		WorkspaceID:    q.WorkspaceID,
@@ -322,6 +376,7 @@ func (c *Client) QueryEpisodicMulti(ctx context.Context, q core.EpisodicMultiQue
 		TagsAny:        q.TagsAny,
 		Rankings:       q.Rankings,
 		Primitives:     q.Primitives,
+		Settle:         settle,
 	}
 
 	var r QueryEpisodicMultiResponse
@@ -373,6 +428,27 @@ func (c *Client) QueryEpisodicMulti(ctx context.Context, q core.EpisodicMultiQue
 			prims = append(prims, multiHitToRecallHit(h, "primitives"))
 		}
 		out.Primitives = &prims
+	}
+	// Expansion: the P4 recurrent-settle sub-list. Absent (nil pointer)
+	// leaves out.Expansion nil — no expansion applied. A present pointer
+	// (even to an empty slice) means settle ran; project each wire entry
+	// onto core.ExpansionHit. A nil Text pointer (event text NULL or
+	// ACL-denied — Task 4 finding) projects to an empty Text string; the
+	// entry is retained here and dropped later by core.Recall, keeping
+	// the drop policy in one place.
+	if r.Expansion != nil {
+		exp := make([]core.ExpansionHit, 0, len(*r.Expansion))
+		for _, h := range *r.Expansion {
+			eh := core.ExpansionHit{
+				ID:         h.EventID.String(),
+				Activation: h.Activation,
+			}
+			if h.Text != nil {
+				eh.Text = *h.Text
+			}
+			exp = append(exp, eh)
+		}
+		out.Expansion = exp
 	}
 	return out, nil
 }
@@ -480,4 +556,3 @@ func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]cor
 	}
 	return out, nil
 }
-

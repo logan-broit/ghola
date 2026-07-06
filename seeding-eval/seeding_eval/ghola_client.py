@@ -58,6 +58,9 @@ class GholaClient:
         k: int = 20,
         tags_any: list[str] | None = None,
         primitives: bool = False,
+        settle: str | None = None,
+        settle_params: dict | None = None,
+        activation_weight: float | None = None,
     ) -> list[dict]:
         """Run a recall query and return the ranked `hits` list.
 
@@ -81,6 +84,16 @@ class GholaClient:
                 (equal-weight, tier-additive). Omitted from the wire
                 body when False so the server's omitempty contract
                 preserves byte-identical legacy behaviour.
+            settle: Settle mode: None/omit (off, default), "expand" (config A:
+                spreading activation sub-list), or "channel" (config B: activation
+                also participates in score fusion). Maps to RecallInput.Settle.
+            settle_params: Optional tuning overrides for the settle pipeline
+                (lambda, hop_cap, node_cap, top_m, eps, max_iters). Zero/absent
+                fields fall back to chapterhouse's DefaultSettleParams.
+            activation_weight: Activation channel weight for channel mode (0, 1].
+                Required when settle="channel". Must satisfy rerank_weight +
+                activation_weight <= 1 (server default rerank_weight=0.5 implies
+                activation_weight < 0.5).
 
         Returns:
             Parsed `hits` array. Each element is a dict with at least
@@ -101,6 +114,12 @@ class GholaClient:
             body["tags_any"] = list(tags_any)
         if primitives:
             body["primitives"] = True
+        if settle:
+            body["settle"] = settle
+        if settle_params:
+            body["settle_params"] = settle_params
+        if activation_weight is not None:
+            body["activation_weight"] = activation_weight
         resp = self._client.post("/v1/recall", json=body)
         resp.raise_for_status()
         data = resp.json()
