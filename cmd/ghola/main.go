@@ -16,6 +16,8 @@
 //	TRUTHSAYER_URL            reranker service base     (empty disables rerank)
 //	RERANK_TOPK               candidate pool sent to reranker (50)
 //	RERANK_WEIGHT             reranker share of fused score [0,1] (0.5; re-sweep after PR-D, PR-E)
+//	GHOLA_SETTLE              P4 settle default for unset requests (channel; "off" is the kill-switch)
+//	GHOLA_ACTIVATION_WEIGHT   channel-mode activation weight (0,1] (0.40)
 //	RRF_K                     RRF fusion constant       (60)
 //	GHOLA_TIER_TIMEOUT_MS     per-recall-tier timeout in ms (10000)
 //	ENCODING_INTERVAL         sietch -> episodic tick cadence (5m)
@@ -142,6 +144,27 @@ func run() error {
 			return fmt.Errorf("parse RERANK_WEIGHT: must be float in [0,1], got %q", v)
 		}
 		c.RerankWeight = w
+	}
+	// Settle default for unset recall requests. "channel" (the New()
+	// default) is on-by-default; "off" is the deployment kill-switch —
+	// GHOLA_SETTLE=off restores the pre-P4 pipeline for every request that
+	// doesn't explicitly opt in, the rollback path if the on-by-default
+	// flip regresses in production. Explicit per-request Settle values
+	// still override it either way.
+	if v := os.Getenv("GHOLA_SETTLE"); v != "" {
+		switch v {
+		case "off", "expand", "channel":
+			c.Settle = v
+		default:
+			return fmt.Errorf("parse GHOLA_SETTLE: must be one of \"off\", \"expand\", \"channel\", got %q", v)
+		}
+	}
+	if v := os.Getenv("GHOLA_ACTIVATION_WEIGHT"); v != "" {
+		w, err := strconv.ParseFloat(v, 64)
+		if err != nil || w <= 0 || w > 1 {
+			return fmt.Errorf("parse GHOLA_ACTIVATION_WEIGHT: must be float in (0,1], got %q", v)
+		}
+		c.ActivationWeight = w
 	}
 	if v := os.Getenv("GHOLA_TIER_TIMEOUT_MS"); v != "" {
 		msVal, err := strconv.Atoi(v)

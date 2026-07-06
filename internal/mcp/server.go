@@ -109,8 +109,8 @@ func tools() []toolSpec {
 						"returns score-ranked hits with tier attribution. "+
 						"Partial-failure tolerant: a degraded field lists any "+
 						"tiers that were skipped. "+
-						"Optional settle modes: expand (spreading activation, expansion sub-list) "+
-						"or channel (activation in score fusion)."),
+						"Settle (P4 recurrent-settle) is on by default (channel@0.40); "+
+						"pass settle=off to disable, or omit for the server default."),
 				mcppkg.WithString("user_id",
 					mcppkg.Description("Optional. Falls back to AUTH_DEFAULT_USER env var if omitted.")),
 				mcppkg.WithString("workspace",
@@ -132,18 +132,20 @@ func tools() []toolSpec {
 				mcppkg.WithBoolean("include_episode"),
 				mcppkg.WithBoolean("include_semant"),
 				mcppkg.WithString("settle",
+					mcppkg.Enum("off", "expand", "channel"),
 					mcppkg.Description(
-						"Settle mode: \"\" or omit (off, default — byte-identical to pre-P4), "+
+						"Settle mode. Omit for the server default (channel@0.40 — on by default). "+
+							"\"off\" (byte-identical to pre-P4), "+
 							"\"expand\" (config A: spreading activation, expansion sub-list appended "+
 							"to rerank pool), \"channel\" (config B: activation also participates in "+
 							"score fusion as a third channel alongside RRF and reranker)."),
 				),
 				mcppkg.WithNumber("activation_weight",
 					mcppkg.Description(
-						"Activation weight for channel mode (0, 1]. Required when settle=channel; "+
-							"validated at the Recall boundary: rerank_weight + activation_weight must "+
-							"not exceed 1 (default rerank_weight 0.5 implies activation_weight < 0.5). "+
-							"Ignored in other modes."),
+						"Activation weight for channel mode (0, 1]. Omit to use the server "+
+							"default (0.40); an explicit value overrides it. Validated at the Recall "+
+							"boundary: rerank_weight + activation_weight must not exceed 1 (default "+
+							"rerank_weight 0.5 implies activation_weight < 0.5). Ignored in other modes."),
 				),
 				mcppkg.WithObject("settle_params",
 					mcppkg.Description(

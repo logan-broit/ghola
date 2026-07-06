@@ -49,6 +49,26 @@ type Core struct {
 	// RRF distribution; re-run the sweep after PR-D and again after
 	// PR-E to set a data-driven default against the production shape.
 	RerankWeight float64
+	// Settle is the server default for the P4 recurrent-settle mode
+	// applied when a recall request leaves RecallInput.Settle unset.
+	// "channel" (the default) opts every recall into config B: chapterhouse
+	// runs spreading activation over the Hebbian graph and activation
+	// participates in score fusion. "off" disables settle for unset
+	// requests (the pre-P4 pipeline); it is the deployment kill-switch,
+	// wired from GHOLA_SETTLE in main.go. Explicit per-request Settle
+	// values ("off"/"expand"/"channel") always override this default.
+	//
+	// Default "channel" flips the LongMemEval-gated on-by-default decision
+	// (R@5 99.6% under channel@0.40 vs the 99.4% no-regression bar); see
+	// docs/benchmarks.md "Settle gate".
+	Settle string
+	// ActivationWeight is the server default for the channel-mode
+	// activation weight, applied when the effective settle mode is
+	// "channel" and the request left RecallInput.ActivationWeight unset.
+	// 0.40 is the activation-weight sweep's recommended default. Wired
+	// from GHOLA_ACTIVATION_WEIGHT in main.go. An explicit per-request
+	// ActivationWeight is respected verbatim.
+	ActivationWeight float64
 	// RerankTimeout caps the truthsayer round-trip. Failures (timeout,
 	// 5xx, transport) degrade to RRF-only with a warn log.
 	RerankTimeout time.Duration
@@ -68,16 +88,18 @@ type Core struct {
 // New builds a Core with sensible defaults.
 func New(s SietchStore, ch ChapterhouseClient, emb Embedder) *Core {
 	return &Core{
-		Sietch:          s,
-		Chapterhouse:    ch,
-		Embedder:        emb,
-		Now:             func() time.Time { return time.Now().UTC() },
-		RRFK:            60,
-		RerankTopK:      50,
-		RerankWeight:    0.5,
-		RerankTimeout:   30 * time.Second,
-		TierTimeout:     10 * time.Second,
-		SietchRetention: 7 * 24 * time.Hour,
+		Sietch:           s,
+		Chapterhouse:     ch,
+		Embedder:         emb,
+		Now:              func() time.Time { return time.Now().UTC() },
+		RRFK:             60,
+		RerankTopK:       50,
+		RerankWeight:     0.5,
+		Settle:           "channel",
+		ActivationWeight: 0.40,
+		RerankTimeout:    30 * time.Second,
+		TierTimeout:      10 * time.Second,
+		SietchRetention:  7 * 24 * time.Hour,
 	}
 }
 
@@ -418,14 +440,43 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	if in.Limit <= 0 {
 		in.Limit = 10
 	}
-	// Settle mode validation. "" is off (default); "expand" (config A)
-	// and "channel" (config B) opt into the P4 recurrent-settle
+	// Settle server-default application. Runs BEFORE validation so the
+	// effective mode + weight are checked by the same boundary rules an
+	// explicit request would hit (wr+wa<=1, settle_params ranges). The
+	// wire contract:
+	//   ""        (unset)  → server default c.Settle. When that resolves
+	//                        to "channel" and the caller left
+	//                        ActivationWeight unset, apply c.ActivationWeight
+	//                        so the default weight rides along with the
+	//                        default mode.
+	//   "off"              → settle disabled — the pre-P4 pipeline. This is
+	//                        the explicit opt-out; normalized to the "" the
+	//                        downstream gates key on (settle_params ignored).
+	//   "expand"/"channel" → explicit opt-in, unchanged. An explicit
+	//                        ActivationWeight is respected verbatim; an
+	//                        unset one in channel mode falls back to
+	//                        c.ActivationWeight.
+	if in.Settle == "" {
+		in.Settle = c.Settle
+	}
+	if in.Settle == "channel" && in.ActivationWeight == 0 {
+		in.ActivationWeight = c.ActivationWeight
+	}
+	// "off" is the explicit disable: collapse it to the empty-string
+	// "settle off" sentinel every downstream gate (in.Settle != "") keys
+	// on, so the off path is byte-identical to the pre-P4 pipeline.
+	if in.Settle == "off" {
+		in.Settle = ""
+	}
+	// Settle mode validation. "off" / "" are the disabled paths; "expand"
+	// (config A) and "channel" (config B) opt into the P4 recurrent-settle
 	// expansion. Reject anything else with the boundary-400 validation
 	// error style the rest of Recall uses (errors.Is(err, ErrValidation)).
+	// Runs against the effective mode (post default + off-normalization).
 	switch in.Settle {
 	case "", "expand", "channel":
 	default:
-		return RecallResult{}, fmt.Errorf("%w: settle must be one of \"\", \"expand\", \"channel\", got %q", ErrValidation, in.Settle)
+		return RecallResult{}, fmt.Errorf("%w: settle must be one of \"off\", \"expand\", \"channel\", got %q", ErrValidation, in.Settle)
 	}
 	// SettleParams validation. Reject out-of-range tuning knobs at the
 	// boundary (400) instead of forwarding them to chapterhouse, which
