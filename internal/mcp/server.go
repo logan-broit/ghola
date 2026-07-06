@@ -96,7 +96,9 @@ func tools() []toolSpec {
 				mcppkg.WithString("parent_id",
 					mcppkg.Description("Parent event id — unset appends to the current leaf.")),
 				mcppkg.WithObject("event", mcppkg.Required(),
-					mcppkg.Description("Event DTO (type, text, tool_name, tool_input/output, raw_event, ...).")),
+					mcppkg.Description("Event DTO. Required field: type — must be one of: "+
+						"\"user\", \"assistant\", \"tool_result\", \"system\". "+
+						"Other fields: text, tool_name, tool_input, tool_output, raw_event, ...")),
 			),
 			Path: "/v1/record",
 		},

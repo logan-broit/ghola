@@ -106,6 +106,25 @@ var (
 	ErrMissingWorkspaceOrCwd = fmt.Errorf("%w: workspace_id or cwd required", ErrValidation)
 )
 
+// AllowedEventTypes is the set accepted by the sietch events.type CHECK
+// constraint. Callers (HTTP, MCP) validate at the boundary so an
+// unrecognized type surfaces as 400 with this list named, not as an
+// opaque 500 from SQLite.
+var AllowedEventTypes = []string{"user", "assistant", "tool_result", "system"}
+
+// ValidateEventType returns an ErrValidation-wrapped error if t is not
+// in AllowedEventTypes. The error message names the offending value and
+// lists the allowed set so callers can report it directly.
+func ValidateEventType(t string) error {
+	for _, allowed := range AllowedEventTypes {
+		if t == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: event.type %q is not allowed; must be one of: %s",
+		ErrValidation, t, strings.Join(AllowedEventTypes, ", "))
+}
+
 // ErrSessionNotFound marks a sietch store whose file exists but holds
 // no session row — typically a file recreated by conn()'s
 // create-on-open after GC. Callers distinguish it from real failures:
