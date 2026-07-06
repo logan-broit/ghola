@@ -793,7 +793,14 @@ def main() -> None:
             event_buckets=event_buckets,
             k=args.k,
             primitives=args.primitives,
-            settle=None if args.settle == "off" else args.settle,
+            # Pass the settle mode through literally, including "off". Now that
+            # the server defaults settle on (channel@0.40), an omitted wire
+            # field would silently follow the server default — but a measurement
+            # bed must never do that: each run must pin its own settle config so
+            # results stay attributable. "off" flows to the wire as an explicit
+            # opt-out (ghola_client forwards any truthy settle), giving the true
+            # pre-P4 baseline regardless of the server default.
+            settle=args.settle,
             activation_weight=args.activation_weight,
         )
 

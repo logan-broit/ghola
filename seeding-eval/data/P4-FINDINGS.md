@@ -127,7 +127,9 @@ the SCORE (config B), not pass through a text-pair validator.
 Remaining leg before shipping as anything but an opt-in flag: the
 LongMemEval R@5 >= 96.9% gate under channel mode (the bench retrieval
 harness does not yet carry the settle flag; flag-off default is
-byte-identical and needs no gate).
+byte-identical and needs no gate). (Superseded 2026-07-06: the harness
+gained the flag, the gate ran and PASSED, and the default flipped to
+channel@0.40 — see the settle-gate section below.)
 
 ## Activation-weight sweep (2026-07-05, repaired bed)
 
@@ -149,3 +151,23 @@ peak vs plateau-center difference is within single-sample noise (n=132,
 samples=1). Recommended shipping default when channel mode is enabled:
 w=0.40 (plateau center, 0.697/24). Default-on for recall still gated on the
 LongMemEval R@5 >= 96.9 check under channel mode.
+
+## LongMemEval R@5 gate — PASS, default flipped (2026-07-06)
+
+The default-on gate ran as paired same-day LongMemEval runs (500 questions,
+reranker on, identical config except the settle flag):
+
+| Config | R@1 | R@5 | R@10 | MRR |
+|---|---|---|---|---|
+| baseline (settle off) | 94.0% | 99.4% | 99.6% | 0.962 |
+| channel@0.40 | 93.6% | 99.6% | 99.8% | 0.960 |
+
+R@5 moved +0.2pp against the `>= 99.4%` no-regression bar (the deterministic
+baseline's own R@5, reproduced a fourth time by the off leg). **Verdict:
+PASS.** The multi-session category — the closest LME analog to the bridge
+queries settle exists for — went R@5 99.2 -> 100.0 and R@10 99.2 -> 100.0.
+
+The server default is now flipped to `settle=channel`, `activation_weight=0.40`,
+with `GHOLA_SETTLE=off` as the deployment kill-switch (restores the pre-P4
+pipeline for every unset request). Full paired numbers, per-category deltas,
+latency, and caveats: `docs/benchmarks.md`, "Settle gate (2026-07-06 run)".

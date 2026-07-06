@@ -381,10 +381,12 @@ func TestServer_Recall_PrimitivesDefaultsOff(t *testing.T) {
 		"primitives must default to false when absent from the request body")
 }
 
-// TestServer_Recall_SettleOffByDefault pins that omitting the settle field
-// produces byte-identical output to the pre-P4 pipeline (Settle=="" maps to
-// EpisodicMultiQuery.Settle=false so chapterhouse never runs spreading activation).
-func TestServer_Recall_SettleOffByDefault(t *testing.T) {
+// TestServer_Recall_SettleOnByDefault pins the post-flip contract at the
+// wire level: omitting the settle field applies the server default
+// (channel), so the chapterhouse multi-ranking request carries Settle=true.
+// This replaces the pre-flip "unset → off" wire pin — see the LongMemEval
+// settle gate in docs/benchmarks.md.
+func TestServer_Recall_SettleOnByDefault(t *testing.T) {
 	rch := &recordingChapterhouse{}
 	srv := newTestServerWithChapterhouse(t, rch)
 
@@ -396,8 +398,30 @@ func TestServer_Recall_SettleOffByDefault(t *testing.T) {
 	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
 
 	require.Len(t, rch.multiQueries, 1, "single multi-ranking call")
+	assert.True(t, rch.multiQueries[0].Settle,
+		"settle must be true when omitted — the server default (channel) applies")
+}
+
+// TestServer_Recall_SettleExplicitOff pins the explicit opt-out at the wire
+// level: POSTing {"settle":"off"} maps to EpisodicMultiQuery.Settle=false so
+// chapterhouse never runs spreading activation — byte-identical to the pre-P4
+// pipeline. This is the pre-flip default behavior, now reachable only by
+// asking for it explicitly.
+func TestServer_Recall_SettleExplicitOff(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":    testUserID,
+		"workspace":  "00000000-0000-0000-0000-0000000000ff",
+		"query_text": "kubernetes",
+		"settle":     "off",
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	require.Len(t, rch.multiQueries, 1, "single multi-ranking call")
 	assert.False(t, rch.multiQueries[0].Settle,
-		"settle must be false when omitted from the request — pre-P4 byte-identical path")
+		"settle=off must leave the multi-query settle flag false — pre-P4 byte-identical path")
 }
 
 // TestServer_Recall_SettleExpandReachesMultiQuery — T7 wire-level pin.
@@ -477,6 +501,25 @@ func TestServer_Recall_SettleChannelWeightSumExceeds400(t *testing.T) {
 		"rerank_weight+activation_weight > 1 must return 400; body=%s", body)
 	assert.Contains(t, string(body), "rerank_weight",
 		"error message must mention rerank_weight so the caller knows the constraint")
+}
+
+// TestServer_Recall_SettleParamsOutOfRange400 pins that an out-of-range
+// settle_params knob is rejected at the Recall boundary with a 400 rather
+// than being silently absorbed by chapterhouse's DefaultSettleParams. The
+// error message must name the offending field so the caller can correct it.
+func TestServer_Recall_SettleParamsOutOfRange400(t *testing.T) {
+	srv := newTestServer(t)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":       testUserID,
+		"workspace":     "00000000-0000-0000-0000-0000000000ff",
+		"settle":        "expand",
+		"settle_params": map[string]any{"lambda": -0.7},
+	})
+	require.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode,
+		"out-of-range settle_params.lambda must return 400; body=%s", body)
+	assert.Contains(t, string(body), "lambda",
+		"error message must name the offending settle_params field")
 }
 
 // conflict409Chapterhouse is a test fake that satisfies

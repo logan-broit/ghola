@@ -748,6 +748,10 @@ func TestRecall_FansOutAcrossTiersAndFusesByRRF(t *testing.T) {
 	out, err := c.Recall(context.Background(), core.RecallInput{
 		SessionID: "sess", UserID: "u1", Workspace: "ws1",
 		QueryText: "kubernetes",
+		// Post settle-default flip: pin the pre-P4 fan-out shape explicitly
+		// with settle off, so the RRF-only ordering and TierCounts (no
+		// "expansion" key) are what this test asserts.
+		Settle: "off",
 	})
 	require.NoError(t, err)
 	require.Len(t, out.Hits, 3)
@@ -1227,8 +1231,9 @@ func TestRecall_PrimitivesNilSubListNoOp(t *testing.T) {
 // ---------------------------------------------------------------------
 
 // TestRecall_SettleBogusModeRejected pins the validation contract:
-// Settle must be one of "", "expand", "channel". Any other value fails
-// with ErrValidation so the HTTP/MCP boundary maps it to a 400.
+// Settle must be one of "off", "expand", "channel" (or omitted, which
+// applies the server default). Any other value fails with ErrValidation
+// so the HTTP/MCP boundary maps it to a 400.
 func TestRecall_SettleBogusModeRejected(t *testing.T) {
 	c, _, _, _ := newCore()
 	_, err := c.Recall(context.Background(), core.RecallInput{
@@ -1261,27 +1266,95 @@ func TestRecall_SettleExpandPlumbsToMultiQuery(t *testing.T) {
 	assert.EqualValues(t, 25, ch.multiQueries[0].SettleParams.TopM)
 }
 
-// TestRecall_SettleDefaultOff pins the byte-identical off contract at the
-// wire level: an omitted Settle must leave the multi-query settle flag
-// false so the chapterhouse handler stays on the no-expansion path.
-func TestRecall_SettleDefaultOff(t *testing.T) {
+// TestRecall_SettleUnsetDefaultsToChannel pins the on-by-default contract:
+// an omitted Settle now applies the server default (c.Settle == "channel"),
+// so the multi-query settle flag flips true and chapterhouse runs spreading
+// activation. This replaces the pre-flip "unset → off" contract — see the
+// LongMemEval settle gate in docs/benchmarks.md.
+func TestRecall_SettleUnsetDefaultsToChannel(t *testing.T) {
+	c, _, ch, _ := newCore()
+	// New() default: c.Settle == "channel", c.ActivationWeight == 0.40.
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		// Settle intentionally omitted — must default to channel.
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.multiQueries, 1)
+	assert.True(t, ch.multiQueries[0].Settle,
+		"an omitted settle must apply the server default (channel) and flip the multi-query settle flag on")
+}
+
+// TestRecall_SettleUnsetAppliesDefaultActivationWeight pins that the server
+// ActivationWeight default (0.40) rides along with the default channel mode
+// when the caller left the weight unset. Asserted through the channel-fusion
+// output score, the only weight-observable seam: one pool hit "e1" (RRF mass,
+// no activation) and one expansion hit "xact" (rrf=0, activation=1.0), both
+// reranked equally. With c.RerankWeight=0.5 and wActivation=0.40, rrfWeight =
+// 1-0.5-0.40 = 0.10:
+//
+//	e1:   0.10*1.0 + 0.5*1.0 + 0.40*0.0 = 0.60
+//	xact: 0.10*0.0 + 0.5*1.0 + 0.40*1.0 = 0.90
+//
+// xact wins at 0.90 only because the 0.40 default weight was applied — a zero
+// weight would leave xact at 0.5 (below e1) and no activation channel at all.
+func TestRecall_SettleUnsetAppliesDefaultActivationWeight(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.8, ID: "e1", Content: "episodic content"},
+	}
+	ch.expResp = []core.ExpansionHit{
+		{ID: "xact", Activation: 1.0, Text: "expansion with high activation"},
+	}
+	srv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Equal rerank scores so activation is the only differentiator.
+		_, _ = w.Write([]byte(`{"scores":[
+			{"id":"e1","score":0.5},
+			{"id":"xact","score":0.5}
+		]}`))
+	}))
+	defer srv.Close()
+	c.Truthsayer = truthsayer.New(srv.URL).WithHTTPClient(srv.Client())
+	// c.RerankWeight stays at the New() default 0.5; c.ActivationWeight 0.40.
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		// Settle + ActivationWeight both omitted — server defaults apply.
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Hits, 2, "both hits surface (channel default engaged)")
+	assert.Equal(t, "xact", out.Hits[0].ID,
+		"xact must rank first: the default activation weight (0.40) tips it above e1's rrf mass")
+	assert.InDelta(t, 0.90, out.Hits[0].Score, 1e-9, "xact score: 0.10*0 + 0.5*1 + 0.40*1 = 0.90 (proves w=0.40 applied)")
+	assert.InDelta(t, 0.60, out.Hits[1].Score, 1e-9, "e1 score:   0.10*1 + 0.5*1 + 0.40*0 = 0.60")
+}
+
+// TestRecall_SettleExplicitOff pins the explicit opt-out at the wire level:
+// Settle == "off" must leave the multi-query settle flag false so the
+// chapterhouse handler stays on the no-expansion path. This is the pre-flip
+// "unset" behavior, now reachable only by asking for it explicitly.
+func TestRecall_SettleExplicitOff(t *testing.T) {
 	c, _, ch, _ := newCore()
 	_, err := c.Recall(context.Background(), core.RecallInput{
 		UserID: "u1", Workspace: "ws1",
 		QueryText: "kubernetes",
+		Settle:    "off",
 	})
 	require.NoError(t, err)
 	require.Len(t, ch.multiQueries, 1)
 	assert.False(t, ch.multiQueries[0].Settle,
-		"settle must default off on the multi-query")
+		"settle=off must leave the multi-query settle flag false (pre-P4 path)")
 }
 
 // TestRecall_SettleOffByteIdenticalToPreP4 is the regression test: with
-// Settle unset, recall output (hits + TierCounts) must match the pre-P4
+// Settle == "off", recall output (hits + TierCounts) must match the pre-P4
 // pipeline exactly — even when the fake has an expansion sub-list staged
 // (it must NOT surface because the settle flag is off). Guards against an
-// accidental on-by-default expansion or a stray "expansion" TierCounts
-// key leaking into every recall.
+// expansion or a stray "expansion" TierCounts key leaking into an explicitly
+// disabled recall. (Post-flip: "off" is the explicit opt-out; an *omitted*
+// settle now defaults to channel — see TestRecall_SettleUnsetDefaultsToChannel.)
 func TestRecall_SettleOffByteIdenticalToPreP4(t *testing.T) {
 	c, s, ch, _ := newCore()
 	s.vectorHits["sess"] = []core.RecallHit{{Tier: "working", Score: 0.9, ID: "w1"}}
@@ -1293,7 +1366,7 @@ func TestRecall_SettleOffByteIdenticalToPreP4(t *testing.T) {
 	out, err := c.Recall(context.Background(), core.RecallInput{
 		SessionID: "sess", UserID: "u1", Workspace: "ws1",
 		QueryText: "kubernetes",
-		// Settle intentionally omitted.
+		Settle:    "off", // explicit opt-out — the pre-P4 pipeline.
 	})
 	require.NoError(t, err)
 	require.Len(t, out.Hits, 3, "only the three RRF-tier hits surface; expansion must not leak")
@@ -1305,6 +1378,63 @@ func TestRecall_SettleOffByteIdenticalToPreP4(t *testing.T) {
 		"working": 1, "episodic": 1, "keyword": 0,
 		"session_vector": 0, "semantic": 1, "primitives": 0,
 	}, out.TierCounts, "settle-off TierCounts must not carry an expansion key")
+}
+
+// TestRecall_SettleChannelExplicitWeightRespected pins that an explicit
+// ActivationWeight in channel mode is used verbatim — the server default
+// (0.40) must NOT overwrite it. Same setup as the default-weight test but
+// with an explicit 0.5, and RerankWeight lowered to 0.1 so the arithmetic
+// (rrfWeight = 1-0.1-0.5 = 0.4) matches TestRecall_SettleChannelActivationLiftsByRawID.
+func TestRecall_SettleChannelExplicitWeightRespected(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.episResp = []core.RecallHit{
+		{Tier: "episodic", Score: 0.8, ID: "e1", Content: "episodic content"},
+	}
+	ch.expResp = []core.ExpansionHit{
+		{ID: "xact", Activation: 1.0, Text: "expansion with high activation"},
+	}
+	srv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"scores":[
+			{"id":"e1","score":0.5},
+			{"id":"xact","score":0.5}
+		]}`))
+	}))
+	defer srv.Close()
+	c.Truthsayer = truthsayer.New(srv.URL).WithHTTPClient(srv.Client())
+	c.RerankWeight = 0.1
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText:        "kubernetes",
+		Settle:           "channel",
+		ActivationWeight: 0.5, // explicit — must not be overwritten by the 0.40 default.
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Hits, 2)
+	assert.Equal(t, "xact", out.Hits[0].ID)
+	assert.InDelta(t, 0.60, out.Hits[0].Score, 1e-9,
+		"xact score: 0.4*0 + 0.1*1 + 0.5*1 = 0.60 (explicit weight 0.5 applied, not the 0.40 default)")
+	assert.InDelta(t, 0.50, out.Hits[1].Score, 1e-9, "e1 score: 0.4*1 + 0.1*1 + 0.5*0 = 0.50")
+}
+
+// TestRecall_SettleServerDefaultOffDisables pins the kill-switch: with the
+// server default set to "off" (GHOLA_SETTLE=off), an omitted request Settle
+// must NOT engage settle — the multi-query flag stays false. This is the
+// production rollback path for the on-by-default flip.
+func TestRecall_SettleServerDefaultOffDisables(t *testing.T) {
+	c, _, ch, _ := newCore()
+	c.Settle = "off" // simulate GHOLA_SETTLE=off wired in main.go.
+
+	_, err := c.Recall(context.Background(), core.RecallInput{
+		UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		// Settle omitted — must follow the server default (off).
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.multiQueries, 1)
+	assert.False(t, ch.multiQueries[0].Settle,
+		"with server default off, an unset request must not engage settle (kill-switch)")
 }
 
 // TestRecall_SettleExpandStrongRerankHitEntersTopK pins config A's whole
@@ -1485,6 +1615,10 @@ func TestRecall_CrossEncoderRerankReorders(t *testing.T) {
 	out, err := c.Recall(context.Background(), core.RecallInput{
 		SessionID: "sess", UserID: "u1", Workspace: "ws1",
 		QueryText: "kubernetes", Limit: 5,
+		// Settle off: this test isolates rerank behavior. With the server
+		// default (channel@0.40) the RerankWeight=1.0 here would push
+		// rerank_weight+activation_weight to 1.40 and 400 at the boundary.
+		Settle: "off",
 	})
 	require.NoError(t, err)
 	require.Len(t, out.Hits, 2)
@@ -1519,6 +1653,9 @@ func TestRecall_RerankFailureFallsBackToRRF(t *testing.T) {
 	out, err := c.Recall(context.Background(), core.RecallInput{
 		SessionID: "sess", UserID: "u1", Workspace: "ws1",
 		QueryText: "kubernetes", Limit: 5,
+		// Settle off: isolates the rerank-failure fallback. RerankWeight=1.0
+		// would collide with the channel default weight (sum > 1) otherwise.
+		Settle: "off",
 	})
 	require.NoError(t, err, "recall must not fail when rerank is unreachable")
 	require.Len(t, out.Hits, 2)
@@ -2046,22 +2183,28 @@ func TestGCSession_RemovesOrphanFile(t *testing.T) {
 // Task 6 — three-way score fusion (config B / "channel" mode)
 // ---------------------------------------------------------------------------
 
-// TestRecall_SettleChannelZeroActivationWeightRejected pins the
-// validation contract: channel mode with ActivationWeight == 0 (the zero
-// value, i.e. caller forgot to set it) must surface as ErrValidation so
-// the HTTP/MCP boundary maps it to a 400 rather than silently producing a
-// two-channel result under a "channel" label.
-func TestRecall_SettleChannelZeroActivationWeightRejected(t *testing.T) {
-	c, _, _, _ := newCore()
+// TestRecall_SettleChannelZeroActivationWeightUsesDefault pins the post-flip
+// contract: channel mode with ActivationWeight == 0 (unset) is no longer a
+// rejection — the zero now means "use the server default", so c.ActivationWeight
+// (0.40) is applied and the recall succeeds with settle engaged. (Pre-flip, a
+// zero weight in channel mode was a hard 400; the on-by-default flip repurposes
+// the zero as the "defer to server default" sentinel. An explicit bad weight
+// that pushes the sum over 1 is still rejected — see
+// TestRecall_SettleChannelWeightSumExceedsOneRejected.)
+func TestRecall_SettleChannelZeroActivationWeightUsesDefault(t *testing.T) {
+	c, _, ch, _ := newCore()
+	// c.RerankWeight 0.5 + default ActivationWeight 0.40 = 0.90 <= 1 → valid.
 	_, err := c.Recall(context.Background(), core.RecallInput{
 		UserID: "u1", Workspace: "ws1",
 		QueryText:        "kubernetes",
 		Settle:           "channel",
-		ActivationWeight: 0, // zero value — forgot to set it
+		ActivationWeight: 0, // zero → apply the server default (0.40)
 	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, core.ErrValidation,
-		"channel mode with ActivationWeight=0 must surface as a validation error (400)")
+	require.NoError(t, err,
+		"channel mode with ActivationWeight=0 must default to the server weight, not reject")
+	require.Len(t, ch.multiQueries, 1)
+	assert.True(t, ch.multiQueries[0].Settle,
+		"channel mode engages settle even when the weight defaults")
 }
 
 // TestRecall_SettleChannelWeightSumExceedsOneRejected pins the guard:
@@ -2080,6 +2223,74 @@ func TestRecall_SettleChannelWeightSumExceedsOneRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrValidation,
 		"rerank_weight+activation_weight > 1 must surface as a validation error (400)")
+}
+
+// TestRecall_SettleParamsValidation pins the settle_params boundary
+// contract: when settle is on ("expand"/"channel"), non-zero tuning knobs
+// are validated at the Recall boundary so a typo (lambda=-0.7,
+// node_cap=1_000_000) surfaces as a 400 rather than being silently absorbed
+// by chapterhouse's DefaultSettleParams substitution. Zero values remain
+// valid (the "use server default" wire contract). Params are ignored
+// entirely when settle is off ("off") — invalid knobs with settle off must
+// NOT reject.
+func TestRecall_SettleParamsValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		settle  string
+		params  core.SettleParams
+		wantErr bool
+		// wantInErr, for rejection cases, is a substring the error
+		// message must contain — the offending field identifier as it
+		// appears in production (e.g. "settle_params.lambda"). Empty for
+		// acceptance cases.
+		wantInErr string
+	}{
+		// Valid: all zero (server default), Settle on.
+		{"expand zero params ok", "expand", core.SettleParams{}, false, ""},
+		// Valid: fully-specified in-range params.
+		{"expand valid params ok", "expand", core.SettleParams{
+			Lambda: 0.7, Eps: 1e-6, MaxIters: 20, HopCap: 3, NodeCap: 2000, TopM: 25,
+		}, false, ""},
+		// Lambda: (0, 1) open interval.
+		{"lambda negative rejected", "expand", core.SettleParams{Lambda: -0.7}, true, "settle_params.lambda"},
+		{"lambda >= 1 rejected", "expand", core.SettleParams{Lambda: 1.0}, true, "settle_params.lambda"},
+		{"lambda near-1 ok", "expand", core.SettleParams{Lambda: 0.999}, false, ""},
+		// Eps: > 0.
+		{"eps negative rejected", "expand", core.SettleParams{Eps: -1e-6}, true, "settle_params.eps"},
+		{"eps tiny positive ok", "expand", core.SettleParams{Eps: 1e-9}, false, ""},
+		// MaxIters / HopCap / TopM: positive.
+		{"max_iters negative rejected", "expand", core.SettleParams{MaxIters: -1}, true, "settle_params.max_iters"},
+		{"hop_cap negative rejected", "expand", core.SettleParams{HopCap: -1}, true, "settle_params.hop_cap"},
+		{"top_m negative rejected", "expand", core.SettleParams{TopM: -1}, true, "settle_params.top_m"},
+		// NodeCap: positive and <= ceiling.
+		{"node_cap negative rejected", "expand", core.SettleParams{NodeCap: -1}, true, "settle_params.node_cap"},
+		{"node_cap over ceiling rejected", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap + 1}, true, "settle_params.node_cap"},
+		{"node_cap at ceiling ok", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap}, false, ""},
+		// Ignored entirely when settle is off ("off"): invalid knobs must NOT reject.
+		{"invalid params ignored when settle off", "off", core.SettleParams{
+			Lambda: -0.7, Eps: -1, MaxIters: -5, NodeCap: core.MaxSettleNodeCap + 1,
+		}, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _, _ := newCore()
+			_, err := c.Recall(context.Background(), core.RecallInput{
+				UserID: "u1", Workspace: "ws1",
+				QueryText:    "kubernetes",
+				Settle:       tc.settle,
+				SettleParams: tc.params,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, core.ErrValidation,
+					"out-of-range settle_params must surface as a validation error (400)")
+				assert.Contains(t, err.Error(), tc.wantInErr,
+					"error message must name the offending settle_params field")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 // TestRecall_SettleExpandIgnoresActivationWeight pins mode isolation: in

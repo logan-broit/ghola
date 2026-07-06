@@ -418,7 +418,7 @@ class GholaV2Backend(MemoryBackend):
         # semantic toggleable so we can ablate it cleanly until PR4
         # ships proper clustering.
         include_semant = os.environ.get("INCLUDE_SEMANT", "1") != "0"
-        out = self._post("/v1/recall", {
+        payload = {
             "user_id": self._user_id,
             "query_text": query,
             "workspace": getattr(self, "_current_workspace", "") or self._workspace_id,
@@ -431,7 +431,22 @@ class GholaV2Backend(MemoryBackend):
             # each result line). Production agent callers (Claude via
             # MCP) leave this off to keep the response body lean.
             "include_timings": True,
-        })
+        }
+        # BENCH_SETTLE forwards the settle mode verbatim. Post default-on flip
+        # (2026-07-06) the mapping changed:
+        #   unset/empty -> field omitted -> SERVER default (now channel@0.40).
+        #   BENCH_SETTLE=off -> explicit opt-out, the true pre-P4 baseline.
+        #   BENCH_SETTLE=expand|channel -> P4 spreading activation (fixed-point
+        #     settle over the association graph), config A / config B.
+        # A measurement run must set BENCH_SETTLE explicitly so it never silently
+        # rides the server default. BENCH_ACTIVATION_WEIGHT sets channel-mode
+        # fusion weight; when unset the server default applies. The server
+        # validates both (bad values fail the run loudly, which a bench wants).
+        if (settle := os.environ.get("BENCH_SETTLE", "").strip()):
+            payload["settle"] = settle
+            if (env_w := os.environ.get("BENCH_ACTIVATION_WEIGHT", "").strip()):
+                payload["activation_weight"] = float(env_w)
+        out = self._post("/v1/recall", payload)
         # Fail loud on degraded recall. core.Recall now degrades tier-by-tier
         # (a stage timing out or erroring drops its contribution) instead of
         # failing the whole request; the response carries a `degraded` list of

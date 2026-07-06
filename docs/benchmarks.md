@@ -44,6 +44,52 @@ plus the 5-tier RRF fan-out plus cross-encoder rerank
 `single-session-preference` remains the stickiest category and is the
 open work for the next recall-pipeline iteration.
 
+## Settle gate (2026-07-06 run)
+
+Paired same-day runs on the merged-main stack, 500 questions, reranker on,
+identical config except the settle flag. The baseline leg (settle off)
+reproduced the pinned numbers exactly — R@1 94.0 / R@5 99.4 / R@10 99.6 /
+MRR 0.962, a fourth identical reproduction of the deterministic baseline.
+The channel@0.40 leg landed R@1 93.6 / R@5 99.6 / R@10 99.8 / MRR 0.960.
+
+| Config | R@1 | R@5 | R@10 | MRR |
+|---|---|---|---|---|
+| baseline (settle off) | 94.0% | 99.4% | 99.6% | 0.962 |
+| channel@0.40 | 93.6% | 99.6% | 99.8% | 0.960 |
+
+**Verdict: gate PASSED.** R@5 moved +0.2pp against a `>= 99.4%`
+no-regression bar, so `settle=channel` with `activation_weight=0.40` is now
+the server default. `GHOLA_SETTLE=off` is the kill-switch (restores the
+pre-P4 pipeline for every unset request).
+
+Per-category deltas worth naming:
+
+- **multi-session**: R@5 99.2 -> 100.0, R@10 99.2 -> 100.0. This is the
+  closest LME analog to the bridge queries settle was built for — the
+  category settle exists to help — and it went clean.
+- **single-session-preference**: R@5 96.7 -> 100.0, but R@1 73.3 -> 70.0.
+- **temporal-reasoning**: R@5 99.2 -> 98.5.
+- Other categories unchanged.
+
+Net across the 500: R@1 -0.4pp (2 questions), R@5 +0.2pp, R@10 +0.2pp.
+
+Latency: wall-clock parity, ~3.2 s/question in both configs. Settle adds no
+measurable cost at ~10k edges/workspace.
+
+Caveats, stated plainly:
+
+- The LME association graphs (11.45M edges over 1,124 workspaces) were built
+  before migration 011 (associations workspace-PK fix), so workspaces whose
+  haystack sessions are shared across questions may have under-complete
+  graphs. The gate measures settle on the graphs as they exist today, not on
+  a post-011 rebuild.
+- Single sample per config, but the pipeline is deterministic (see the
+  variance caveat under Pinned configuration below); the paired numbers are
+  directly comparable.
+
+Runs: `results/settle-gate-20260706T145901Z-{baseline,channel}.jsonl` via
+[`bench/longmemeval/scripts/settle-gate.sh`](../bench/longmemeval/scripts/settle-gate.sh).
+
 ## Pinned configuration (2026-05-17 run)
 
 The published numbers were produced with exactly this stack; treat any
@@ -54,6 +100,8 @@ deviation as a different experiment.
 | RRF_K | 60 |
 | RERANK_TOPK | 50 |
 | RERANK_WEIGHT | 0.5 |
+| SETTLE | channel (default; "off" disables) |
+| ACTIVATION_WEIGHT | 0.40 |
 | RERANK_TIMEOUT | 30s |
 | TIER_TIMEOUT | 10s |
 | Reranker | BAAI/bge-reranker-v2-m3, fp16, max_length 8192 (CUDA) |
@@ -62,11 +110,17 @@ deviation as a different experiment.
 | Harness | GHOLA_V2_DELEGATE=1 (core.Recall end-to-end) |
 
 These are the `core.Config` defaults (`internal/core/core.go`,
-`New()`); `RRF_K`, `RERANK_TOPK`, `RERANK_WEIGHT`, and
-`GHOLA_TIER_TIMEOUT_MS` are env-overridable (`cmd/ghola/main.go`).
-`RERANK_TIMEOUT` is a code default only. Reranker/embedder values are
-the committed `deploy/docker-compose/docker-compose.yml` defaults
-(`truthsayer` and `guild` services).
+`New()`); `RRF_K`, `RERANK_TOPK`, `RERANK_WEIGHT`, `GHOLA_SETTLE`,
+`GHOLA_ACTIVATION_WEIGHT`, and `GHOLA_TIER_TIMEOUT_MS` are env-overridable
+(`cmd/ghola/main.go`). `RERANK_TIMEOUT` is a code default only.
+Reranker/embedder values are the committed
+`deploy/docker-compose/docker-compose.yml` defaults (`truthsayer` and
+`guild` services).
+
+The `SETTLE` and `ACTIVATION_WEIGHT` rows are the post-flip defaults; the
+headline `2026-05-17` numbers at the top of this doc predate settle and
+correspond to `settle=off`. The paired on/off comparison lives in the
+[Settle gate](#settle-gate-2026-07-06-run) section above.
 
 Caveats, stated plainly:
 
