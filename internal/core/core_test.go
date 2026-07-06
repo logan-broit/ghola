@@ -2082,6 +2082,66 @@ func TestRecall_SettleChannelWeightSumExceedsOneRejected(t *testing.T) {
 		"rerank_weight+activation_weight > 1 must surface as a validation error (400)")
 }
 
+// TestRecall_SettleParamsValidation pins the settle_params boundary
+// contract: when Settle != "", non-zero tuning knobs are validated at the
+// Recall boundary so a typo (lambda=-0.7, node_cap=1_000_000) surfaces as a
+// 400 rather than being silently absorbed by chapterhouse's
+// DefaultSettleParams substitution. Zero values remain valid (the "use
+// server default" wire contract). Params are ignored entirely when Settle
+// == "" — invalid knobs with settle off must NOT reject.
+func TestRecall_SettleParamsValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		settle  string
+		params  core.SettleParams
+		wantErr bool
+	}{
+		// Valid: all zero (server default), Settle on.
+		{"expand zero params ok", "expand", core.SettleParams{}, false},
+		// Valid: fully-specified in-range params.
+		{"expand valid params ok", "expand", core.SettleParams{
+			Lambda: 0.7, Eps: 1e-6, MaxIters: 20, HopCap: 3, NodeCap: 2000, TopM: 25,
+		}, false},
+		// Lambda: (0, 1) open interval.
+		{"lambda negative rejected", "expand", core.SettleParams{Lambda: -0.7}, true},
+		{"lambda >= 1 rejected", "expand", core.SettleParams{Lambda: 1.0}, true},
+		{"lambda near-1 ok", "expand", core.SettleParams{Lambda: 0.999}, false},
+		// Eps: > 0.
+		{"eps negative rejected", "expand", core.SettleParams{Eps: -1e-6}, true},
+		{"eps tiny positive ok", "expand", core.SettleParams{Eps: 1e-9}, false},
+		// MaxIters / HopCap / TopM: positive.
+		{"max_iters negative rejected", "expand", core.SettleParams{MaxIters: -1}, true},
+		{"hop_cap negative rejected", "expand", core.SettleParams{HopCap: -1}, true},
+		{"top_m negative rejected", "expand", core.SettleParams{TopM: -1}, true},
+		// NodeCap: positive and <= ceiling.
+		{"node_cap negative rejected", "expand", core.SettleParams{NodeCap: -1}, true},
+		{"node_cap over ceiling rejected", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap + 1}, true},
+		{"node_cap at ceiling ok", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap}, false},
+		// Ignored entirely when Settle == "": invalid knobs must NOT reject.
+		{"invalid params ignored when settle off", "", core.SettleParams{
+			Lambda: -0.7, Eps: -1, MaxIters: -5, NodeCap: core.MaxSettleNodeCap + 1,
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _, _ := newCore()
+			_, err := c.Recall(context.Background(), core.RecallInput{
+				UserID: "u1", Workspace: "ws1",
+				QueryText:    "kubernetes",
+				Settle:       tc.settle,
+				SettleParams: tc.params,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, core.ErrValidation,
+					"out-of-range settle_params must surface as a validation error (400)")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // TestRecall_SettleExpandIgnoresActivationWeight pins mode isolation: in
 // "expand" mode ActivationWeight is present in the input struct but must
 // be completely ignored by the fusion path. The output must be identical

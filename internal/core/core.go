@@ -112,6 +112,14 @@ var (
 // opaque 500 from SQLite.
 var AllowedEventTypes = []string{"user", "assistant", "tool_result", "system"}
 
+// MaxSettleNodeCap is the runaway ceiling for SettleParams.NodeCap,
+// validated at the Recall boundary. Chapterhouse's DefaultSettleParams
+// uses 2000 (see primitives.DefaultSettleParams); this cap sits an order
+// of magnitude above that so legitimate tuning is unconstrained while an
+// accidental 1_000_000 (which would fan out the whole Hebbian graph) is
+// rejected as a 400 rather than silently building a runaway neighborhood.
+const MaxSettleNodeCap = 20000
+
 // ValidateEventType returns an ErrValidation-wrapped error if t is not
 // in AllowedEventTypes. The error message names the offending value and
 // lists the allowed set so callers can report it directly.
@@ -418,6 +426,34 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 	case "", "expand", "channel":
 	default:
 		return RecallResult{}, fmt.Errorf("%w: settle must be one of \"\", \"expand\", \"channel\", got %q", ErrValidation, in.Settle)
+	}
+	// SettleParams validation. Reject out-of-range tuning knobs at the
+	// boundary (400) instead of forwarding them to chapterhouse, which
+	// silently substitutes DefaultSettleParams for any non-positive field
+	// — so a typo like lambda=-0.7 would otherwise be absorbed rather than
+	// surfaced. Zero values mean "use server default" (the wire contract)
+	// and stay valid. Validated only when Settle != "" — with settle off
+	// the params are ignored entirely, so an invalid block must not reject.
+	if in.Settle != "" {
+		p := in.SettleParams
+		if p.Lambda != 0 && (p.Lambda <= 0 || p.Lambda >= 1) {
+			return RecallResult{}, fmt.Errorf("%w: settle_params.lambda must be in (0, 1), got %v", ErrValidation, p.Lambda)
+		}
+		if p.Eps != 0 && p.Eps <= 0 {
+			return RecallResult{}, fmt.Errorf("%w: settle_params.eps must be > 0, got %v", ErrValidation, p.Eps)
+		}
+		if p.MaxIters != 0 && p.MaxIters < 0 {
+			return RecallResult{}, fmt.Errorf("%w: settle_params.max_iters must be > 0, got %v", ErrValidation, p.MaxIters)
+		}
+		if p.HopCap != 0 && p.HopCap < 0 {
+			return RecallResult{}, fmt.Errorf("%w: settle_params.hop_cap must be > 0, got %v", ErrValidation, p.HopCap)
+		}
+		if p.TopM != 0 && p.TopM < 0 {
+			return RecallResult{}, fmt.Errorf("%w: settle_params.top_m must be > 0, got %v", ErrValidation, p.TopM)
+		}
+		if p.NodeCap != 0 && (p.NodeCap < 0 || p.NodeCap > MaxSettleNodeCap) {
+			return RecallResult{}, fmt.Errorf("%w: settle_params.node_cap must be in (0, %d], got %v", ErrValidation, MaxSettleNodeCap, p.NodeCap)
+		}
 	}
 	// Channel-mode weight validation. ActivationWeight is only meaningful
 	// (and only applied) in "channel" mode. Validate here so a missing or

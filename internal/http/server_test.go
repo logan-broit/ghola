@@ -479,6 +479,25 @@ func TestServer_Recall_SettleChannelWeightSumExceeds400(t *testing.T) {
 		"error message must mention rerank_weight so the caller knows the constraint")
 }
 
+// TestServer_Recall_SettleParamsOutOfRange400 pins that an out-of-range
+// settle_params knob is rejected at the Recall boundary with a 400 rather
+// than being silently absorbed by chapterhouse's DefaultSettleParams. The
+// error message must name the offending field so the caller can correct it.
+func TestServer_Recall_SettleParamsOutOfRange400(t *testing.T) {
+	srv := newTestServer(t)
+
+	resp, body := post(t, srv, "/v1/recall", map[string]any{
+		"user_id":       testUserID,
+		"workspace":     "00000000-0000-0000-0000-0000000000ff",
+		"settle":        "expand",
+		"settle_params": map[string]any{"lambda": -0.7},
+	})
+	require.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode,
+		"out-of-range settle_params.lambda must return 400; body=%s", body)
+	assert.Contains(t, string(body), "lambda",
+		"error message must name the offending settle_params field")
+}
+
 // conflict409Chapterhouse is a test fake that satisfies
 // ChapterhouseClient and returns *StatusError{409} from
 // AddSessionWorkspace — proves the HTTP handler maps 409 from
