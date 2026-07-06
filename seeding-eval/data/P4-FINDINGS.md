@@ -68,3 +68,29 @@ the baseline already solves.
 - Raw artifacts: results-baseline-{noprim,prim}/, results-p4-{expand,channel,
   channel045}/, per-case traces, this file's numbers reproducible via
   task8-matrix.sh + probe045.log.
+
+## Appendix: P4.1 gating premise test (2026-07-05, offline, same artifacts)
+
+Premise: a query-time confidence gate (open the activation channel only when
+primary retrieval is weak) could keep the w=0.45 bridge gains without the
+aggregate cost. Tested retroactively on the existing per-case traces.
+
+Result: **falsified at the available-signal level.**
+- w=0.45 decomposition: 13 WINs (12 bridge), 30 LOSSes, rest unchanged.
+- No trace-level feature separates WIN from LOSS: per-query normalization
+  flattens top-1 fused score (~1.0 for all); top1-top5 margin runs BACKWARD
+  (WIN median 0.164 vs LOSS 0.086); episodic-in-top5, tier diversity,
+  ground-truth size, top-1 tier: indistinguishable.
+- Ceiling check: even a perfect oracle gate ("apply the channel only to
+  baseline misses") reaches 12/55 bridge at w=0.45 — still under the 18/55
+  bar. The channel at this weight does not recover enough bridges even with
+  free perfect selectivity.
+
+Implications for any P4.1: (a) the gate needs signals the pipeline does not
+currently expose (raw pre-normalization rerank logits, absolute RRF mass,
+seed-to-graph association density) — new telemetry, an instrumented
+experiment, not a retrofit; (b) higher weights under a gate MIGHT recover
+more bridges but are unmeasured; (c) the LOSS population is broadly
+distributed, not a removable subpopulation. P4.1 as originally sketched is
+not supported by the existing evidence; the cheap offline test prevented
+building it on a false assumption.
