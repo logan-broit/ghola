@@ -1,5 +1,14 @@
 # P4 Recurrent-Settle: Findings (2026-07-05)
 
+> **2026-07-05 LATE ADDENDUM — THE VERDICT BELOW IS INVALIDATED.** Forensics
+> (P42-FORENSICS.md) found the measurement ran on a graph missing 66% of its
+> edges: `semantic.associations`' primary key omits workspace_id, so pair rows
+> for overlapping threads were captured by the stale May workspace and were
+> invisible to the eval workspace's settle. The bed has been repaired (25,784
+> edges, uniform weights) and the matrix re-run as task8-v2; see the v2
+> section/report for the standing verdict. The schema bug (workspace_id not in
+> the associations PK) is a latent production defect needing its own fix.
+
 Verdict against the pre-registered success bar: **FAIL** — the settle ships
 flag-gated OFF (default path byte-identical to pre-P4, verified by review and
 tests). The mechanism stays in the codebase for follow-up work.
