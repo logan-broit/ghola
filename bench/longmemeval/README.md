@@ -55,8 +55,8 @@ top of a flat vector query (legacy comparison path; needs
 | `TEMPORAL_FILTER` | `0` | `1` enables a date-window post-filter (negative-result experiment, off by default) |
 | `RERANK_DATASET` | `s` | LongMemEval split label, used when the adapter needs to pull haystack text |
 | `INCLUDE_SEMANT` | `1` | `0` drops the semantic mneme tier from Stage 1 |
-| `BENCH_SETTLE` | _(unset)_ | `expand` or `channel` turns on P4 spreading activation (settle); unset is byte-identical to the pre-P4 request |
-| `BENCH_ACTIVATION_WEIGHT` | _(unset)_ | channel-mode fusion weight, e.g. `0.40`; unset uses the server default. Only read when `BENCH_SETTLE` is set |
+| `BENCH_SETTLE` | _(unset)_ | Settle mode forwarded verbatim. **Unset now rides the server default (channel@0.40, on by default since 2026-07-06).** `off` is the explicit opt-out (byte-identical to the pre-P4 request); `expand` / `channel` select config A / B. A scored run should set this explicitly — including `off` for a baseline — so it never silently follows the server default. |
+| `BENCH_ACTIVATION_WEIGHT` | _(unset)_ | channel-mode fusion weight, e.g. `0.40`; unset uses the server default (0.40). Only read when `BENCH_SETTLE` is set |
 | `GHOLA_ALLOW_DEGRADED` | _(unset)_ | `1` downgrades a degraded-recall abort to a stderr warning (debug only — see below) |
 
 ## Degraded-recall guard

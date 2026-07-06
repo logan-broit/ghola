@@ -432,12 +432,16 @@ class GholaV2Backend(MemoryBackend):
             # MCP) leave this off to keep the response body lean.
             "include_timings": True,
         }
-        # BENCH_SETTLE=expand|channel turns on P4 spreading activation
-        # (fixed-point settle over the association graph). Unset/empty
-        # leaves the request byte-identical to the pre-P4 baseline.
-        # BENCH_ACTIVATION_WEIGHT sets channel-mode fusion weight; when
-        # unset the server default applies. Server validates both
-        # (bad values fail the run loudly, which is what a bench wants).
+        # BENCH_SETTLE forwards the settle mode verbatim. Post default-on flip
+        # (2026-07-06) the mapping changed:
+        #   unset/empty -> field omitted -> SERVER default (now channel@0.40).
+        #   BENCH_SETTLE=off -> explicit opt-out, the true pre-P4 baseline.
+        #   BENCH_SETTLE=expand|channel -> P4 spreading activation (fixed-point
+        #     settle over the association graph), config A / config B.
+        # A measurement run must set BENCH_SETTLE explicitly so it never silently
+        # rides the server default. BENCH_ACTIVATION_WEIGHT sets channel-mode
+        # fusion weight; when unset the server default applies. The server
+        # validates both (bad values fail the run loudly, which a bench wants).
         if (settle := os.environ.get("BENCH_SETTLE", "").strip()):
             payload["settle"] = settle
             if (env_w := os.environ.get("BENCH_ACTIVATION_WEIGHT", "").strip()):

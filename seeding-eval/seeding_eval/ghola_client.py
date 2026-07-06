@@ -84,9 +84,13 @@ class GholaClient:
                 (equal-weight, tier-additive). Omitted from the wire
                 body when False so the server's omitempty contract
                 preserves byte-identical legacy behaviour.
-            settle: Settle mode: None/omit (off, default), "expand" (config A:
-                spreading activation sub-list), or "channel" (config B: activation
-                also participates in score fusion). Maps to RecallInput.Settle.
+            settle: Settle mode. None omits the wire field, so the server default
+                applies (now channel@0.40 — on by default). "off" is the explicit
+                opt-out (byte-identical to pre-P4); "expand" (config A: spreading
+                activation sub-list) or "channel" (config B: activation also
+                participates in score fusion). Maps to RecallInput.Settle. A
+                measurement run should pass an explicit mode (including "off") so
+                it never silently rides the server default.
             settle_params: Optional tuning overrides for the settle pipeline
                 (lambda, hop_cap, node_cap, top_m, eps, max_iters). Zero/absent
                 fields fall back to chapterhouse's DefaultSettleParams.
