@@ -128,3 +128,24 @@ Remaining leg before shipping as anything but an opt-in flag: the
 LongMemEval R@5 >= 96.9% gate under channel mode (the bench retrieval
 harness does not yet carry the settle flag; flag-off default is
 byte-identical and needs no gate).
+
+## Activation-weight sweep (2026-07-05, repaired bed)
+
+| w    | P@5 none | P@5 correct | bridge/51 |
+|------|----------|-------------|-----------|
+| 0    | 0.568    | 0.576       | 0         |
+| 0.20 | 0.621    | 0.621       | 4         |
+| 0.25 | 0.621    | 0.652       | 4         |
+| 0.30 | 0.652    | 0.636       | 11        |
+| 0.35 | 0.720    | 0.636       | 21        |
+| 0.40 | 0.697    | 0.652       | 24        |
+| 0.45 | 0.652    | 0.636       | 25        |
+| 0.49 | 0.614    | 0.606       | 25        |
+
+Inverted-U: aggregate peaks at w=0.35 (+15.2pp over baseline), bridge
+saturates ~25 by w=0.45, both decline toward 0.49 — no motivation to raise
+the RerankWeight ceiling. The 0.35-0.45 plateau is the working range; the
+peak vs plateau-center difference is within single-sample noise (n=132,
+samples=1). Recommended shipping default when channel mode is enabled:
+w=0.40 (plateau center, 0.697/24). Default-on for recall still gated on the
+LongMemEval R@5 >= 96.9 check under channel mode.
