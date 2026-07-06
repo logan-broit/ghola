@@ -2095,32 +2095,37 @@ func TestRecall_SettleParamsValidation(t *testing.T) {
 		settle  string
 		params  core.SettleParams
 		wantErr bool
+		// wantInErr, for rejection cases, is a substring the error
+		// message must contain — the offending field identifier as it
+		// appears in production (e.g. "settle_params.lambda"). Empty for
+		// acceptance cases.
+		wantInErr string
 	}{
 		// Valid: all zero (server default), Settle on.
-		{"expand zero params ok", "expand", core.SettleParams{}, false},
+		{"expand zero params ok", "expand", core.SettleParams{}, false, ""},
 		// Valid: fully-specified in-range params.
 		{"expand valid params ok", "expand", core.SettleParams{
 			Lambda: 0.7, Eps: 1e-6, MaxIters: 20, HopCap: 3, NodeCap: 2000, TopM: 25,
-		}, false},
+		}, false, ""},
 		// Lambda: (0, 1) open interval.
-		{"lambda negative rejected", "expand", core.SettleParams{Lambda: -0.7}, true},
-		{"lambda >= 1 rejected", "expand", core.SettleParams{Lambda: 1.0}, true},
-		{"lambda near-1 ok", "expand", core.SettleParams{Lambda: 0.999}, false},
+		{"lambda negative rejected", "expand", core.SettleParams{Lambda: -0.7}, true, "settle_params.lambda"},
+		{"lambda >= 1 rejected", "expand", core.SettleParams{Lambda: 1.0}, true, "settle_params.lambda"},
+		{"lambda near-1 ok", "expand", core.SettleParams{Lambda: 0.999}, false, ""},
 		// Eps: > 0.
-		{"eps negative rejected", "expand", core.SettleParams{Eps: -1e-6}, true},
-		{"eps tiny positive ok", "expand", core.SettleParams{Eps: 1e-9}, false},
+		{"eps negative rejected", "expand", core.SettleParams{Eps: -1e-6}, true, "settle_params.eps"},
+		{"eps tiny positive ok", "expand", core.SettleParams{Eps: 1e-9}, false, ""},
 		// MaxIters / HopCap / TopM: positive.
-		{"max_iters negative rejected", "expand", core.SettleParams{MaxIters: -1}, true},
-		{"hop_cap negative rejected", "expand", core.SettleParams{HopCap: -1}, true},
-		{"top_m negative rejected", "expand", core.SettleParams{TopM: -1}, true},
+		{"max_iters negative rejected", "expand", core.SettleParams{MaxIters: -1}, true, "settle_params.max_iters"},
+		{"hop_cap negative rejected", "expand", core.SettleParams{HopCap: -1}, true, "settle_params.hop_cap"},
+		{"top_m negative rejected", "expand", core.SettleParams{TopM: -1}, true, "settle_params.top_m"},
 		// NodeCap: positive and <= ceiling.
-		{"node_cap negative rejected", "expand", core.SettleParams{NodeCap: -1}, true},
-		{"node_cap over ceiling rejected", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap + 1}, true},
-		{"node_cap at ceiling ok", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap}, false},
+		{"node_cap negative rejected", "expand", core.SettleParams{NodeCap: -1}, true, "settle_params.node_cap"},
+		{"node_cap over ceiling rejected", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap + 1}, true, "settle_params.node_cap"},
+		{"node_cap at ceiling ok", "expand", core.SettleParams{NodeCap: core.MaxSettleNodeCap}, false, ""},
 		// Ignored entirely when Settle == "": invalid knobs must NOT reject.
 		{"invalid params ignored when settle off", "", core.SettleParams{
 			Lambda: -0.7, Eps: -1, MaxIters: -5, NodeCap: core.MaxSettleNodeCap + 1,
-		}, false},
+		}, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2135,6 +2140,8 @@ func TestRecall_SettleParamsValidation(t *testing.T) {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, core.ErrValidation,
 					"out-of-range settle_params must surface as a validation error (400)")
+				assert.Contains(t, err.Error(), tc.wantInErr,
+					"error message must name the offending settle_params field")
 			} else {
 				require.NoError(t, err)
 			}
