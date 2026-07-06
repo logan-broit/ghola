@@ -103,3 +103,28 @@ more bridges but are unmeasured; (c) the LOSS population is broadly
 distributed, not a removable subpopulation. P4.1 as originally sketched is
 not supported by the existing evidence; the cheap offline test prevented
 building it on a false assumption.
+
+## V2: the standing verdict (repaired bed, 25,784 edges, 2026-07-05)
+
+| config       | P@5 none | P@5 correct | bridge/51 |
+|--------------|----------|-------------|-----------|
+| noprim       | 0.545    | 0.545       | 0         |
+| prim         | 0.568    | 0.576       | 0*        |
+| expand (A)   | 0.568    | 0.576       | 0         |
+| channel@0.2  | 0.621    | 0.621       | 4         |
+| channel@0.45 | 0.652    | 0.636       | **25**    |
+
+*bridge set (51 cases) = none-variant misses under both v2 baselines.
+
+**Success bar: PASS on both measured legs.** Bridge 25/51 (49%) >= 1/3;
+aggregate P@5 0.652 >= own baseline 0.568 (+8.4pp, an outright improvement,
+not merely no-regression). The v1 aggregate crash was the missing-edge
+artifact: with 66% of true edges absent, activation amplified noise; with the
+full graph it amplifies threads. Config A (expansion validated only by the
+cross-encoder) remains null on the honest graph: graph evidence must enter
+the SCORE (config B), not pass through a text-pair validator.
+
+Remaining leg before shipping as anything but an opt-in flag: the
+LongMemEval R@5 >= 96.9% gate under channel mode (the bench retrieval
+harness does not yet carry the settle flag; flag-off default is
+byte-identical and needs no gate).
