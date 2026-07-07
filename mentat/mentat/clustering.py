@@ -1,7 +1,8 @@
-"""HDBSCAN over pre-pooled L1 embeddings for Stage C of predictive
-replay. Inputs are session-level vectors (output of mentat's pool
-endpoint, persisted to episodic.sessions.l1_embedding); the cluster
-results are upserted into semantic.mnemes via mnemes.py.
+"""HDBSCAN over caller-supplied embeddings. Pure math kernel — no DB.
+
+Inputs are session-level vectors (output of mentat's pool endpoint);
+the Go worker owns reading them from the DB and writing the cluster
+results back into semantic.mnemes.
 
 Distance metric: cosine, computed on L2-normalized vectors as
 1 - normalized_inner_product. HDBSCAN requires precomputed when
@@ -60,7 +61,7 @@ def cluster_embeddings(
     normed = embeddings / norms
     # HDBSCAN's precomputed-metric path is Cython-typed for float64.
     # Force the distance matrix dtype here; embeddings stay float32
-    # to match pgvector's column type (no upstream change required).
+    # (the caller is responsible for dtype; no upstream change required).
     dist = np.clip(1.0 - normed @ normed.T, 0.0, 2.0).astype(np.float64)
 
     labels = hdbscan.HDBSCAN(

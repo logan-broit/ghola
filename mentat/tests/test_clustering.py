@@ -1,9 +1,7 @@
 """Smoke tests for HDBSCAN clustering. The plan calls out one
 synthetic test because HDBSCAN params are easy to get wrong in a way
 that silently degrades — three blobs in feature space MUST land as
-three clusters with all members assigned. The mnemes upsert path is
-exercised by the integration test (test_cluster_endpoint.py) against
-a real postgres."""
+three clusters with all members assigned."""
 from uuid import uuid4
 
 import numpy as np
