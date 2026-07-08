@@ -65,30 +65,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 }
 
-// tick clusters each configured workspace once. Errors on individual
-// workspaces are logged but don't abort the batch — one slow or
-// failing workspace shouldn't block the others. Use a per-call
-// context with a generous timeout: clustering 20k sessions takes
-// tens of seconds, but no individual call should exceed a few minutes.
-func (s *Scheduler) tick(ctx context.Context) {
-	for _, ws := range s.workspaces {
-		callCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		resp, err := s.client.Cluster(callCtx, mentat.ClusterRequest{
-			WorkspaceID:    ws,
-			MinClusterSize: 3,
-		})
-		cancel()
-		if err != nil {
-			s.logger.Warn("semantic.scheduler: cluster failed",
-				"workspace_id", ws.String(),
-				"err", err.Error())
-			continue
-		}
-		s.logger.Info("semantic.scheduler: clustered",
-			"workspace_id", ws.String(),
-			"n_sessions", resp.NSessions,
-			"n_clusters", resp.NClusters,
-			"n_outliers", resp.NOutliers,
-			"upserted_mnemes", resp.UpsertedMnemes)
-	}
+// tick is retired: mentat no longer clusters-by-workspace (it is now a
+// pure math kernel taking caller-supplied embeddings, not a DSN). The
+// consolidation worker owns the reconcile -> cluster -> upsert pipeline.
+// This body is neutered so the tree stays buildable between here and the
+// compose-cleanup task, which removes the Scheduler type entirely.
+func (s *Scheduler) tick(_ context.Context) {
+	s.logger.Info("semantic.scheduler: retired — consolidation worker owns clustering")
 }

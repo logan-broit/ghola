@@ -54,19 +54,20 @@ type HealthResponse struct {
 	EmbeddingDim   int     `json:"embedding_dim"`
 }
 
-// ClusterRequest triggers Stage C HDBSCAN clustering for a workspace.
+// ClusterRequest asks mentat to cluster caller-supplied embeddings.
+// mentat is pure: it neither reads sessions nor writes mnemes. IDs and
+// Embeddings are parallel; the worker owns the mapping back to sessions.
 type ClusterRequest struct {
-	WorkspaceID     uuid.UUID `json:"workspace_id"`
-	MinClusterSize  int       `json:"min_cluster_size,omitempty"`
+	IDs            []string    `json:"ids"`
+	Embeddings     [][]float32 `json:"embeddings"`
+	MinClusterSize int         `json:"min_cluster_size,omitempty"`
 }
 
-// ClusterResponse reports the clustering outcome.
+// ClusterResponse is mentat's clustering verdict. Labels[i] is the
+// HDBSCAN label for IDs[i] (-1 == noise); Outliers is the noise sublist.
 type ClusterResponse struct {
-	WorkspaceID     uuid.UUID `json:"workspace_id"`
-	NSessions       int       `json:"n_sessions"`
-	NClusters       int       `json:"n_clusters"`
-	NOutliers       int       `json:"n_outliers"`
-	UpsertedMnemes  int       `json:"upserted_mnemes"`
+	Labels   []int    `json:"labels"`
+	Outliers []string `json:"outliers"`
 }
 
 // Client is an HTTP client for the mentat service.
@@ -111,9 +112,9 @@ func (c *Client) Predict(ctx context.Context, req PredictRequest) (*PredictRespo
 	return &out, nil
 }
 
-// Cluster calls POST /v1/cluster to run HDBSCAN over the workspace's
-// L1 embeddings and upsert mnemes. Returns counts (sessions seen,
-// clusters found, outliers, mneme rows touched).
+// Cluster calls POST /v1/cluster to run HDBSCAN over caller-supplied
+// embeddings. mentat is a pure math kernel: it returns a label per id
+// (-1 == noise) plus the noise sublist and touches no DB.
 func (c *Client) Cluster(ctx context.Context, req ClusterRequest) (*ClusterResponse, error) {
 	var out ClusterResponse
 	if err := c.do(ctx, "/v1/cluster", req, &out); err != nil {
