@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -250,5 +251,90 @@ func (r *Repository) UpdateSessionL1(
 		return fmt.Errorf("update l1: %w", err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------
+// Consolidation read path — clustering + selection-first enrichment.
+// ---------------------------------------------------------------------
+
+// SessionL1 is one session's clustering input: its id + pooled L1 vector.
+type SessionL1 struct {
+	SessionID uuid.UUID
+	Embedding []float32
+}
+
+// WorkspaceSessionL1s returns every closed session in the workspace with
+// a populated l1_embedding, as parallel (id, vector) rows for clustering.
+// Workspace is scoped via user_id (chapterhouse maps user_id==workspace
+// in the single-tenant dev deployment; see ClosedSessionsMissingL1).
+func (r *Repository) WorkspaceSessionL1s(ctx context.Context, workspaceID uuid.UUID) ([]SessionL1, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, l1_embedding::text
+		FROM episodic.sessions
+		WHERE user_id = $1 AND l1_embedding IS NOT NULL
+		ORDER BY id ASC`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace session l1s: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionL1
+	for rows.Next() {
+		var s SessionL1
+		var lit string
+		if err := rows.Scan(&s.SessionID, &lit); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		emb, err := parseVectorLiteral(lit)
+		if err != nil {
+			return nil, fmt.Errorf("parse vector: %w", err)
+		}
+		s.Embedding = emb
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// EnrichEvent is one event's material for selection-first mnemes.
+type EnrichEvent struct {
+	ID        uuid.UUID
+	Text      string
+	Embedding []float32
+	CreatedAt time.Time
+	Tags      []string
+	Entities  []string
+}
+
+// SessionEnrichmentEvents returns a session's embedded, text-bearing
+// events (created_at ASC, id ASC) with their tags/entities for
+// selection-first mneme enrichment. Embedding-null rows are excluded
+// (no centrality signal). episodic.events.tags/entities are both
+// `text[] NOT NULL DEFAULT '{}'` (see migrations/001_episodic.sql), so
+// this always returns a (possibly empty) slice rather than nil.
+func (r *Repository) SessionEnrichmentEvents(ctx context.Context, sessionID uuid.UUID) ([]EnrichEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, coalesce(text, ''), embedding::text, created_at,
+		       tags, entities
+		FROM episodic.events
+		WHERE session_id = $1 AND embedding IS NOT NULL
+		ORDER BY created_at ASC, id ASC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session enrichment events: %w", err)
+	}
+	defer rows.Close()
+	var out []EnrichEvent
+	for rows.Next() {
+		var e EnrichEvent
+		var lit string
+		if err := rows.Scan(&e.ID, &e.Text, &lit, &e.CreatedAt, &e.Tags, &e.Entities); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		emb, err := parseVectorLiteral(lit)
+		if err != nil {
+			return nil, fmt.Errorf("parse vector: %w", err)
+		}
+		e.Embedding = emb
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
