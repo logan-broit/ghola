@@ -59,6 +59,80 @@ func (r *Repository) QueryMnemesByEmbedding(
 }
 
 // ---------------------------------------------------------------------
+// Consolidation write path — Go overlap-reinforcement port (mnemes.py).
+// ---------------------------------------------------------------------
+
+// Level1Mneme is the read shape the consolidation matcher needs: id +
+// member_ids + confidence for the overlap-reinforcement decision.
+type Level1Mneme struct {
+	ID         uuid.UUID
+	MemberIDs  []uuid.UUID
+	Confidence float64
+}
+
+// WorkspaceLevel1Mnemes returns all active level-1 mnemes for a
+// workspace. The consolidation matcher scans these for the largest
+// member_ids overlap with each new cluster.
+func (r *Repository) WorkspaceLevel1Mnemes(ctx context.Context, workspaceID uuid.UUID) ([]Level1Mneme, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, member_ids, confidence
+		FROM semantic.mnemes
+		WHERE workspace_id = $1 AND level = 1 AND state = 'active'`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace level1 mnemes: %w", err)
+	}
+	defer rows.Close()
+	var out []Level1Mneme
+	for rows.Next() {
+		var m Level1Mneme
+		if err := rows.Scan(&m.ID, &m.MemberIDs, &m.Confidence); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// InsertMneme inserts a fresh level-1 mneme at confidence 0.5 (mirrors
+// the Python cold-insert path). Returns the new id.
+func (r *Repository) InsertMneme(ctx context.Context, workspaceID uuid.UUID, emb []float32, members []uuid.UUID) (uuid.UUID, error) {
+	if len(emb) == 0 {
+		return uuid.Nil, fmt.Errorf("insert mneme: empty embedding")
+	}
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO semantic.mnemes (workspace_id, level, embedding, member_ids, confidence)
+		VALUES ($1, 1, ($2::text)::vector, $3, 0.5)
+		RETURNING id`,
+		workspaceID, vectorLiteralFloat32(emb), members).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert mneme: %w", err)
+	}
+	return id, nil
+}
+
+// ReinforceMneme refreshes an existing mneme's embedding + members,
+// bumps last_reinforced_at, and nudges confidence up (cap 0.99).
+// Mirrors the Python overlap-reinforcement UPDATE.
+func (r *Repository) ReinforceMneme(ctx context.Context, id uuid.UUID, emb []float32, members []uuid.UUID) error {
+	if len(emb) == 0 {
+		return fmt.Errorf("reinforce mneme: empty embedding")
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET embedding = ($2::text)::vector,
+		    member_ids = $3,
+		    last_reinforced_at = now(),
+		    confidence = LEAST(0.99, confidence + 0.05)
+		WHERE id = $1`,
+		id, vectorLiteralFloat32(emb), members)
+	if err != nil {
+		return fmt.Errorf("reinforce mneme: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------
 // L1 write path (PR1.7) — feeds the semantic.Writer + Reconciler.
 // ---------------------------------------------------------------------
 
