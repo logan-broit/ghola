@@ -48,10 +48,13 @@ func TestWorkspaceSessionL1s_ReturnsOnlyPopulated(t *testing.T) {
 }
 
 // TestSessionEnrichmentEvents_ReturnsEmbeddedTextEvents mirrors the seed
-// pattern above: a session with 2 embedded, tagged/entitied events (plus
-// one embedding-null event that must be excluded — no centrality
-// signal). Asserts ordering (created_at ASC, id ASC) and that
-// tags/entities round-trip.
+// pattern above: a session with 2 embedded, tagged/entitied 'user'/
+// 'assistant' events, plus an embedded 'tool_result' event and an
+// embedding-null event that must both be excluded (tool output never
+// surfaces as a user-facing excerpt; a null embedding has no centrality
+// signal). The two included events share an identical created_at to
+// exercise the id ASC tiebreak; asserts ordering and tags/entities
+// round-trip.
 func TestSessionEnrichmentEvents_ReturnsEmbeddedTextEvents(t *testing.T) {
 	pg := testutil.NewEphemeralPostgres(t)
 	t.Setenv("EMBEDDING_DIM", "1024")
@@ -67,19 +70,31 @@ func TestSessionEnrichmentEvents_ReturnsEmbeddedTextEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	lit := "[" + repeatCsv("0.1", 1024) + "]"
-	first := uuid.New()
-	second := uuid.New()
+	// Fixed, ascending UUIDs so the shared created_at resolves by id ASC
+	// deterministically (first < second).
+	first := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	second := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	toolResult := uuid.New()
 	noEmbedding := uuid.New()
 
+	// first and second share an identical created_at -> the id ASC
+	// tiebreak decides their order.
 	_, err = pg.Pool.Exec(ctx, `
 		INSERT INTO episodic.events (id, session_id, user_id, type, text, raw_event, embedding, tags, entities, created_at)
-		VALUES ($1, $2, $3, 'user', 'first message', '{}'::jsonb, ($4::text)::vector, $5, $6, now())`,
+		VALUES ($1, $2, $3, 'user', 'first message', '{}'::jsonb, ($4::text)::vector, $5, $6, '2026-07-01 00:00:00+00')`,
 		first, sessionID, ws, lit, []string{"go", "db"}, []string{"pgvector"})
 	require.NoError(t, err)
 	_, err = pg.Pool.Exec(ctx, `
 		INSERT INTO episodic.events (id, session_id, user_id, type, text, raw_event, embedding, tags, entities, created_at)
-		VALUES ($1, $2, $3, 'assistant', 'second message', '{}'::jsonb, ($4::text)::vector, $5, $6, now() + interval '1 second')`,
+		VALUES ($1, $2, $3, 'assistant', 'second message', '{}'::jsonb, ($4::text)::vector, $5, $6, '2026-07-01 00:00:00+00')`,
 		second, sessionID, ws, lit, []string{"go", "test"}, []string{"hdbscan"})
+	require.NoError(t, err)
+	// Embedded tool_result event must be excluded — a mneme excerpt is
+	// never raw tool output, even when embedded + text-bearing.
+	_, err = pg.Pool.Exec(ctx, `
+		INSERT INTO episodic.events (id, session_id, user_id, type, text, raw_event, embedding, tags, entities, created_at)
+		VALUES ($1, $2, $3, 'tool_result', 'tool output', '{}'::jsonb, ($4::text)::vector, $5, $6, now() + interval '1 second')`,
+		toolResult, sessionID, ws, lit, []string{"go"}, []string{"pgvector"})
 	require.NoError(t, err)
 	// Embedding-null event must be excluded — no centrality signal.
 	_, err = pg.Pool.Exec(ctx, `
@@ -90,8 +105,8 @@ func TestSessionEnrichmentEvents_ReturnsEmbeddedTextEvents(t *testing.T) {
 
 	got, err := repo.SessionEnrichmentEvents(ctx, sessionID)
 	require.NoError(t, err)
-	require.Len(t, got, 2, "embedding-null event excluded")
-	require.Equal(t, first, got[0].ID, "ordered created_at ASC, id ASC")
+	require.Len(t, got, 2, "embedding-null and tool_result events excluded")
+	require.Equal(t, first, got[0].ID, "identical created_at resolves by id ASC")
 	require.Equal(t, second, got[1].ID)
 	require.Equal(t, "first message", got[0].Text)
 	require.ElementsMatch(t, []string{"go", "db"}, got[0].Tags)

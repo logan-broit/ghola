@@ -307,15 +307,19 @@ type EnrichEvent struct {
 // SessionEnrichmentEvents returns a session's embedded, text-bearing
 // events (created_at ASC, id ASC) with their tags/entities for
 // selection-first mneme enrichment. Embedding-null rows are excluded
-// (no centrality signal). episodic.events.tags/entities are both
-// `text[] NOT NULL DEFAULT '{}'` (see migrations/001_episodic.sql), so
-// this always returns a (possibly empty) slice rather than nil.
+// (no centrality signal), and only 'user'/'assistant' events qualify —
+// 'tool_result'/'system' rows are filtered out so a mneme's user-facing
+// representative excerpt is never raw tool output. episodic.events.tags/
+// entities are both `text[] NOT NULL DEFAULT '{}'` (see
+// migrations/001_episodic.sql), so this always returns a (possibly empty)
+// slice rather than nil.
 func (r *Repository) SessionEnrichmentEvents(ctx context.Context, sessionID uuid.UUID) ([]EnrichEvent, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, coalesce(text, ''), embedding::text, created_at,
 		       tags, entities
 		FROM episodic.events
 		WHERE session_id = $1 AND embedding IS NOT NULL
+		  AND type IN ('user', 'assistant')
 		ORDER BY created_at ASC, id ASC`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session enrichment events: %w", err)
