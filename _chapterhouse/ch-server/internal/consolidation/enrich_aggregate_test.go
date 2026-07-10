@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -17,6 +18,16 @@ func TestExcerpt_BoundsTo500(t *testing.T) {
 	require.LessOrEqual(t, len(got), 500)
 	require.Equal(t, strings.Repeat("x", 500), got)
 	require.Equal(t, "short", consolidation.Excerpt("short"))
+}
+
+func TestExcerpt_MultibyteRuneBoundary(t *testing.T) {
+	// "日" is 3 bytes in UTF-8. 200 runes = 600 bytes, and the naive
+	// byte cutpoint at 500 lands mid-rune (rune 166 spans bytes 498-500).
+	long := strings.Repeat("日", 200)
+	got := consolidation.Excerpt(long)
+	require.True(t, utf8.ValidString(got), "excerpt must be valid UTF-8, got %q", got)
+	require.LessOrEqual(t, len(got), 500)
+	require.True(t, strings.HasPrefix(long, got), "excerpt must be a clean prefix of the input")
 }
 
 func TestAggregate_TagsUnionTopN_AndSpan(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -43,7 +44,7 @@ func SelectRepresentatives(cands []Candidate, centroid []float32, k int) []Candi
 			if used[i] {
 				continue
 			}
-			var maxSim float64
+			maxSim := math.Inf(-1)
 			for _, s := range selected {
 				sim := cosine(c.Embedding, s.Embedding)
 				if sim > maxSim {
@@ -108,15 +109,20 @@ type Aggregated struct {
 	SpanEnd   time.Time
 }
 
-// Excerpt bounds text to excerptMax runes-as-bytes (ASCII-safe; the
-// events are chat text). Deliberately a hard byte cap — the mneme
-// carries a COPY, and 500 chars is enough to seed recall without
-// bloating the row.
+// Excerpt bounds text to excerptMax bytes, walking back to the last
+// complete rune boundary at or before the cap so the result is always
+// valid UTF-8 (never splits a multibyte rune). Deliberately a hard byte
+// cap — the mneme carries a COPY, and 500 bytes is enough to seed
+// recall without bloating the row.
 func Excerpt(text string) string {
 	if len(text) <= excerptMax {
 		return text
 	}
-	return text[:excerptMax]
+	cut := excerptMax
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 // Aggregate unions tags/entities across reps (ordered by descending
