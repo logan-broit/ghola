@@ -14,6 +14,7 @@ import (
 // LLMClient is a minimal OpenAI-compatible chat-completions client for
 // per-cluster labels + the workspace digest. Plain net/http, no SDK —
 // matches internal/mentat/client.go. Nil when no URL is configured.
+// Never call methods on a nil client; callers must nil-check per NewLLMClient.
 type LLMClient struct {
 	baseURL string
 	model   string
@@ -36,6 +37,12 @@ func NewLLMClient(baseURL, model, apiKey string) *LLMClient {
 	}
 }
 
+// maxLLMBodyBytes caps the success-path response body we'll decode as
+// JSON — a misbehaving or malicious endpoint shouldn't be able to wedge
+// the nightly job by streaming an unbounded body into memory. The error
+// path already caps at 512B; this is the equivalent guard for 200s.
+const maxLLMBodyBytes = 1 << 20 // 1 MiB
+
 const labelSystem = "You name a cluster of related work sessions with ONE terse line " +
 	"(max 80 chars, no quotes, no trailing punctuation). Reply with only the line."
 
@@ -52,9 +59,7 @@ func (c *LLMClient) Label(ctx context.Context, excerpts []string) (string, error
 		return "", err
 	}
 	line := strings.TrimSpace(strings.SplitN(out, "\n", 2)[0])
-	if len(line) > 80 {
-		line = line[:80]
-	}
+	line = truncateRuneSafe(line, 80)
 	return line, nil
 }
 
@@ -110,7 +115,7 @@ func (c *LLMClient) complete(ctx context.Context, system, user string) (string, 
 		return "", fmt.Errorf("llm %d: %s", resp.StatusCode, string(buf))
 	}
 	var out chatResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLLMBodyBytes)).Decode(&out); err != nil {
 		return "", fmt.Errorf("llm decode: %w", err)
 	}
 	if len(out.Choices) == 0 {

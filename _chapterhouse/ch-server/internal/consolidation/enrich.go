@@ -115,14 +115,23 @@ type Aggregated struct {
 // cap — the mneme carries a COPY, and 500 bytes is enough to seed
 // recall without bloating the row.
 func Excerpt(text string) string {
-	if len(text) <= excerptMax {
-		return text
+	return truncateRuneSafe(text, excerptMax)
+}
+
+// truncateRuneSafe bounds s to at most max bytes, walking back to the last
+// complete rune boundary at or before max so the result is always valid
+// UTF-8 (never splits a multibyte rune). Returns s unchanged when
+// len(s) <= max. Shared by Excerpt and LLMClient.Label — both need the
+// same byte-cap-without-mangling-UTF-8 behavior.
+func truncateRuneSafe(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	cut := excerptMax
-	for cut > 0 && !utf8.RuneStart(text[cut]) {
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return text[:cut]
+	return s[:cut]
 }
 
 // Aggregate unions tags/entities across reps (ordered by descending
