@@ -2,6 +2,8 @@ package consolidation
 
 import (
 	"math"
+	"sort"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -81,4 +83,93 @@ func cosine(a, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+const excerptMax = 500
+
+// Rep is a chosen representative event: identity + bounded excerpt +
+// created_at + its tags/entities. Serialized into the mneme's
+// representatives JSON array.
+type Rep struct {
+	EventID   uuid.UUID `json:"event_id"`
+	SessionID uuid.UUID `json:"session_id"`
+	Excerpt   string    `json:"excerpt"`
+	Score     float64   `json:"score"`
+	CreatedAt time.Time `json:"-"`
+	Tags      []string  `json:"-"`
+	Entities  []string  `json:"-"`
+}
+
+// Aggregated is the per-cluster rollup written onto the mneme.
+type Aggregated struct {
+	Tags      []string
+	Entities  []string
+	SpanStart time.Time
+	SpanEnd   time.Time
+}
+
+// Excerpt bounds text to excerptMax runes-as-bytes (ASCII-safe; the
+// events are chat text). Deliberately a hard byte cap — the mneme
+// carries a COPY, and 500 chars is enough to seed recall without
+// bloating the row.
+func Excerpt(text string) string {
+	if len(text) <= excerptMax {
+		return text
+	}
+	return text[:excerptMax]
+}
+
+// Aggregate unions tags/entities across reps (ordered by descending
+// frequency, ties alphabetical, capped at topN) and computes the
+// span. Empty reps yields zero-value Aggregated (caller guards).
+func Aggregate(reps []Rep, topN int) Aggregated {
+	var agg Aggregated
+	if len(reps) == 0 {
+		return agg
+	}
+	agg.SpanStart = reps[0].CreatedAt
+	agg.SpanEnd = reps[0].CreatedAt
+	for _, r := range reps {
+		if r.CreatedAt.Before(agg.SpanStart) {
+			agg.SpanStart = r.CreatedAt
+		}
+		if r.CreatedAt.After(agg.SpanEnd) {
+			agg.SpanEnd = r.CreatedAt
+		}
+	}
+	agg.Tags = topByFreq(collect(reps, func(r Rep) []string { return r.Tags }), topN)
+	agg.Entities = topByFreq(collect(reps, func(r Rep) []string { return r.Entities }), topN)
+	return agg
+}
+
+func collect(reps []Rep, pick func(Rep) []string) []string {
+	var out []string
+	for _, r := range reps {
+		out = append(out, pick(r)...)
+	}
+	return out
+}
+
+func topByFreq(items []string, topN int) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	freq := map[string]int{}
+	for _, it := range items {
+		freq[it]++
+	}
+	uniq := make([]string, 0, len(freq))
+	for k := range freq {
+		uniq = append(uniq, k)
+	}
+	sort.Slice(uniq, func(i, j int) bool {
+		if freq[uniq[i]] != freq[uniq[j]] {
+			return freq[uniq[i]] > freq[uniq[j]]
+		}
+		return uniq[i] < uniq[j]
+	})
+	if topN > 0 && len(uniq) > topN {
+		uniq = uniq[:topN]
+	}
+	return uniq
 }
