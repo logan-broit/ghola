@@ -342,3 +342,28 @@ func (r *Repository) SessionEnrichmentEvents(ctx context.Context, sessionID uuid
 	return out, rows.Err()
 }
 
+// UpdateMnemeEnrichment writes the selection-first content columns onto
+// an existing mneme. label is optional (nil leaves the column
+// unchanged so the LLM label step can run independently). reps/meta are
+// pre-marshalled JSON bytes; tags/entities are Postgres text[].
+func (r *Repository) UpdateMnemeEnrichment(
+	ctx context.Context, id uuid.UUID, label *string,
+	representatives []byte, tags, entities []string,
+	spanStart, spanEnd time.Time, meta []byte,
+) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET label           = COALESCE($2, label),
+		    representatives = $3::jsonb,
+		    tags            = $4,
+		    entities        = $5,
+		    span_start      = $6,
+		    span_end        = $7,
+		    meta            = $8::jsonb
+		WHERE id = $1`,
+		id, label, representatives, tags, entities, spanStart, spanEnd, meta)
+	if err != nil {
+		return fmt.Errorf("update mneme enrichment: %w", err)
+	}
+	return nil
+}
