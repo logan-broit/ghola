@@ -367,3 +367,43 @@ func (r *Repository) UpdateMnemeEnrichment(
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------
+// Workspace digest — level-2 rollup mneme (consolidation pipeline).
+// ---------------------------------------------------------------------
+
+// ArchivePriorDigest flips any currently-active level-2 digest mneme in
+// the workspace to state='archived'. Idempotent: a workspace with no
+// active digest is a clean no-op (0 rows). The consolidation pipeline
+// calls this immediately before inserting the fresh digest so exactly
+// one active level-2 mneme exists per workspace at a time.
+func (r *Repository) ArchivePriorDigest(ctx context.Context, workspaceID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET state = 'archived'
+		WHERE workspace_id = $1 AND level = 2 AND state = 'active'`, workspaceID)
+	if err != nil {
+		return fmt.Errorf("archive prior digest: %w", err)
+	}
+	return nil
+}
+
+// InsertDigestMneme inserts a fresh level-2 workspace digest mneme. The
+// digest paragraph rides in `label` so recall hydration (Task 18) surfaces
+// it as readable content via COALESCE(label,''); `emb` is that paragraph's
+// text embedding, used for cosine recall. Returns the new id.
+func (r *Repository) InsertDigestMneme(ctx context.Context, workspaceID uuid.UUID, emb []float32, text string) (uuid.UUID, error) {
+	if len(emb) == 0 {
+		return uuid.Nil, fmt.Errorf("insert digest mneme: empty embedding")
+	}
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO semantic.mnemes (workspace_id, level, embedding, label, confidence)
+		VALUES ($1, 2, ($2::text)::vector, $3, 0.5)
+		RETURNING id`,
+		workspaceID, vectorLiteralFloat32(emb), text).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert digest mneme: %w", err)
+	}
+	return id, nil
+}
