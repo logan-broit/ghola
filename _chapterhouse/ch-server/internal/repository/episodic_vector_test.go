@@ -64,9 +64,9 @@ func TestQueryEpisodicEventsByVector_OrdersByCosine(t *testing.T) {
 	// angle, not magnitude — so [1,0,...] vs [1,0,...] cos = 1, vs
 	// [1,1,0,...] cos ≈ 0.707, vs [0,1,0,...] cos = 0.
 	queryVec := []float64{1, 0, 0, 0, 0, 0, 0, 0}
-	embA := []float64{1, 0, 0, 0, 0, 0, 0, 0}    // parallel
-	embB := []float64{0, 1, 0, 0, 0, 0, 0, 0}    // orthogonal
-	embC := []float64{1, 1, 0, 0, 0, 0, 0, 0}    // 45°
+	embA := []float64{1, 0, 0, 0, 0, 0, 0, 0} // parallel
+	embB := []float64{0, 1, 0, 0, 0, 0, 0, 0} // orthogonal
+	embC := []float64{1, 1, 0, 0, 0, 0, 0, 0} // 45°
 
 	type seed struct {
 		id  uuid.UUID

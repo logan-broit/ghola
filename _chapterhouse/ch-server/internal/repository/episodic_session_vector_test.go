@@ -32,8 +32,9 @@ func vectorLiteral8(fill float64) string {
 // session-level pooled embedding.
 //
 // Seeded with two sessions:
-//   sess-near: l1_embedding ≈ query           -> high cosine similarity
-//   sess-far:  l1_embedding orthogonal-ish    -> low cosine similarity
+//
+//	sess-near: l1_embedding ≈ query           -> high cosine similarity
+//	sess-far:  l1_embedding orthogonal-ish    -> low cosine similarity
 //
 // Query at sess-near's vector should return both, with sess-near first.
 func TestQueryEpisodicSessionVector_RanksNearestNeighborFirst(t *testing.T) {

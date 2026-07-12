@@ -390,8 +390,8 @@ func (r *Repository) ArchivePriorDigest(ctx context.Context, workspaceID uuid.UU
 
 // InsertDigestMneme inserts a fresh level-2 workspace digest mneme. The
 // digest paragraph rides in `label` so recall hydration (Task 18) surfaces
-// it as readable content via COALESCE(label,''); `emb` is that paragraph's
-// text embedding, used for cosine recall. Returns the new id.
+// it as readable content via COALESCE(label, empty-string); `emb` is that
+// paragraph's text embedding, used for cosine recall. Returns the new id.
 func (r *Repository) InsertDigestMneme(ctx context.Context, workspaceID uuid.UUID, emb []float32, text string) (uuid.UUID, error) {
 	if len(emb) == 0 {
 		return uuid.Nil, fmt.Errorf("insert digest mneme: empty embedding")

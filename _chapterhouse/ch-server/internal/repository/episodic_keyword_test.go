@@ -18,9 +18,10 @@ import (
 // this test gates that ghola's RRF fan-out can trust the ranked list.
 //
 // Seeded with three events:
-//   ev-A: "we deployed kubernetes pods today" — exact match
-//   ev-B: "tooling around the gitops workflow" — irrelevant
-//   ev-C: "kubernetes is great"               — exact match, less density
+//
+//	ev-A: "we deployed kubernetes pods today" — exact match
+//	ev-B: "tooling around the gitops workflow" — irrelevant
+//	ev-C: "kubernetes is great"               — exact match, less density
 //
 // Query "kubernetes" should return ev-A and ev-C (both match), ranked
 // by ts_rank_cd. ev-B doesn't match the tsquery and is excluded.

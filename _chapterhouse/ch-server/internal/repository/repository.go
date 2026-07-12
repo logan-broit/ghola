@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/repository/sqlc"
 )
 
 // Repository wraps sqlc queries with transaction support.

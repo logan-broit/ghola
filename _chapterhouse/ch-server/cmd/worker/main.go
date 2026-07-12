@@ -165,7 +165,7 @@ func startConsolidation(ctx context.Context, repo *repository.Repository, logger
 		Embedder: embedder,
 		Logger:   logger,
 	}
-	hour := envcfg.Int("CONSOLIDATE_HOUR", 2)
+	hour := consolidation.ClampHour(envcfg.Int("CONSOLIDATE_HOUR", 2), logger)
 
 	logger.Info("consolidation enabled",
 		slog.Int("workspaces", len(workspaces)),
@@ -205,4 +205,3 @@ func runNightlyConsolidation(ctx context.Context, d consolidation.Deps, workspac
 		}
 	}
 }
-

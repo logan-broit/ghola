@@ -2,6 +2,8 @@ package consolidation_test
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -64,4 +66,51 @@ func TestApplyClusters_InsertsThenReinforcesOnlyWhenMembershipChanged(t *testing
 	got, _ = repo.WorkspaceLevel1Mnemes(ctx, ws)
 	require.Len(t, got, 1, "reinforce must not create a duplicate")
 	require.InDelta(t, 0.55, got[0].Confidence, 1e-9)
+}
+
+// TestApplyClusters_SplitDoesNotClobber guards the cluster-split case: one
+// existing mneme owning {a,b,c,d} is re-clustered into {a,b} and {c,d}.
+// Both new assignments overlap the SAME existing mneme, so a matcher that
+// reads a single static snapshot reinforces it twice (last-write-wins),
+// collapsing two clusters into one row. The working-set view must let the
+// second cluster fall through to an insert, yielding two mnemes.
+func TestApplyClusters_SplitDoesNotClobber(t *testing.T) {
+	repo := newSemRepo(t)
+	ctx := context.Background()
+	ws := uuid.New()
+	a, b, c, d := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+
+	// One existing mneme owns all four members.
+	_, err := repo.InsertMneme(ctx, ws, vec1024(0.1), []uuid.UUID{a, b, c, d})
+	require.NoError(t, err)
+
+	// A re-cluster SPLITS it into {a,b} and {c,d}.
+	assigns := []consolidation.ClusterAssignment{
+		{MemberIDs: []uuid.UUID{a, b}, Centroid: vec1024(0.2)},
+		{MemberIDs: []uuid.UUID{c, d}, Centroid: vec1024(0.3)},
+	}
+	_, err = consolidation.ApplyClusters(ctx, repo, ws, assigns)
+	require.NoError(t, err)
+
+	got, err := repo.WorkspaceLevel1Mnemes(ctx, ws)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "a split must yield two mnemes, not clobber one")
+
+	// Memberships partition {a,b,c,d} into exactly {a,b} and {c,d}.
+	sets := make(map[string]bool)
+	for _, m := range got {
+		sets[memberKey(m.MemberIDs)] = true
+	}
+	require.True(t, sets[memberKey([]uuid.UUID{a, b})], "one mneme keeps {a,b}")
+	require.True(t, sets[memberKey([]uuid.UUID{c, d})], "the other holds {c,d}")
+}
+
+// memberKey renders a member set as an order-independent string key.
+func memberKey(ids []uuid.UUID) string {
+	s := make([]string, len(ids))
+	for i, id := range ids {
+		s[i] = id.String()
+	}
+	sort.Strings(s)
+	return strings.Join(s, ",")
 }

@@ -28,3 +28,14 @@ func TestNextRunDelay(t *testing.T) {
 	d2 := consolidation.NextRunDelay(now2, 2)
 	require.InDelta(t, (23 * time.Hour).Seconds(), d2.Seconds(), 1)
 }
+
+func TestClampHour(t *testing.T) {
+	// In-range hours pass through untouched.
+	require.Equal(t, 0, consolidation.ClampHour(0, nil))
+	require.Equal(t, 2, consolidation.ClampHour(2, nil))
+	require.Equal(t, 23, consolidation.ClampHour(23, nil))
+	// Out-of-range clamps (time.Date would otherwise silently normalize).
+	require.Equal(t, 0, consolidation.ClampHour(-1, nil))
+	require.Equal(t, 23, consolidation.ClampHour(24, nil))
+	require.Equal(t, 23, consolidation.ClampHour(99, nil))
+}

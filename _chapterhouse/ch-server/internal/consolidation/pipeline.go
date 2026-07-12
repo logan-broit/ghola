@@ -43,10 +43,14 @@ type Deps struct {
 // are best-effort metadata, never a gate on the free enrichment.
 //
 // Re-run convergence (pool-based, no batch-spanning transaction — see
-// review note): every stage is individually idempotent, so a re-run
-// converges to the same state and a mid-run failure leaves a partial but
-// VALID state the next nightly run reconciles. Reconcile overwrites L1s;
-// ApplyClusters skips unchanged-membership reinforcements; UpdateMneme-
+// review note): each stage converges on re-run, so a mid-run failure leaves
+// a partial but VALID state the next nightly run reconciles. Reconcile
+// overwrites L1s; ApplyClusters is idempotent ACROSS runs (unchanged-
+// membership reinforcements are skipped) AND consistent WITHIN a run — it
+// threads a working in-memory view of the level-1 set through the
+// assignments so a cluster split (one existing mneme overlapping several new
+// assignments) reinforces exactly one row and inserts the rest rather than
+// last-write-wins collapsing them into one; UpdateMneme-
 // Enrichment overwrites content columns; ArchivePriorDigest + Insert-
 // DigestMneme atomically-enough replace the single active digest (a crash
 // between them leaves zero active digests, which the next run repairs).
@@ -123,7 +127,7 @@ func RunWorkspace(ctx context.Context, d Deps, workspaceID uuid.UUID) error {
 
 	// 4. Enrich each active level-1 mneme in this workspace (free path).
 	t3 := time.Now()
-	labels := enrichAll(ctx, d, workspaceID, assigns, repK, tagTopN, log)
+	labels, enrichFailures := enrichAll(ctx, d, workspaceID, assigns, repK, tagTopN, log)
 	tEnrich := time.Since(t3)
 
 	// 5. Label + digest (best-effort; requires an LLM).
@@ -140,6 +144,7 @@ func RunWorkspace(ctx context.Context, d Deps, workspaceID uuid.UUID) error {
 		"workspace_id", workspaceID,
 		"pooled", nPooled, "sessions", len(sessions),
 		"clusters", len(assigns), "written", nWritten,
+		"enrich_failures", enrichFailures,
 		"ms_reconcile", tReconcile.Milliseconds(),
 		"ms_cluster", tCluster.Milliseconds(),
 		"ms_apply", tApply.Milliseconds(),
@@ -266,13 +271,15 @@ func l2Normalize(v []float32) []float32 {
 // per-member most-central event -> MMR representatives -> bounded excerpts
 // + aggregated tags/entities/span + counts meta. When an LLM is
 // configured it also asks for a one-line label (errors swallowed). Returns
-// the ordering material for the digest step. All failures here are logged,
-// never fatal — enrichment is the "free" tier and must not gate the run.
-func enrichAll(ctx context.Context, d Deps, workspaceID uuid.UUID, assigns []ClusterAssignment, repK, tagTopN int, log *slog.Logger) []labeledCluster {
+// the ordering material for the digest step plus a count of per-mneme
+// enrichment-WRITE failures (surfaced on the completion log line for
+// visibility). All failures here are logged, never fatal — enrichment is
+// the "free" tier and must not gate the run.
+func enrichAll(ctx context.Context, d Deps, workspaceID uuid.UUID, assigns []ClusterAssignment, repK, tagTopN int, log *slog.Logger) ([]labeledCluster, int) {
 	active, err := d.Repo.WorkspaceLevel1Mnemes(ctx, workspaceID)
 	if err != nil {
 		log.Warn("consolidation.enrich: read active mnemes failed", "error", err.Error())
-		return nil
+		return nil, 0
 	}
 	confByID := make(map[uuid.UUID]float64, len(active))
 	for _, m := range active {
@@ -280,6 +287,7 @@ func enrichAll(ctx context.Context, d Deps, workspaceID uuid.UUID, assigns []Clu
 	}
 
 	var labeled []labeledCluster
+	writeFailures := 0
 	for _, a := range assigns {
 		mnemeID := BestOverlapMatch(a.MemberIDs, active)
 		if mnemeID == uuid.Nil {
@@ -363,6 +371,7 @@ func enrichAll(ctx context.Context, d Deps, workspaceID uuid.UUID, assigns []Clu
 		if err := d.Repo.UpdateMnemeEnrichment(ctx, mnemeID, labelPtr,
 			repsJSON, agg.Tags, agg.Entities, agg.SpanStart, agg.SpanEnd, metaJSON); err != nil {
 			log.Warn("consolidation.enrich: update enrichment failed", "mneme_id", mnemeID, "error", err.Error())
+			writeFailures++
 			continue
 		}
 
@@ -375,7 +384,7 @@ func enrichAll(ctx context.Context, d Deps, workspaceID uuid.UUID, assigns []Clu
 			})
 		}
 	}
-	return labeled
+	return labeled, writeFailures
 }
 
 // mostCentral returns the event whose embedding is closest (cosine) to the

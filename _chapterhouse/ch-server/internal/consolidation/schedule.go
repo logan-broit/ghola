@@ -1,6 +1,7 @@
 package consolidation
 
 import (
+	"log/slog"
 	"strings"
 	"time"
 
@@ -24,6 +25,28 @@ func ParseWorkspaces(csv string) []uuid.UUID {
 		out = append(out, id)
 	}
 	return out
+}
+
+// ClampHour bounds a configured CONSOLIDATE_HOUR into [0,23]. time.Date
+// (used by NextRunDelay) SILENTLY normalizes an out-of-range hour — 24 rolls
+// to the next day's 00:00, -1 to the previous day's 23:00 — quietly shifting
+// the nightly run to an unintended time. Clamping keeps the scheduled hour
+// explicit and logs the correction. A nil log skips the warning.
+func ClampHour(hour int, log *slog.Logger) int {
+	if hour >= 0 && hour <= 23 {
+		return hour
+	}
+	clamped := hour
+	if clamped < 0 {
+		clamped = 0
+	} else if clamped > 23 {
+		clamped = 23
+	}
+	if log != nil {
+		log.Warn("CONSOLIDATE_HOUR out of range; clamped to [0,23]",
+			slog.Int("given", hour), slog.Int("clamped", clamped))
+	}
+	return clamped
 }
 
 // NextRunDelay returns the duration from now until the next occurrence
