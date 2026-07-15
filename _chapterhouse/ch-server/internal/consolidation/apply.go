@@ -37,6 +37,15 @@ type ClusterAssignment struct {
 // Assignments are applied in a stable order (smallest member UUID first) so
 // which cluster wins the reinforce vs which insert is deterministic,
 // independent of mentat's arbitrary label numbering.
+//
+// Precondition: assigns must be pairwise member-disjoint (as the pipeline's
+// label-partitioning in groupClusters guarantees — each session id maps to
+// at most one non-noise label). This function does not enforce disjointness:
+// overlapping assignments passed in one call can both match the same
+// existing mneme and reinforce it in sequence, so the result silently merges
+// them into one row via reinforce-with-superset semantics (the second
+// reinforcement's MemberIDs simply replace the first's) rather than
+// producing two mnemes.
 func ApplyClusters(ctx context.Context, repo *repository.Repository, workspaceID uuid.UUID, assigns []ClusterAssignment) (int, error) {
 	existing, err := repo.WorkspaceLevel1Mnemes(ctx, workspaceID)
 	if err != nil {
