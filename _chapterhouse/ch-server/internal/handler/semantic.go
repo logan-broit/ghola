@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -157,6 +159,28 @@ func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	OK(w, out)
+
+	// HOLA weak-label stream: bump access_count + last_access for the
+	// mnemes we just returned. Fired AFTER the response is written and on a
+	// detached context (WithoutCancel keeps request-scoped values but drops
+	// cancellation — same discipline as Consolidate, commit d06392c) so a
+	// client disconnect can't abort it and it adds ZERO latency to the
+	// recall response path. Bounded + logged, never surfaced: an access-
+	// tracking failure must not perturb recall.
+	if len(hits) > 0 {
+		ids := make([]uuid.UUID, len(hits))
+		for i, hit := range hits {
+			ids[i] = hit.ID
+		}
+		touchCtx := context.WithoutCancel(r.Context())
+		go func() {
+			bg, cancel := context.WithTimeout(touchCtx, 5*time.Second)
+			defer cancel()
+			if err := h.q.TouchMnemes(bg, ids); err != nil {
+				slog.Warn("semantic: touch mnemes failed", "err", err.Error())
+			}
+		}()
+	}
 }
 
 // ---------------------------------------------------------------------

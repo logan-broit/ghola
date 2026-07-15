@@ -95,6 +95,26 @@ func (r *Repository) QueryMnemesByEmbedding(
 	return out, rows.Err()
 }
 
+// TouchMnemes bumps access_count + last_access for the given mnemes.
+// Fire-and-forget: callers run it in a goroutine off the response path
+// (the HOLA weak-label stream — a returned semantic hit is weak evidence
+// the mneme was useful). Empty ids is a no-op. The UPDATE keys on the
+// primary key, so the write is inherently workspace-correct: the ids come
+// from a workspace-scoped recall and each id belongs to exactly one row.
+func (r *Repository) TouchMnemes(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET access_count = access_count + 1, last_access = now()
+		WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("touch mnemes: %w", err)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------
 // Consolidation write path — Go overlap-reinforcement port (mnemes.py).
 // ---------------------------------------------------------------------
