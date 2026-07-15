@@ -94,12 +94,6 @@ services:
     environment:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
       MENTAT_WEIGHTS_ROOT: /weights
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_USER: ${POSTGRES_USER:-memory_api}
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
-      DATABASE_NAME: ${POSTGRES_DB:-memories}
-      DATABASE_SSL_MODE: disable
     volumes:
       - mentat-weights:/weights
     ports:
@@ -206,8 +200,9 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       MENTAT_URL: ${MENTAT_URL:-http://mentat:8084}
-      MENTAT_CLUSTER_INTERVAL: ${MENTAT_CLUSTER_INTERVAL:-24h}
-      MENTAT_CLUSTER_WORKSPACES: ${MENTAT_CLUSTER_WORKSPACES:-}
+      CONSOLIDATE_LLM_URL: ${CONSOLIDATE_LLM_URL:-}
+      CONSOLIDATE_LLM_MODEL: ${CONSOLIDATE_LLM_MODEL:-local-model}
+      CONSOLIDATE_LLM_API_KEY: ${CONSOLIDATE_LLM_API_KEY:-}
     ports:
       - "${CHAPTERHOUSE_PORT:-8080}:8080"
     healthcheck:
@@ -225,10 +220,24 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      mentat:
+        condition: service_healthy
+      guild:
+        condition: service_healthy
     environment:
       DATABASE_URL: "postgres://${POSTGRES_USER:-memory_api}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-memories}?sslmode=disable"
       WORKER_TICK_SECONDS: "5"
       WORKER_BATCH_SIZE: "2000"
+      MENTAT_URL: ${MENTAT_URL:-http://mentat:8084}
+      EMBEDDING_URL: ${EMBEDDING_URL:-http://guild:8082}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      CONSOLIDATE_WORKSPACES: ${CONSOLIDATE_WORKSPACES:-}
+      CONSOLIDATE_HOUR: ${CONSOLIDATE_HOUR:-2}
+      CONSOLIDATE_LLM_URL: ${CONSOLIDATE_LLM_URL:-}
+      CONSOLIDATE_LLM_MODEL: ${CONSOLIDATE_LLM_MODEL:-local-model}
+      CONSOLIDATE_LLM_API_KEY: ${CONSOLIDATE_LLM_API_KEY:-}
 
   ghola:
     profiles: ["all"]

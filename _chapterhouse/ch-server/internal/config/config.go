@@ -22,14 +22,6 @@ type Config struct {
 	// paths; PR1.7/PR1.8 wiring checks for this before constructing a
 	// client.
 	MentatURL string
-	// MentatClusterInterval is how often the Stage C clustering scheduler
-	// fires. Default 24h matches the design doc; dev runs can dial down
-	// (e.g. 1m) to iterate quickly.
-	MentatClusterInterval time.Duration
-	// MentatClusterWorkspaces is the explicit list of workspace UUIDs to
-	// cluster on each tick. Empty list = scheduler runs but does
-	// nothing — clustering is opt-in per workspace.
-	MentatClusterWorkspaces []string
 	// ConsolidateLLM configures the optional OpenAI-compatible chat
 	// client used by POST /v1/semantic/consolidate for per-cluster
 	// labels + the workspace digest. Empty URL means
@@ -139,10 +131,8 @@ func Load() (*Config, error) {
 			JWKSURL:      envcfg.String("JWKS_URL", ""),
 			JWKSCacheTTL: envcfg.Duration("JWKS_CACHE_TTL", 15*time.Minute),
 		},
-		CORSOrigins:             parseCORSOrigins(envcfg.String("CORS_ORIGINS", "")),
-		MentatURL:               envcfg.String("MENTAT_URL", ""),
-		MentatClusterInterval:   envcfg.Duration("MENTAT_CLUSTER_INTERVAL", 24*time.Hour),
-		MentatClusterWorkspaces: parseCSV(envcfg.String("MENTAT_CLUSTER_WORKSPACES", "")),
+		CORSOrigins: parseCORSOrigins(envcfg.String("CORS_ORIGINS", "")),
+		MentatURL:   envcfg.String("MENTAT_URL", ""),
 		ConsolidateLLM: ConsolidateLLMConfig{
 			URL:    envcfg.String("CONSOLIDATE_LLM_URL", ""),
 			Model:  envcfg.String("CONSOLIDATE_LLM_MODEL", "local-model"),
