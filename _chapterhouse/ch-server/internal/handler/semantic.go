@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -68,6 +69,44 @@ type mnemeHit struct {
 	Score   float64   `json:"score"`
 	Level   int       `json:"level"`
 	Tier    string    `json:"tier"`
+	// Label + Content are the consolidation-era content surface. Both are
+	// omitempty so a content-less mneme (all pre-consolidation rows) emits
+	// exactly the v0.3 shape — the wire stays byte-identical until a mneme
+	// actually carries text. Content is what recall consumes for rerank.
+	Label   string `json:"label,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// semanticContentCap bounds the text a semantic hit carries onto the
+// wire. Defensive: label is a short LLM cluster label (level-1) or a
+// digest paragraph (level-2), and the excerpt is already ≤500 bytes, so
+// this mainly guards an unexpectedly long label. Trims on a rune
+// boundary so a truncated value is never invalid UTF-8.
+const semanticContentCap = 800
+
+// semanticHitContent joins a mneme's label and top excerpt into the
+// readable `content` the recall path reranks against. When both are
+// present they are newline-joined (label first); otherwise whichever is
+// non-empty is used verbatim. A level-2 digest carries its paragraph in
+// label with no excerpt, so it surfaces as the paragraph alone.
+func semanticHitContent(label, excerpt string) string {
+	var content string
+	switch {
+	case label != "" && excerpt != "":
+		content = label + "\n" + excerpt
+	case label != "":
+		content = label
+	default:
+		content = excerpt
+	}
+	if len(content) <= semanticContentCap {
+		return content
+	}
+	b := content[:semanticContentCap]
+	for len(b) > 0 && !utf8.ValidString(b) {
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +152,8 @@ func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
 			Score:   hit.Score,
 			Level:   hit.Level,
 			Tier:    "semantic",
+			Label:   hit.Label,
+			Content: semanticHitContent(hit.Label, hit.TopExcerpt),
 		})
 	}
 	OK(w, out)

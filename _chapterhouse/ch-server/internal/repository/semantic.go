@@ -4,18 +4,47 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
 
-// MnemeHit is one row returned by the v0.3 cosine read path. The
-// pre-v0.3 columns (concept/content/memory_type/...) are gone, so the
-// hit shape is just enough metadata for the caller to fetch member
-// events from episodic if it wants the underlying text.
+// MnemeHit is one row returned by the v0.3 cosine read path. Label +
+// TopExcerpt are the consolidation-era content surface (migration 012):
+// a mneme now carries readable text so the semantic recall tier can
+// contribute to rerank/fusion instead of being an opaque embedding.
+// Both are "" for pre-consolidation rows, which keeps the content-less
+// wire shape byte-identical.
 type MnemeHit struct {
 	ID    uuid.UUID
 	Score float64
 	Level int
+	// Label is the mneme's label (LLM cluster label for level-1, or the
+	// digest paragraph for the level-2 workspace rollup — see
+	// InsertDigestMneme). "" when unlabelled.
+	Label string
+	// TopExcerpt is the first representative's verbatim excerpt, bounded;
+	// "" when the mneme has no representatives (e.g. a level-2 digest,
+	// whose readable content rides entirely in Label).
+	TopExcerpt string
+}
+
+// mnemeExcerptCap defensively bounds the representative excerpt carried
+// on a recall hit. Consolidation already writes excerpts ≤500 bytes
+// (consolidation.Excerpt), so this is belt-and-suspenders against a
+// hand-written or legacy row; it trims on a rune boundary so a truncated
+// value is never invalid UTF-8.
+const mnemeExcerptCap = 500
+
+func boundExcerpt(s string) string {
+	if len(s) <= mnemeExcerptCap {
+		return s
+	}
+	b := s[:mnemeExcerptCap]
+	for len(b) > 0 && !utf8.ValidString(b) {
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 // QueryMnemesByEmbedding runs HNSW cosine over semantic.mnemes and
@@ -35,10 +64,16 @@ func (r *Repository) QueryMnemesByEmbedding(
 		return nil, fmt.Errorf("query mnemes: empty embedding")
 	}
 
+	// Label + the first representative's excerpt are pulled inline so the
+	// caller gets readable content without a second query. The excerpt is
+	// extracted via a jsonb path (`representatives->0->>'excerpt'`) so the
+	// hot read path never decodes the full representatives array in Go.
 	rows, err := r.pool.Query(ctx, `
 		SELECT id,
 		       1 - (embedding <=> ($2::text)::vector) AS score,
-		       level
+		       level,
+		       coalesce(label, ''),
+		       coalesce(representatives->0->>'excerpt', '')
 		FROM semantic.mnemes
 		WHERE workspace_id = $1 AND state = 'active'
 		ORDER BY embedding <=> ($2::text)::vector
@@ -51,9 +86,10 @@ func (r *Repository) QueryMnemesByEmbedding(
 	var out []MnemeHit
 	for rows.Next() {
 		var h MnemeHit
-		if err := rows.Scan(&h.ID, &h.Score, &h.Level); err != nil {
+		if err := rows.Scan(&h.ID, &h.Score, &h.Level, &h.Label, &h.TopExcerpt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
+		h.TopExcerpt = boundExcerpt(h.TopExcerpt)
 		out = append(out, h)
 	}
 	return out, rows.Err()
