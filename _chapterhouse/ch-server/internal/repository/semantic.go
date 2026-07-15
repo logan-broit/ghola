@@ -3,18 +3,67 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
 
-// MnemeHit is one row returned by the v0.3 cosine read path. The
-// pre-v0.3 columns (concept/content/memory_type/...) are gone, so the
-// hit shape is just enough metadata for the caller to fetch member
-// events from episodic if it wants the underlying text.
+// MnemeHit is one row returned by the v0.3 cosine read path. Label +
+// TopExcerpt are the consolidation-era content surface (migration 012):
+// a mneme now carries readable text so the semantic recall tier can
+// contribute to rerank/fusion instead of being an opaque embedding.
+// Both are "" for pre-consolidation rows, which keeps the content-less
+// wire shape byte-identical.
 type MnemeHit struct {
 	ID    uuid.UUID
 	Score float64
 	Level int
+	// Label is the mneme's label (LLM cluster label for level-1, or the
+	// digest paragraph for the level-2 workspace rollup — see
+	// InsertDigestMneme). "" when unlabelled.
+	Label string
+	// TopExcerpt is the first representative's verbatim excerpt, bounded;
+	// "" when the mneme has no representatives (e.g. a level-2 digest,
+	// whose readable content rides entirely in Label).
+	TopExcerpt string
+}
+
+// mnemeExcerptCap defensively bounds the representative excerpt carried
+// on a recall hit. Consolidation already writes excerpts ≤500 bytes
+// (consolidation.Excerpt), so this is belt-and-suspenders against a
+// hand-written or legacy row; it trims on a rune boundary so a truncated
+// value is never invalid UTF-8.
+const mnemeExcerptCap = 500
+
+func boundExcerpt(s string) string {
+	return TruncateRuneSafe(s, mnemeExcerptCap)
+}
+
+// TruncateRuneSafe bounds s to at most max bytes, walking back to the last
+// complete rune boundary at or before max so the result is always valid
+// UTF-8 (never splits a multibyte rune). Returns s unchanged when
+// len(s) <= max.
+//
+// Shared across the module: the consolidation pipeline (Excerpt,
+// LLMClient.Label) and the semantic handler's content-cap both need the
+// same byte-cap-without-mangling-UTF-8 behavior as this package's own
+// boundExcerpt. repository is the common import root — both consolidation
+// and handler already depend on it — so the helper lives here rather than
+// in a new grab-bag util package.
+//
+// Caveat: this assumes s is already valid UTF-8. It only avoids
+// introducing new corruption at the cut point; it does not detect or
+// repair any pre-existing invalid byte sequences in s.
+func TruncateRuneSafe(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // QueryMnemesByEmbedding runs HNSW cosine over semantic.mnemes and
@@ -34,10 +83,16 @@ func (r *Repository) QueryMnemesByEmbedding(
 		return nil, fmt.Errorf("query mnemes: empty embedding")
 	}
 
+	// Label + the first representative's excerpt are pulled inline so the
+	// caller gets readable content without a second query. The excerpt is
+	// extracted via a jsonb path (`representatives->0->>'excerpt'`) so the
+	// hot read path never decodes the full representatives array in Go.
 	rows, err := r.pool.Query(ctx, `
 		SELECT id,
 		       1 - (embedding <=> ($2::text)::vector) AS score,
-		       level
+		       level,
+		       coalesce(label, ''),
+		       coalesce(representatives->0->>'excerpt', '')
 		FROM semantic.mnemes
 		WHERE workspace_id = $1 AND state = 'active'
 		ORDER BY embedding <=> ($2::text)::vector
@@ -50,12 +105,107 @@ func (r *Repository) QueryMnemesByEmbedding(
 	var out []MnemeHit
 	for rows.Next() {
 		var h MnemeHit
-		if err := rows.Scan(&h.ID, &h.Score, &h.Level); err != nil {
+		if err := rows.Scan(&h.ID, &h.Score, &h.Level, &h.Label, &h.TopExcerpt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
+		h.TopExcerpt = boundExcerpt(h.TopExcerpt)
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// TouchMnemes bumps access_count + last_access for the given mnemes.
+// Fire-and-forget: callers run it in a goroutine off the response path
+// (the HOLA weak-label stream — a returned semantic hit is weak evidence
+// the mneme was useful). Empty ids is a no-op. The UPDATE keys on the
+// primary key, so the write is inherently workspace-correct: the ids come
+// from a workspace-scoped recall and each id belongs to exactly one row.
+func (r *Repository) TouchMnemes(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET access_count = access_count + 1, last_access = now()
+		WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("touch mnemes: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------
+// Consolidation write path — Go overlap-reinforcement port (mnemes.py).
+// ---------------------------------------------------------------------
+
+// Level1Mneme is the read shape the consolidation matcher needs: id +
+// member_ids + confidence for the overlap-reinforcement decision.
+type Level1Mneme struct {
+	ID         uuid.UUID
+	MemberIDs  []uuid.UUID
+	Confidence float64
+}
+
+// WorkspaceLevel1Mnemes returns all active level-1 mnemes for a
+// workspace. The consolidation matcher scans these for the largest
+// member_ids overlap with each new cluster.
+func (r *Repository) WorkspaceLevel1Mnemes(ctx context.Context, workspaceID uuid.UUID) ([]Level1Mneme, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, member_ids, confidence
+		FROM semantic.mnemes
+		WHERE workspace_id = $1 AND level = 1 AND state = 'active'`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace level1 mnemes: %w", err)
+	}
+	defer rows.Close()
+	var out []Level1Mneme
+	for rows.Next() {
+		var m Level1Mneme
+		if err := rows.Scan(&m.ID, &m.MemberIDs, &m.Confidence); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// InsertMneme inserts a fresh level-1 mneme at confidence 0.5 (mirrors
+// the Python cold-insert path). Returns the new id.
+func (r *Repository) InsertMneme(ctx context.Context, workspaceID uuid.UUID, emb []float32, members []uuid.UUID) (uuid.UUID, error) {
+	if len(emb) == 0 {
+		return uuid.Nil, fmt.Errorf("insert mneme: empty embedding")
+	}
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO semantic.mnemes (workspace_id, level, embedding, member_ids, confidence)
+		VALUES ($1, 1, ($2::text)::vector, $3, 0.5)
+		RETURNING id`,
+		workspaceID, vectorLiteralFloat32(emb), members).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert mneme: %w", err)
+	}
+	return id, nil
+}
+
+// ReinforceMneme refreshes an existing mneme's embedding + members,
+// bumps last_reinforced_at, and nudges confidence up (cap 0.99).
+// Mirrors the Python overlap-reinforcement UPDATE.
+func (r *Repository) ReinforceMneme(ctx context.Context, id uuid.UUID, emb []float32, members []uuid.UUID) error {
+	if len(emb) == 0 {
+		return fmt.Errorf("reinforce mneme: empty embedding")
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET embedding = ($2::text)::vector,
+		    member_ids = $3,
+		    last_reinforced_at = now(),
+		    confidence = LEAST(0.99, confidence + 0.05)
+		WHERE id = $1`,
+		id, vectorLiteralFloat32(emb), members)
+	if err != nil {
+		return fmt.Errorf("reinforce mneme: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------
@@ -178,3 +328,157 @@ func (r *Repository) UpdateSessionL1(
 	return nil
 }
 
+// ---------------------------------------------------------------------
+// Consolidation read path — clustering + selection-first enrichment.
+// ---------------------------------------------------------------------
+
+// SessionL1 is one session's clustering input: its id + pooled L1 vector.
+type SessionL1 struct {
+	SessionID uuid.UUID
+	Embedding []float32
+}
+
+// WorkspaceSessionL1s returns every closed session in the workspace with
+// a populated l1_embedding, as parallel (id, vector) rows for clustering.
+// Workspace is scoped via user_id (chapterhouse maps user_id==workspace
+// in the single-tenant dev deployment; see ClosedSessionsMissingL1).
+func (r *Repository) WorkspaceSessionL1s(ctx context.Context, workspaceID uuid.UUID) ([]SessionL1, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, l1_embedding::text
+		FROM episodic.sessions
+		WHERE user_id = $1 AND l1_embedding IS NOT NULL
+		ORDER BY id ASC`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("workspace session l1s: %w", err)
+	}
+	defer rows.Close()
+	var out []SessionL1
+	for rows.Next() {
+		var s SessionL1
+		var lit string
+		if err := rows.Scan(&s.SessionID, &lit); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		emb, err := parseVectorLiteral(lit)
+		if err != nil {
+			return nil, fmt.Errorf("parse vector: %w", err)
+		}
+		s.Embedding = emb
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// EnrichEvent is one event's material for selection-first mnemes.
+type EnrichEvent struct {
+	ID        uuid.UUID
+	Text      string
+	Embedding []float32
+	CreatedAt time.Time
+	Tags      []string
+	Entities  []string
+}
+
+// SessionEnrichmentEvents returns a session's embedded, text-bearing
+// events (created_at ASC, id ASC) with their tags/entities for
+// selection-first mneme enrichment. Embedding-null rows are excluded
+// (no centrality signal), and only 'user'/'assistant' events qualify —
+// 'tool_result'/'system' rows are filtered out so a mneme's user-facing
+// representative excerpt is never raw tool output. episodic.events.tags/
+// entities are both `text[] NOT NULL DEFAULT '{}'` (see
+// migrations/001_episodic.sql), so this always returns a (possibly empty)
+// slice rather than nil.
+func (r *Repository) SessionEnrichmentEvents(ctx context.Context, sessionID uuid.UUID) ([]EnrichEvent, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, coalesce(text, ''), embedding::text, created_at,
+		       tags, entities
+		FROM episodic.events
+		WHERE session_id = $1 AND embedding IS NOT NULL
+		  AND type IN ('user', 'assistant')
+		ORDER BY created_at ASC, id ASC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session enrichment events: %w", err)
+	}
+	defer rows.Close()
+	var out []EnrichEvent
+	for rows.Next() {
+		var e EnrichEvent
+		var lit string
+		if err := rows.Scan(&e.ID, &e.Text, &lit, &e.CreatedAt, &e.Tags, &e.Entities); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		emb, err := parseVectorLiteral(lit)
+		if err != nil {
+			return nil, fmt.Errorf("parse vector: %w", err)
+		}
+		e.Embedding = emb
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// UpdateMnemeEnrichment writes the selection-first content columns onto
+// an existing mneme. label is optional (nil leaves the column
+// unchanged so the LLM label step can run independently). reps/meta are
+// pre-marshalled JSON bytes; tags/entities are Postgres text[].
+func (r *Repository) UpdateMnemeEnrichment(
+	ctx context.Context, id uuid.UUID, label *string,
+	representatives []byte, tags, entities []string,
+	spanStart, spanEnd time.Time, meta []byte,
+) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET label           = COALESCE($2, label),
+		    representatives = $3::jsonb,
+		    tags            = $4,
+		    entities        = $5,
+		    span_start      = $6,
+		    span_end        = $7,
+		    meta            = $8::jsonb
+		WHERE id = $1`,
+		id, label, representatives, tags, entities, spanStart, spanEnd, meta)
+	if err != nil {
+		return fmt.Errorf("update mneme enrichment: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------
+// Workspace digest — level-2 rollup mneme (consolidation pipeline).
+// ---------------------------------------------------------------------
+
+// ArchivePriorDigest flips any currently-active level-2 digest mneme in
+// the workspace to state='archived'. Idempotent: a workspace with no
+// active digest is a clean no-op (0 rows). The consolidation pipeline
+// calls this immediately before inserting the fresh digest so exactly
+// one active level-2 mneme exists per workspace at a time.
+func (r *Repository) ArchivePriorDigest(ctx context.Context, workspaceID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE semantic.mnemes
+		SET state = 'archived'
+		WHERE workspace_id = $1 AND level = 2 AND state = 'active'`, workspaceID)
+	if err != nil {
+		return fmt.Errorf("archive prior digest: %w", err)
+	}
+	return nil
+}
+
+// InsertDigestMneme inserts a fresh level-2 workspace digest mneme. The
+// digest paragraph rides in `label` so recall hydration (Task 18) surfaces
+// it as readable content via COALESCE(label, empty-string); `emb` is that
+// paragraph's text embedding, used for cosine recall. Returns the new id.
+func (r *Repository) InsertDigestMneme(ctx context.Context, workspaceID uuid.UUID, emb []float32, text string) (uuid.UUID, error) {
+	if len(emb) == 0 {
+		return uuid.Nil, fmt.Errorf("insert digest mneme: empty embedding")
+	}
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO semantic.mnemes (workspace_id, level, embedding, label, confidence)
+		VALUES ($1, 2, ($2::text)::vector, $3, 0.5)
+		RETURNING id`,
+		workspaceID, vectorLiteralFloat32(emb), text).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert digest mneme: %w", err)
+	}
+	return id, nil
+}

@@ -35,22 +35,26 @@ class HealthResponse(BaseModel):
 
 
 class ClusterRequest(BaseModel):
-    """Request for /v1/cluster.
+    """Pure-math cluster request.
 
-    workspace_id scopes which sessions feed clustering — mentat reads
-    every closed session in the workspace whose l1_embedding is set,
-    runs HDBSCAN, and upserts mnemes for that workspace alone.
-    min_cluster_size is the HDBSCAN parameter; default 3 keeps
-    spurious 2-session pairs out.
+    ids and embeddings are parallel lists (same length). The caller
+    supplies the UUID strings and their corresponding embedding vectors;
+    mentat clusters them under cosine HDBSCAN and returns the label
+    assignments. No DB, no workspace scoping — the Go worker owns all
+    reads and writes.
     """
 
-    workspace_id: UUID
+    ids: list[str]
+    embeddings: list[list[float]]
     min_cluster_size: int = 3
 
 
 class ClusterResponse(BaseModel):
-    workspace_id: UUID
-    n_sessions: int
-    n_clusters: int
-    n_outliers: int
-    upserted_mnemes: int
+    """Pure-math cluster response.
+
+    labels[i] is the HDBSCAN cluster label for ids[i]; -1 marks noise.
+    outliers is the sublist of ids whose label is -1.
+    """
+
+    labels: list[int]
+    outliers: list[str]

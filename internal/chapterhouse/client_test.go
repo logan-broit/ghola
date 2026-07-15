@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -589,6 +591,71 @@ func TestClient_QuerySemantic(t *testing.T) {
 	assert.Equal(t, "", hits[0].Content, "Content must be empty post-v0.3 (field dropped)")
 }
 
+// TestQuerySemantic_HydratesContent pins the Task 19 read path: when
+// chapterhouse emits the consolidation-era `content` field on a semantic
+// hit, QuerySemantic must map it onto RecallHit.Content so the reranker
+// scores real text instead of skipping the mneme.
+func TestQuerySemantic_HydratesContent(t *testing.T) {
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/semantic/query": func(w http.ResponseWriter, r *http.Request) {
+			assertAuthHeader(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"hits":[
+				{"mneme_id":"m1","score":0.92,"level":1,"tier":"semantic","label":"LABEL","content":"LABEL\nexcerpt"}
+			]}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	hits, err := c.QuerySemantic(context.Background(), core.SemanticQuery{
+		Workspace: "ws", QueryText: "k8s",
+		QueryEmbedding: []float32{0.1}, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "m1", hits[0].ID)
+	assert.Equal(t, "semantic", hits[0].Tier)
+	assert.InDelta(t, 0.92, hits[0].Score, 1e-9)
+	assert.Equal(t, "LABEL\nexcerpt", hits[0].Content, "content maps onto RecallHit.Content")
+}
+
+// TestQuerySemantic_BoundsOversizedMultibyteContent drives an over-cap
+// multibyte `content` field through the real fake-server response path
+// (not a unit call on boundContent in isolation) and pins that the
+// resulting RecallHit.Content is bounded at semanticContentCap (800
+// bytes) and never invalid UTF-8. "世" is 3 bytes, so 400 runes (1200
+// bytes) both exceeds the cap and does not land on a byte boundary at
+// 800 — a naive s[:800] would split a multibyte rune.
+func TestQuerySemantic_BoundsOversizedMultibyteContent(t *testing.T) {
+	long := strings.Repeat("世", 400)
+	body, err := json.Marshal(map[string]any{
+		"hits": []map[string]any{
+			{"mneme_id": "m1", "score": 0.92, "level": 1, "tier": "semantic", "content": long},
+		},
+	})
+	require.NoError(t, err)
+
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/semantic/query": func(w http.ResponseWriter, r *http.Request) {
+			assertAuthHeader(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		},
+	})
+	c := newClient(t, srv)
+
+	hits, err := c.QuerySemantic(context.Background(), core.SemanticQuery{
+		Workspace: "ws", QueryText: "k8s",
+		QueryEmbedding: []float32{0.1}, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.True(t, utf8.ValidString(hits[0].Content),
+		"bounded content must be valid UTF-8, got %q", hits[0].Content)
+	assert.LessOrEqual(t, len(hits[0].Content), 800)
+	assert.NotEmpty(t, hits[0].Content)
+}
+
 // ---------------------------------------------------------------------
 // error path: non-2xx surfaces the status + body
 // ---------------------------------------------------------------------
@@ -657,6 +724,53 @@ func TestAddSessionWorkspace_Surface409(t *testing.T) {
 	require.ErrorAs(t, err, &statusErr,
 		"caller-facing 409 must be a typed StatusError so the ghola HTTP layer can pass it through")
 	assert.Equal(t, http.StatusConflict, statusErr.StatusCode())
+}
+
+// ---------------------------------------------------------------------
+// semantic: manual consolidation trigger
+// ---------------------------------------------------------------------
+
+// TestClient_ConsolidateWorkspace_Happy pins the wire contract for the
+// manual consolidation trigger: POST /v1/semantic/consolidate with a
+// {"workspace": ...} body, Bearer-authed, no response body expected.
+func TestClient_ConsolidateWorkspace_Happy(t *testing.T) {
+	var gotBody map[string]any
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/semantic/consolidate": func(w http.ResponseWriter, r *http.Request) {
+			assertAuthHeader(t, r)
+			b, _ := io.ReadAll(r.Body)
+			require.NoError(t, json.Unmarshal(b, &gotBody))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	err := c.ConsolidateWorkspace(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.NotNil(t, gotBody)
+	assert.Equal(t, "ws-1", gotBody["workspace"])
+}
+
+// TestClient_ConsolidateWorkspace_SurfacesStatusError pins that a 4xx
+// from chapterhouse (e.g. malformed workspace) surfaces as a typed
+// *StatusError, mirroring every other client method's error contract —
+// the ghola HTTP layer needs the wire status to propagate it verbatim.
+func TestClient_ConsolidateWorkspace_SurfacesStatusError(t *testing.T) {
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/semantic/consolidate": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":"BAD_REQUEST","message":"workspace is required"}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	err := c.ConsolidateWorkspace(context.Background(), "")
+	require.Error(t, err)
+	var se *chapterhouse.StatusError
+	require.True(t, errors.As(err, &se), "client error should be *StatusError")
+	assert.Equal(t, http.StatusBadRequest, se.StatusCode())
+	assert.Contains(t, se.Message, "workspace is required")
 }
 
 // 4xx must surface as a *StatusError carrying the wire status, so the

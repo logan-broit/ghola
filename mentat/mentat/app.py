@@ -2,13 +2,11 @@ import logging
 from uuid import UUID
 
 import numpy as np
-import psycopg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .clustering import cluster_embeddings
 from .config import settings
-from .mnemes import upsert_mnemes_from_cluster
 from .pooler import type_weighted_mean_pool
 from .predictor import identity_predict
 from .schemas import (
@@ -84,70 +82,21 @@ def predict(req: PredictRequest) -> PredictResponse:
 
 @app.post("/v1/cluster", response_model=ClusterResponse)
 def cluster(req: ClusterRequest) -> ClusterResponse:
-    """Cluster the workspace's L1 embeddings and upsert mnemes.
+    """Cluster caller-supplied embeddings under cosine HDBSCAN.
 
-    Pulls every session in workspace_id whose l1_embedding is set,
-    runs HDBSCAN under cosine, and upserts one mneme row per
-    non-noise cluster (reinforcement-aware: overlapping member_ids
-    update an existing mneme rather than inserting).
+    Pure: no DB, no workspace scoping. labels[i] is the cluster label for
+    ids[i] (-1 == noise); outliers is the noise sublist. Mismatched
+    ids/embeddings lengths raise ValueError -> 400 via the app handler.
     """
-    if not settings.database_dsn:
-        raise HTTPException(
-            status_code=503,
-            detail="MENTAT_DATABASE_DSN unset (or DATABASE_* env block missing)",
+    if len(req.ids) != len(req.embeddings):
+        raise ValueError(
+            f"ids ({len(req.ids)}) and embeddings ({len(req.embeddings)}) must match"
         )
+    if not req.ids:
+        return ClusterResponse(labels=[], outliers=[])
 
-    # Read L1 embeddings + ids for the workspace. pgvector's psycopg
-    # adapter would normally handle vector decoding, but for a one-
-    # shot read using the text representation keeps the cluster
-    # endpoint self-contained without registering type adapters.
-    with psycopg.connect(settings.database_dsn) as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, l1_embedding::text
-            FROM episodic.sessions
-            WHERE l1_embedding IS NOT NULL
-            """
-        )
-        rows = cur.fetchall()
-
-    # Workspace scoping: chapterhouse session rows don't carry a
-    # workspace_id directly; the workspace is implicit via the user-
-    # id boundary the caller manages. For v1a we cluster all sessions
-    # with l1_embedding (a single workspace per deployment is the
-    # current dev assumption). When multi-workspace lands, this query
-    # gains a workspace filter via a sessions.workspace_id column or
-    # an explicit join.
-    _ = req.workspace_id
-
-    if not rows:
-        return ClusterResponse(
-            workspace_id=req.workspace_id,
-            n_sessions=0,
-            n_clusters=0,
-            n_outliers=0,
-            upserted_mnemes=0,
-        )
-
-    ids: list[UUID] = []
-    vecs: list[list[float]] = []
-    for row_id, vec_text in rows:
-        ids.append(row_id)
-        # vec_text is the postgres text rep "[0.1,0.2,...]"
-        v = vec_text.strip("[]").split(",")
-        vecs.append([float(x) for x in v])
-
-    embeddings = np.asarray(vecs, dtype=np.float32)
-    result = cluster_embeddings(embeddings, ids, min_cluster_size=req.min_cluster_size)
-
-    upserted = upsert_mnemes_from_cluster(
-        settings.database_dsn, req.workspace_id, result,
-    )
-    n_outliers = sum(1 for lbl in result.labels if lbl == -1)
-    return ClusterResponse(
-        workspace_id=req.workspace_id,
-        n_sessions=len(ids),
-        n_clusters=result.n_clusters,
-        n_outliers=n_outliers,
-        upserted_mnemes=upserted,
-    )
+    uuids = [UUID(i) for i in req.ids]
+    embeddings = np.asarray(req.embeddings, dtype=np.float32)
+    result = cluster_embeddings(embeddings, uuids, min_cluster_size=req.min_cluster_size)
+    outliers = [req.ids[i] for i, lbl in enumerate(result.labels) if lbl == -1]
+    return ClusterResponse(labels=result.labels, outliers=outliers)

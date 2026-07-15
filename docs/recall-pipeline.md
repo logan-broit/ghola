@@ -14,6 +14,15 @@ truthsayer cross-encoder and blends with score fusion.
 | `semantic` | chapterhouse `/v1/semantic/query` | mneme prototypes from mentat's HDBSCAN | clustered patterns across sessions |
 | `session_vector` | chapterhouse `/v1/episodic/query_session_vector` | sessions scored by per-session pooled embedding (`l1_embedding`) | the topic signal — catches paraphrase queries where event-level embedding misses but session-level hits |
 
+Semantic hits now carry content: a level-1 mneme surfaces its LLM
+label plus its top representative excerpt (bounded, newline-joined),
+and a level-2 workspace digest surfaces its paragraph in the same
+field. Returned semantic hits are also access-tracked — chapterhouse
+bumps `access_count`/`last_access` on each hit after the response is
+written, fire-and-forget, so it costs the recall path no latency. See
+[consolidation.md](consolidation.md) for where the content and labels
+come from.
+
 Every tier is workspace-scoped. `core.Recall` takes a `workspace_id`
 on the input; when it is omitted the workspace is derived from `cwd`
 (the same mapping `record` uses), so MCP agents can recall with the

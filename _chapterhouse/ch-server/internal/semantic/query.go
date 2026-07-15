@@ -75,3 +75,11 @@ func (q *Querier) Recall(ctx context.Context, req RecallRequest) ([]repository.M
 	}
 	return q.repo.QueryMnemesByEmbedding(ctx, req.WorkspaceID, pooled.Embedding, req.Limit)
 }
+
+// TouchMnemes is a thin passthrough to repository.TouchMnemes so the HTTP
+// handler can fire the HOLA weak-label access bump without holding a
+// direct repo reference. Fire-and-forget: the handler runs this in a
+// goroutine off the response path so it adds no recall latency.
+func (q *Querier) TouchMnemes(ctx context.Context, ids []uuid.UUID) error {
+	return q.repo.TouchMnemes(ctx, ids)
+}

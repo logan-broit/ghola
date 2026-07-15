@@ -1,4 +1,4 @@
-// Package mcp registers the 12 canonical Core operations as MCP
+// Package mcp registers the agent-facing subset of Core operations as MCP
 // tools for Claude Code (and any other MCP client) to call over
 // stdio. The server is a thin stdio<->HTTP bridge: each tool
 // translates the MCP request into a POST against the already-running
@@ -37,15 +37,11 @@ type ToolSink interface {
 	AddTool(tool mcppkg.Tool, handler server.ToolHandlerFunc)
 }
 
-// Register installs the 12 canonical operations as MCP tools on the
-// given sink. Each tool is a passthrough: MCP args -> JSON body
+// Register installs the agent-facing tool catalog (see tools) as MCP tools
+// on the given sink. Each tool is a passthrough: MCP args -> JSON body
 // -> POST to cfg.BaseURL + /v1/<op> -> body back to MCP as text.
 func Register(s ToolSink, cfg Config) {
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
-	}
-	h := &handler{cfg: cfg}
-
+	h := newHandler(cfg)
 	for _, t := range tools() {
 		s.AddTool(t.Tool, h.proxy(t.Path))
 	}
@@ -64,13 +60,22 @@ type toolSpec struct {
 	Path string // "/v1/<op>"
 }
 
-// tools is the agent-facing MCP surface: five tools the model uses
+// tools is the agent-facing MCP surface: six tools the model uses
 // turn-to-turn. The lifecycle / admin operations (session_start,
 // session_end, list_sessions, branch, expand_session_workspace,
 // share, consolidate) stay reachable over HTTP at /v1/* for hosts
 // that drive memory programmatically (pi-mono and friends) — they're
 // just hidden from the model's tool catalog so it doesn't have to
 // reason about session boundaries it has no good signal for.
+//
+// consolidate_workspace is the one exception to "consolidation stays
+// hidden": unlike the session-scoped `consolidate` op (sietch->episodic
+// flush, a bookkeeping detail the model has no good signal for), the
+// episodic->semantic batch is something the model itself decides to
+// trigger — typically right before its own context is about to be
+// cleared or compacted, so the semantic tier has fresh content when
+// the conversation resumes. That's a judgment call only the agent can
+// make, so it belongs in the model-facing catalog.
 //
 // `record` accepts an optional cwd; when session_id is omitted, core
 // uses cwd to derive the workspace and either reuses the most-recent
@@ -211,6 +216,27 @@ func tools() []toolSpec {
 			),
 			Path: "/v1/forget",
 		},
+		{
+			Tool: mcppkg.NewTool("consolidate_workspace",
+				mcppkg.WithDescription(
+					"Trigger chapterhouse's episodic->semantic consolidation batch "+
+						"for a workspace (cluster closed sessions, enrich with "+
+						"representative excerpts, optionally label/digest). Call this "+
+						"right before your own context is about to be cleared or "+
+						"compacted, so the semantic tier has fresh, readable content "+
+						"for recall to surface once the conversation resumes. "+
+						"Synchronous — the call blocks until the batch completes. "+
+						"Distinct from the hidden `consolidate` op, which flushes one "+
+						"session's pending working-memory events to episodic storage; "+
+						"this triggers the separate episodic->semantic clustering "+
+						"pipeline the nightly worker also runs."),
+				mcppkg.WithString("workspace",
+					mcppkg.Description("Workspace id (uuid). Optional when cwd is provided — the workspace is derived from cwd.")),
+				mcppkg.WithString("cwd",
+					mcppkg.Description("Current project directory. The workspace is derived from it when workspace is omitted — same mapping record/recall use.")),
+			),
+			Path: "/v1/semantic/consolidate",
+		},
 	}
 }
 
@@ -218,8 +244,56 @@ func tools() []toolSpec {
 // Handler plumbing
 // ---------------------------------------------------------------------
 
+const (
+	// consolidateWorkspacePath is the one proxied route whose upstream work
+	// (the full episodic->semantic batch) legitimately runs for minutes.
+	consolidateWorkspacePath = "/v1/semantic/consolidate"
+	// defaultProxyTimeout bounds a normal proxied call to the ghola daemon.
+	defaultProxyTimeout = 30 * time.Second
+	// consolidateProxyTimeout bounds the consolidate_workspace hop, whose
+	// upstream runs the full batch (tens of seconds to minutes). It overrides
+	// the shared default for this route only.
+	consolidateProxyTimeout = 10 * time.Minute
+)
+
+// proxyTimeout returns the per-request deadline for a proxied path. The
+// consolidate route runs for minutes upstream; everything else uses the
+// default. proxy() layers this on the request context.
+func proxyTimeout(path string) time.Duration {
+	if path == consolidateWorkspacePath {
+		return consolidateProxyTimeout
+	}
+	return defaultProxyTimeout
+}
+
 type handler struct {
-	cfg Config
+	cfg      Config
+	longHTTP *http.Client
+}
+
+// newHandler builds the proxy handler. It derives a second, uncapped http
+// client for long-running routes: the shared cfg.HTTPClient carries a 30s
+// Timeout that would clip the consolidate call before its 10m context
+// deadline fires, so those routes use a client with no Timeout cap and rely
+// on the context deadline alone (proxyTimeout).
+func newHandler(cfg Config) *handler {
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: defaultProxyTimeout}
+	}
+	return &handler{
+		cfg:      cfg,
+		longHTTP: &http.Client{Transport: cfg.HTTPClient.Transport},
+	}
+}
+
+// clientForPath picks the http client whose Timeout won't clip the request
+// before its context deadline: long-running routes (consolidate) get the
+// uncapped client so proxyTimeout's deadline is the only bound.
+func (h *handler) clientForPath(path string) *http.Client {
+	if path == consolidateWorkspacePath {
+		return h.longHTTP
+	}
+	return h.cfg.HTTPClient
 }
 
 // proxy builds a ToolHandlerFunc that marshals the MCP arguments map
@@ -227,6 +301,12 @@ type handler struct {
 // back to the caller as a text content part.
 func (h *handler) proxy(path string) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcppkg.CallToolRequest) (*mcppkg.CallToolResult, error) {
+		// Per-route deadline: the consolidate hop runs for minutes upstream;
+		// everything else uses the default. Layered on ctx so a caller
+		// deadline still wins.
+		ctx, cancel := context.WithTimeout(ctx, proxyTimeout(path))
+		defer cancel()
+
 		args := req.GetArguments()
 		if args == nil {
 			args = map[string]any{}
@@ -243,7 +323,7 @@ func (h *handler) proxy(path string) server.ToolHandlerFunc {
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 
-		resp, err := h.cfg.HTTPClient.Do(httpReq)
+		resp, err := h.clientForPath(path).Do(httpReq)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}

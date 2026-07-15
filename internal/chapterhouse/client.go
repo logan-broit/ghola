@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -46,6 +47,29 @@ type Client struct {
 	http    *http.Client
 }
 
+const (
+	// defaultRequestTimeout bounds a normal chapterhouse call end-to-end.
+	// Applied per-request via context in do() (not as a fixed
+	// http.Client.Timeout) so a single route can be lifted without a
+	// separate client.
+	defaultRequestTimeout = 30 * time.Second
+	// consolidateTimeout bounds the manual consolidation trigger, which is
+	// synchronous and blocks for the full episodic->semantic batch (tens of
+	// seconds to minutes) — far past the default. See ConsolidateWorkspace.
+	consolidateTimeout = 10 * time.Minute
+)
+
+// requestTimeout returns the per-request deadline for a chapterhouse path.
+// The consolidate route legitimately runs for minutes; everything else uses
+// the default. do() consults this single knob, so lifting a route is a
+// one-line change here rather than a bespoke client per method.
+func requestTimeout(path string) time.Duration {
+	if path == "/v1/semantic/consolidate" {
+		return consolidateTimeout
+	}
+	return defaultRequestTimeout
+}
+
 // New builds a Client. `baseURL` is chapterhouse's root URL
 // (e.g. "http://localhost:8080" or
 // "https://chapterhouse.example.com"). apiKey is the per-user
@@ -54,9 +78,11 @@ func New(baseURL, apiKey string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		// No client-level Timeout: per-request deadlines are applied in do()
+		// via requestTimeout(path). A fixed http.Client.Timeout would clip
+		// every request uniformly and cap the long-running consolidate call
+		// below its legitimate multi-minute duration.
+		http: &http.Client{},
 	}
 }
 
@@ -68,6 +94,14 @@ func (c *Client) WithHTTPClient(h *http.Client) *Client {
 }
 
 func (c *Client) do(ctx context.Context, path string, body, out any) error {
+	// Per-request deadline: bounds normal calls at defaultRequestTimeout and
+	// lifts the long-running consolidate call to consolidateTimeout. Layered
+	// on ctx (WithTimeout takes the min) so an earlier caller deadline still
+	// wins. Replaces the former fixed 30s http.Client.Timeout, which would
+	// have aborted consolidate mid-batch.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(path))
+	defer cancel()
+
 	buf := new(bytes.Buffer)
 	if body != nil {
 		if err := json.NewEncoder(buf).Encode(body); err != nil {
@@ -291,22 +325,32 @@ type semanticQueryReq struct {
 	Limit          int       `json:"limit"`
 }
 
+// consolidateWorkspaceReq is the wire shape for the manual
+// consolidation trigger, mirroring chapterhouse's consolidateRequest
+// (_chapterhouse/ch-server/internal/handler/semantic.go).
+type consolidateWorkspaceReq struct {
+	Workspace string `json:"workspace"`
+}
+
 type semanticHitsResp struct {
 	Hits []semanticHitRow `json:"hits"`
 }
 
-// semanticHitRow mirrors the v0.3 chapterhouse mnemeHit shape (see
-// _chapterhouse/ch-server/internal/handler/semantic.go: mnemeHit). The
-// v0.2 fields content_match, activation, hebbian_boost, confidence,
-// concept, and content were dropped along with the schema columns
-// they projected; PR7's dogfooding-tags work will reintroduce a
-// content-bearing surface. Keep the struct narrow so the JSON decoder
-// can't silently zero-fill fields the server no longer emits.
+// semanticHitRow mirrors the chapterhouse mnemeHit shape (see
+// _chapterhouse/ch-server/internal/handler/semantic.go: mnemeHit).
+// Label + Content are the consolidation-era content surface: chapterhouse
+// hydrates them from semantic.mnemes.label + the first representative's
+// excerpt, so a semantic hit finally carries readable text. Both are
+// omitempty on the wire — a content-less (pre-consolidation) mneme emits
+// exactly the older id/score/level/tier shape, and the decoder leaves
+// Label/Content at "".
 type semanticHitRow struct {
 	MnemeID string  `json:"mneme_id"`
 	Score   float64 `json:"score"`
 	Level   int     `json:"level"`
 	Tier    string  `json:"tier"`
+	Label   string  `json:"label,omitempty"`
+	Content string  `json:"content,omitempty"`
 }
 
 // ---------------------------------------------------------------------
@@ -531,6 +575,40 @@ func (c *Client) AddSessionWorkspace(ctx context.Context, in core.AddSessionWork
 	return r.Added, nil
 }
 
+// ConsolidateWorkspace POSTs to chapterhouse's
+// /v1/semantic/consolidate, the manual trigger for the episodic->
+// semantic consolidation batch (cluster closed sessions, enrich with
+// excerpts, optionally label/digest). The call is synchronous —
+// chapterhouse runs consolidation.RunWorkspace in-process and the HTTP
+// response doesn't return until the batch completes, so this method
+// blocks for the run's full duration. do() therefore grants this path the
+// generous consolidateTimeout (10m) instead of the shared 30s — a batch of
+// tens of seconds to minutes must not be aborted mid-run. Distinct from
+// ghola's own Core.Consolidate (sietch->episodic session flush) — see
+// internal/core/core.go's ConsolidateWorkspace doc comment for the
+// seam rationale.
+func (c *Client) ConsolidateWorkspace(ctx context.Context, workspaceID string) error {
+	return c.do(ctx, "/v1/semantic/consolidate", consolidateWorkspaceReq{Workspace: workspaceID}, nil)
+}
+
+// semanticContentCap defensively bounds the hydrated content a semantic
+// hit carries into the rerank pool. Chapterhouse already bounds it at the
+// source, so this is belt-and-suspenders against an oversized upstream
+// value; it trims on a rune boundary so a truncated value is never
+// invalid UTF-8.
+const semanticContentCap = 800
+
+func boundContent(s string) string {
+	if len(s) <= semanticContentCap {
+		return s
+	}
+	b := s[:semanticContentCap]
+	for len(b) > 0 && !utf8.ValidString(b) {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
 func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	var r semanticHitsResp
 	body := semanticQueryReq{
@@ -544,14 +622,16 @@ func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]cor
 	}
 	out := make([]core.RecallHit, 0, len(r.Hits))
 	for _, h := range r.Hits {
-		// v0.3 semantic hits carry only id/score/tier — the underlying
-		// content column was dropped in PR1.1, leaving Content at "".
-		// PR7 will reintroduce a content-bearing field via the
-		// dogfooding-tags mechanism.
+		// Consolidation-era semantic hits carry `content` (label + top
+		// excerpt), hydrated by chapterhouse from semantic.mnemes. Surface
+		// it on Content so core.rerankAndFuse scores real text instead of
+		// skipping the mneme as content-less. Bounded defensively; a
+		// pre-consolidation mneme sends no content, leaving Content "".
 		out = append(out, core.RecallHit{
-			Tier:  h.Tier,
-			ID:    h.MnemeID,
-			Score: h.Score,
+			Tier:    h.Tier,
+			ID:      h.MnemeID,
+			Score:   h.Score,
+			Content: boundContent(h.Content),
 		})
 	}
 	return out, nil

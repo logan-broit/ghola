@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -51,7 +52,7 @@ func (s *Server) SetDefaultUserID(id string) error {
 // HTTP-layer validation sentinels. Wrap core.ErrValidation so the
 // boundary classifier (handleErr) maps them to 400 via errors.Is.
 var (
-	errInvalidUserID  = fmt.Errorf("%w: user_id must be a UUID; omit to use AUTH_DEFAULT_USER", core.ErrValidation)
+	errInvalidUserID     = fmt.Errorf("%w: user_id must be a UUID; omit to use AUTH_DEFAULT_USER", core.ErrValidation)
 	errMissingUserIDHTTP = fmt.Errorf("%w: user_id required", core.ErrValidation)
 )
 
@@ -111,6 +112,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/share", s.share)
 	s.mux.HandleFunc("POST /v1/session_workspace", s.sessionWorkspace)
 	s.mux.HandleFunc("POST /v1/consolidate", s.consolidate)
+	s.mux.HandleFunc("POST /v1/semantic/consolidate", s.consolidateWorkspace)
 	s.mux.HandleFunc("GET /health", s.health)
 }
 
@@ -463,6 +465,41 @@ func (s *Server) consolidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"flushed": n})
+}
+
+// consolidateWriteTimeout lifts the server-wide 60s WriteTimeout for the
+// consolidate route only. The episodic->semantic batch legitimately runs
+// for minutes; without this the daemon would cut the response mid-run and
+// the caller would see a spurious failure even though the batch continues.
+const consolidateWriteTimeout = 10 * time.Minute
+
+// consolidateWorkspace handles the manual trigger for chapterhouse's
+// episodic->semantic consolidation batch (cluster + enrich +
+// label/digest). Distinct from consolidate above, which flushes one
+// session's pending sietch events to episodic — see
+// core.ConsolidateWorkspace's doc comment for the seam rationale.
+// Synchronous: chapterhouse runs the batch in-process, so this
+// request blocks for the run's full duration — which is why the write
+// deadline is extended past the server-wide WriteTimeout below.
+func (s *Server) consolidateWorkspace(w http.ResponseWriter, r *http.Request) {
+	// Extend the write deadline for THIS route so the server-wide 60s
+	// WriteTimeout doesn't truncate a multi-minute batch's response.
+	// Best-effort: writers that can't set a deadline (e.g. httptest) return
+	// an error we log at debug and otherwise ignore.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(consolidateWriteTimeout)); err != nil {
+		s.logger.Debug("consolidate_workspace: could not extend write deadline",
+			slog.String("error", err.Error()))
+	}
+	var req core.ConsolidateWorkspaceInput
+	if err := decode(r, &req); err != nil {
+		s.handleErr(w, r, err)
+		return
+	}
+	if err := s.core.ConsolidateWorkspace(r.Context(), req); err != nil {
+		s.handleErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // Errors is exported for tests that want to assert canonical error

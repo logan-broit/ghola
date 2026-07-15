@@ -1361,6 +1361,39 @@ func (c *Core) Consolidate(ctx context.Context, sessionID string) (int, error) {
 	return len(pending), nil
 }
 
+// ConsolidateWorkspace triggers chapterhouse's episodic->semantic
+// consolidation batch (cluster closed sessions, enrich with excerpts,
+// optionally label/digest) for one workspace, synchronously. Thin
+// passthrough to Chapterhouse.ConsolidateWorkspace — the manual-trigger
+// counterpart to chapterhouse's own nightly worker schedule, sharing
+// its RunWorkspace code path. Distinct from Consolidate above, which
+// flushes one session's pending sietch events to episodic (Pipeline A)
+// — a different pipeline entirely, see the consolidation-phase plan's
+// seam decision 1.
+//
+// Typical caller: an agent about to have its context cleared or
+// compacted, front-loading the semantic tier so recall has fresh
+// content afterward.
+//
+// Workspace resolution mirrors Recall: an explicit Workspace wins;
+// otherwise Cwd (when non-empty) is derived via WorkspaceForCwd so an
+// agent that only knows its working directory can still trigger
+// consolidation. Neither set is a validation error. A workspace that
+// fails to parse as a UUID is also rejected here rather than round-
+// tripping to chapterhouse only to bounce off its own validation.
+func (c *Core) ConsolidateWorkspace(ctx context.Context, in ConsolidateWorkspaceInput) error {
+	if in.Workspace == "" && in.Cwd != nil && *in.Cwd != "" {
+		in.Workspace = WorkspaceForCwd(*in.Cwd).String()
+	}
+	if in.Workspace == "" {
+		return ErrMissingWorkspaceOrCwd
+	}
+	if _, err := uuid.Parse(in.Workspace); err != nil {
+		return fmt.Errorf("%w: workspace must be a valid UUID: %w", ErrValidation, err)
+	}
+	return c.Chapterhouse.ConsolidateWorkspace(ctx, in.Workspace)
+}
+
 // GCSession deletes the session's sietch file once it is a redundant
 // local cache: ended longer ago than SietchRetention, fully
 // consolidated (nothing past the watermark), and nothing awaiting
