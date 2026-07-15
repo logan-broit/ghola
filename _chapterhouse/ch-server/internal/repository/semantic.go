@@ -51,6 +51,10 @@ func boundExcerpt(s string) string {
 // boundExcerpt. repository is the common import root — both consolidation
 // and handler already depend on it — so the helper lives here rather than
 // in a new grab-bag util package.
+//
+// Caveat: this assumes s is already valid UTF-8. It only avoids
+// introducing new corruption at the cut point; it does not detect or
+// repair any pre-existing invalid byte sequences in s.
 func TruncateRuneSafe(s string, max int) string {
 	if len(s) <= max {
 		return s
