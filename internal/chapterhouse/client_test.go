@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -615,6 +617,43 @@ func TestQuerySemantic_HydratesContent(t *testing.T) {
 	assert.Equal(t, "semantic", hits[0].Tier)
 	assert.InDelta(t, 0.92, hits[0].Score, 1e-9)
 	assert.Equal(t, "LABEL\nexcerpt", hits[0].Content, "content maps onto RecallHit.Content")
+}
+
+// TestQuerySemantic_BoundsOversizedMultibyteContent drives an over-cap
+// multibyte `content` field through the real fake-server response path
+// (not a unit call on boundContent in isolation) and pins that the
+// resulting RecallHit.Content is bounded at semanticContentCap (800
+// bytes) and never invalid UTF-8. "世" is 3 bytes, so 400 runes (1200
+// bytes) both exceeds the cap and does not land on a byte boundary at
+// 800 — a naive s[:800] would split a multibyte rune.
+func TestQuerySemantic_BoundsOversizedMultibyteContent(t *testing.T) {
+	long := strings.Repeat("世", 400)
+	body, err := json.Marshal(map[string]any{
+		"hits": []map[string]any{
+			{"mneme_id": "m1", "score": 0.92, "level": 1, "tier": "semantic", "content": long},
+		},
+	})
+	require.NoError(t, err)
+
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/semantic/query": func(w http.ResponseWriter, r *http.Request) {
+			assertAuthHeader(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+		},
+	})
+	c := newClient(t, srv)
+
+	hits, err := c.QuerySemantic(context.Background(), core.SemanticQuery{
+		Workspace: "ws", QueryText: "k8s",
+		QueryEmbedding: []float32{0.1}, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.True(t, utf8.ValidString(hits[0].Content),
+		"bounded content must be valid UTF-8, got %q", hits[0].Content)
+	assert.LessOrEqual(t, len(hits[0].Content), 800)
+	assert.NotEmpty(t, hits[0].Content)
 }
 
 // ---------------------------------------------------------------------

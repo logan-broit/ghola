@@ -2495,27 +2495,27 @@ func TestRecall_SettleExpandIgnoresActivationWeight(t *testing.T) {
 // (rrf=0, same rerank score as e1, activation=1.0). With channel mode and
 // wActivation=0.3, xact's activation term must tip it above e1.
 //
-//   c.RerankWeight=0.3, wActivation=0.3.
-//   Both hits get rerank score 0.5.
-//   rrfMax = rrf(e1) = 1/61 ≈ 0.0164 (single-tier, k=60, rank=1 → 1/(60+1)).
-//   xact: rrfByID=0.
+//	c.RerankWeight=0.3, wActivation=0.3.
+//	Both hits get rerank score 0.5.
+//	rrfMax = rrf(e1) = 1/61 ≈ 0.0164 (single-tier, k=60, rank=1 → 1/(60+1)).
+//	xact: rrfByID=0.
 //
-//   rrfNorm(e1)   = 1.0   (it's the only nonzero rrf entry → max = itself)
-//   rrfNorm(xact) = 0.0
-//   rerankNorm both = 1.0 (same score, max=0.5/0.5=1)
-//   actNorm(e1)   = 0.0  (absent from activation map)
-//   actNorm(xact) = 1.0
+//	rrfNorm(e1)   = 1.0   (it's the only nonzero rrf entry → max = itself)
+//	rrfNorm(xact) = 0.0
+//	rerankNorm both = 1.0 (same score, max=0.5/0.5=1)
+//	actNorm(e1)   = 0.0  (absent from activation map)
+//	actNorm(xact) = 1.0
 //
-//   e1:   (1-0.3-0.3)*1.0 + 0.3*1.0 + 0.3*0.0 = 0.4 + 0.3 = 0.70
-//   xact: (1-0.3-0.3)*0.0 + 0.3*1.0 + 0.3*1.0 = 0.0 + 0.3 + 0.3 = 0.60
+//	e1:   (1-0.3-0.3)*1.0 + 0.3*1.0 + 0.3*0.0 = 0.4 + 0.3 = 0.70
+//	xact: (1-0.3-0.3)*0.0 + 0.3*1.0 + 0.3*1.0 = 0.0 + 0.3 + 0.3 = 0.60
 //
 // Hmm — e1 still wins because its rrf mass (0.4) > xact's activation gain.
 // Make wActivation higher so xact wins:
 //
-//   c.RerankWeight=0.1, wActivation=0.5.
-//   e1:   (1-0.1-0.5)*1.0 + 0.1*1.0 + 0.5*0.0 = 0.4 + 0.1 = 0.50
-//   xact: (1-0.1-0.5)*0.0 + 0.1*1.0 + 0.5*1.0 = 0.0 + 0.1 + 0.5 = 0.60
-//   xact wins by 0.10. This is the re-keying regression proof.
+//	c.RerankWeight=0.1, wActivation=0.5.
+//	e1:   (1-0.1-0.5)*1.0 + 0.1*1.0 + 0.5*0.0 = 0.4 + 0.1 = 0.50
+//	xact: (1-0.1-0.5)*0.0 + 0.1*1.0 + 0.5*1.0 = 0.0 + 0.1 + 0.5 = 0.60
+//	xact wins by 0.10. This is the re-keying regression proof.
 func TestRecall_SettleChannelActivationLiftsByRawID(t *testing.T) {
 	c, _, ch, _ := newCore()
 	ch.episResp = []core.RecallHit{
