@@ -58,3 +58,51 @@ func TestSemanticQuery_WireResponseCarriesContent(t *testing.T) {
 	assert.Equal(t, "cluster label", resp.Hits[0].Label)
 	assert.Equal(t, "cluster label\nthe top excerpt", resp.Hits[0].Content)
 }
+
+// TestSemanticQuery_Level2DigestSurfacesParagraphAsContent pins the
+// level-2 case the consolidation design turns on: a workspace digest
+// carries its paragraph in `label` with NO representatives (see
+// repository.InsertDigestMneme). Hydration must surface that paragraph as
+// content — the excerpt jsonb-path resolves to "" on a null representatives
+// column, so content is the label alone (no stray leading newline).
+func TestSemanticQuery_Level2DigestSurfacesParagraphAsContent(t *testing.T) {
+	f := newSemanticFixture(t)
+	userID := uuid.New()
+	workspace := uuid.New()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	paragraph := "This workspace spent the week on consolidation: clustering, enrichment, recall hydration."
+	var id uuid.UUID
+	require.NoError(t, f.pg.Pool.QueryRow(ctx, `
+		INSERT INTO semantic.mnemes (workspace_id, level, embedding, label)
+		VALUES ($1, 2, ($2::text)::vector, $3)
+		RETURNING id`,
+		workspace, "[1,0,0,0,0,0,0,0]", paragraph).Scan(&id))
+
+	body := map[string]any{
+		"workspace_id":    workspace,
+		"query_embedding": []float32{1, 0, 0, 0, 0, 0, 0, 0},
+		"limit":           10,
+	}
+	req := authedSemanticRequest(t, http.MethodPost, "/v1/semantic/query", body, userID)
+	rec := httptest.NewRecorder()
+	f.handler.Query(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+
+	var resp struct {
+		Hits []struct {
+			MnemeID uuid.UUID `json:"mneme_id"`
+			Level   int       `json:"level"`
+			Content string    `json:"content"`
+		} `json:"hits"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Hits, 1)
+	assert.Equal(t, id, resp.Hits[0].MnemeID)
+	assert.Equal(t, 2, resp.Hits[0].Level)
+	assert.Equal(t, paragraph, resp.Hits[0].Content,
+		"digest paragraph surfaces as content, with no excerpt and no leading newline")
+}
