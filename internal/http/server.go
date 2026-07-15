@@ -52,7 +52,7 @@ func (s *Server) SetDefaultUserID(id string) error {
 // HTTP-layer validation sentinels. Wrap core.ErrValidation so the
 // boundary classifier (handleErr) maps them to 400 via errors.Is.
 var (
-	errInvalidUserID  = fmt.Errorf("%w: user_id must be a UUID; omit to use AUTH_DEFAULT_USER", core.ErrValidation)
+	errInvalidUserID     = fmt.Errorf("%w: user_id must be a UUID; omit to use AUTH_DEFAULT_USER", core.ErrValidation)
 	errMissingUserIDHTTP = fmt.Errorf("%w: user_id required", core.ErrValidation)
 )
 
