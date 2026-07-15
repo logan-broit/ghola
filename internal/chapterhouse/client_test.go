@@ -589,6 +589,34 @@ func TestClient_QuerySemantic(t *testing.T) {
 	assert.Equal(t, "", hits[0].Content, "Content must be empty post-v0.3 (field dropped)")
 }
 
+// TestQuerySemantic_HydratesContent pins the Task 19 read path: when
+// chapterhouse emits the consolidation-era `content` field on a semantic
+// hit, QuerySemantic must map it onto RecallHit.Content so the reranker
+// scores real text instead of skipping the mneme.
+func TestQuerySemantic_HydratesContent(t *testing.T) {
+	srv := newServer(t, map[string]http.HandlerFunc{
+		"/v1/semantic/query": func(w http.ResponseWriter, r *http.Request) {
+			assertAuthHeader(t, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"hits":[
+				{"mneme_id":"m1","score":0.92,"level":1,"tier":"semantic","label":"LABEL","content":"LABEL\nexcerpt"}
+			]}`))
+		},
+	})
+	c := newClient(t, srv)
+
+	hits, err := c.QuerySemantic(context.Background(), core.SemanticQuery{
+		Workspace: "ws", QueryText: "k8s",
+		QueryEmbedding: []float32{0.1}, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "m1", hits[0].ID)
+	assert.Equal(t, "semantic", hits[0].Tier)
+	assert.InDelta(t, 0.92, hits[0].Score, 1e-9)
+	assert.Equal(t, "LABEL\nexcerpt", hits[0].Content, "content maps onto RecallHit.Content")
+}
+
 // ---------------------------------------------------------------------
 // error path: non-2xx surfaces the status + body
 // ---------------------------------------------------------------------

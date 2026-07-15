@@ -779,6 +779,42 @@ func TestRecall_FansOutAcrossTiersAndFusesByRRF(t *testing.T) {
 	}, out.TierCounts)
 }
 
+// TestRecall_SemanticContentSurvivesMerge pins Task 19 end-to-end on the
+// ghola side: a semantic hit that arrives with non-empty Content (the
+// consolidation-era label+excerpt) must keep that text through the RRF
+// merge + grain-aware dedup and reach the final RecallResult. Before
+// hydration semantic hits were content-less and the reranker skipped
+// them; the whole point of the tier now is that its text survives. No
+// reranker is attached (Truthsayer nil), so this isolates the
+// merge/dedup path — content must not be blanked there.
+func TestRecall_SemanticContentSurvivesMerge(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.semResp = []core.RecallHit{
+		{Tier: "semantic", Score: 0.7, ID: "m1", Content: "LABEL\nexcerpt"},
+	}
+
+	out, err := c.Recall(context.Background(), core.RecallInput{
+		SessionID: "sess", UserID: "u1", Workspace: "ws1",
+		QueryText: "kubernetes",
+		// Settle off pins the pre-P4 fan-out so this asserts only the
+		// merge-preservation property, not expansion behavior.
+		Settle: "off",
+	})
+	require.NoError(t, err)
+
+	var found *core.RecallHit
+	for i := range out.Hits {
+		if out.Hits[i].Tier == "semantic" {
+			found = &out.Hits[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "semantic hit must survive the merge")
+	assert.Equal(t, "m1", found.ID)
+	assert.Equal(t, "LABEL\nexcerpt", found.Content,
+		"semantic content must be preserved through merge/dedup")
+}
+
 // TestRecall_RRFFavorsCrossTierAgreement pins the property that a
 // document appearing in multiple tiers (even at modest ranks) beats one
 // that only shows up at the top of a single tier. This is the win RRF

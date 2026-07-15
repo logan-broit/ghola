@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -335,18 +336,21 @@ type semanticHitsResp struct {
 	Hits []semanticHitRow `json:"hits"`
 }
 
-// semanticHitRow mirrors the v0.3 chapterhouse mnemeHit shape (see
-// _chapterhouse/ch-server/internal/handler/semantic.go: mnemeHit). The
-// v0.2 fields content_match, activation, hebbian_boost, confidence,
-// concept, and content were dropped along with the schema columns
-// they projected; PR7's dogfooding-tags work will reintroduce a
-// content-bearing surface. Keep the struct narrow so the JSON decoder
-// can't silently zero-fill fields the server no longer emits.
+// semanticHitRow mirrors the chapterhouse mnemeHit shape (see
+// _chapterhouse/ch-server/internal/handler/semantic.go: mnemeHit).
+// Label + Content are the consolidation-era content surface: chapterhouse
+// hydrates them from semantic.mnemes.label + the first representative's
+// excerpt, so a semantic hit finally carries readable text. Both are
+// omitempty on the wire — a content-less (pre-consolidation) mneme emits
+// exactly the older id/score/level/tier shape, and the decoder leaves
+// Label/Content at "".
 type semanticHitRow struct {
 	MnemeID string  `json:"mneme_id"`
 	Score   float64 `json:"score"`
 	Level   int     `json:"level"`
 	Tier    string  `json:"tier"`
+	Label   string  `json:"label,omitempty"`
+	Content string  `json:"content,omitempty"`
 }
 
 // ---------------------------------------------------------------------
@@ -587,6 +591,24 @@ func (c *Client) ConsolidateWorkspace(ctx context.Context, workspaceID string) e
 	return c.do(ctx, "/v1/semantic/consolidate", consolidateWorkspaceReq{Workspace: workspaceID}, nil)
 }
 
+// semanticContentCap defensively bounds the hydrated content a semantic
+// hit carries into the rerank pool. Chapterhouse already bounds it at the
+// source, so this is belt-and-suspenders against an oversized upstream
+// value; it trims on a rune boundary so a truncated value is never
+// invalid UTF-8.
+const semanticContentCap = 800
+
+func boundContent(s string) string {
+	if len(s) <= semanticContentCap {
+		return s
+	}
+	b := s[:semanticContentCap]
+	for len(b) > 0 && !utf8.ValidString(b) {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
 func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	var r semanticHitsResp
 	body := semanticQueryReq{
@@ -600,14 +622,16 @@ func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]cor
 	}
 	out := make([]core.RecallHit, 0, len(r.Hits))
 	for _, h := range r.Hits {
-		// v0.3 semantic hits carry only id/score/tier — the underlying
-		// content column was dropped in PR1.1, leaving Content at "".
-		// PR7 will reintroduce a content-bearing field via the
-		// dogfooding-tags mechanism.
+		// Consolidation-era semantic hits carry `content` (label + top
+		// excerpt), hydrated by chapterhouse from semantic.mnemes. Surface
+		// it on Content so core.rerankAndFuse scores real text instead of
+		// skipping the mneme as content-less. Bounded defensively; a
+		// pre-consolidation mneme sends no content, leaving Content "".
 		out = append(out, core.RecallHit{
-			Tier:  h.Tier,
-			ID:    h.MnemeID,
-			Score: h.Score,
+			Tier:    h.Tier,
+			ID:      h.MnemeID,
+			Score:   h.Score,
+			Content: boundContent(h.Content),
 		})
 	}
 	return out, nil
