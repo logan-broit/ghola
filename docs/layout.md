@@ -61,17 +61,24 @@ at a single SHA. State as of 2026-05-16.
 - `internal/handler/` — REST handlers (episodic + semantic).
 - `internal/repository/` — Postgres layer (pgx), migrations under
   `internal/repository/migrations/`.
-- `internal/semantic/` — mneme persistence + scheduler (drives the
-  mentat cluster cron) + reconciler (computes l1_embedding /
-  l1_chunk_text on closed sessions).
+- `internal/semantic/` — mneme persistence + reconciler (computes
+  l1_embedding / l1_chunk_text on closed sessions).
 - `internal/mneme/` — mneme prototype types + lifecycle helpers (the
   semantic-tier units `internal/semantic/` persists).
 - `internal/primitives/` — cognitive primitives (ACT-R activation,
   Ebbinghaus decay, Hebbian co-activation, Bayesian confidence,
   contradiction). Migrated out of the retired `attic/extension/` Rust
   crate; runs in-process.
-- `internal/consolidation/` — episodic→semantic consolidation worker
-  (drains co-activation queue, calls mentat, persists mnemes).
+- `internal/consolidation/` — two jobs sharing a package: (1) drains
+  the Hebbian co-activation queue and strengthens
+  `semantic.associations` (`DrainAndStrengthen`, run on `cmd/worker`'s
+  tick loop); (2) the episodic→semantic nightly pipeline —
+  reconcile (pool closed sessions to L1) → cluster via mentat →
+  overlap-match/apply mnemes → selection-first enrichment → optional
+  LLM label + workspace digest (`RunWorkspace`), gated by a
+  per-workspace advisory lock and run both by `cmd/worker`'s nightly
+  schedule and the manual `POST /v1/semantic/consolidate` trigger. See
+  [consolidation.md](consolidation.md).
 - `internal/embedding/` — embedding client (talks to guild).
 - `internal/mentat/` — HTTP client for the mentat sidecar.
 - `internal/auth/` + `internal/secrets/` + `internal/middleware/` —

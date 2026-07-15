@@ -196,6 +196,12 @@ services:
       AUTH_PROVIDER: default
       AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      # cmd/api reads EMBEDDING_DIMENSIONS (internal/config), not
+      # EMBEDDING_DIM (that's cmd/init's migration-time var, kept above
+      # for that reason) — without this the digest embedder used by the
+      # manual /v1/semantic/consolidate trigger defaulted to 768 and
+      # mismatched the worker's 1024-dim vectors.
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIM:-1024}
       EMBEDDING_URL: ${EMBEDDING_URL:-http://guild:8082}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}

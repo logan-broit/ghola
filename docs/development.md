@@ -87,7 +87,9 @@ flaky and CPU fp16 inference isn't worth it.
 
 ghola env knobs are documented at the top of `cmd/ghola/main.go`. The
 recall-tuning ones are listed in
-[recall-pipeline.md](recall-pipeline.md#tuning-knobs).
+[recall-pipeline.md](recall-pipeline.md#tuning-knobs). The
+`CONSOLIDATE_*` knobs for the episodic→semantic pipeline are in
+[consolidation.md](consolidation.md).
 
 ## Tests
 
