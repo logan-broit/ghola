@@ -220,6 +220,13 @@ type fakeChapterhouse struct {
 	// test without a fixed sleep — the tier unblocks the instant
 	// TierTimeout fires.
 	semBlockUntilCtxDone bool
+
+	// consolidateWorkspaces records every ConsolidateWorkspace call's
+	// resolved workspace id. consolidateErr, when set, is returned
+	// instead of nil (independent of the shared `err` field so
+	// consolidate-specific error tests don't perturb other methods).
+	consolidateWorkspaces []string
+	consolidateErr        error
 }
 
 func newFakeChapterhouse() *fakeChapterhouse {
@@ -299,6 +306,10 @@ func (f *fakeChapterhouse) QuerySemantic(ctx context.Context, q core.SemanticQue
 		return nil, f.semErr
 	}
 	return f.semResp, f.err
+}
+func (f *fakeChapterhouse) ConsolidateWorkspace(_ context.Context, workspaceID string) error {
+	f.consolidateWorkspaces = append(f.consolidateWorkspaces, workspaceID)
+	return f.consolidateErr
 }
 
 type fakeEmbedder struct {
@@ -1974,6 +1985,90 @@ func TestExpandSessionWorkspace_RejectsMissingFields(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "workspace_id")
+}
+
+// ---------------------------------------------------------------------
+// ConsolidateWorkspace — manual trigger for chapterhouse's episodic->
+// semantic consolidation batch. Distinct from Consolidate above
+// (sietch->episodic session flush, Pipeline A).
+// ---------------------------------------------------------------------
+
+func TestConsolidateWorkspace_ExplicitWorkspacePassesThrough(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ws := "11111111-2222-3333-4444-555555555555"
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{
+		Workspace: ws,
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.consolidateWorkspaces, 1)
+	assert.Equal(t, ws, ch.consolidateWorkspaces[0])
+}
+
+// TestConsolidateWorkspace_DerivesWorkspaceFromCwd mirrors Recall's cwd
+// ergonomics: an MCP agent rarely knows the workspace UUID but always
+// knows cwd, so ConsolidateWorkspace derives it the same way Record and
+// Recall do.
+func TestConsolidateWorkspace_DerivesWorkspaceFromCwd(t *testing.T) {
+	c, _, ch, _ := newCore()
+	cwd := "/home/loganb/ghola"
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{
+		Cwd: strPtr(cwd),
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.consolidateWorkspaces, 1)
+	assert.Equal(t, core.WorkspaceForCwd(cwd).String(), ch.consolidateWorkspaces[0])
+}
+
+func TestConsolidateWorkspace_ExplicitWorkspaceWinsOverCwd(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ws := "11111111-2222-3333-4444-555555555555"
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{
+		Workspace: ws,
+		Cwd:       strPtr("/some/other/project"),
+	})
+	require.NoError(t, err)
+	require.Len(t, ch.consolidateWorkspaces, 1)
+	assert.Equal(t, ws, ch.consolidateWorkspaces[0])
+}
+
+func TestConsolidateWorkspace_MissingWorkspaceAndCwd_ReturnsError(t *testing.T) {
+	c, _, ch, _ := newCore()
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+	assert.Empty(t, ch.consolidateWorkspaces, "chapterhouse must not be called on a validation failure")
+}
+
+func TestConsolidateWorkspace_EmptyCwdDoesNotCollapseToBogusWorkspace(t *testing.T) {
+	// Mirrors the Recall guard: a pointer-to-empty-string Cwd must not
+	// derive WorkspaceForCwd("") — it must be treated as absent.
+	c, _, ch, _ := newCore()
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{
+		Cwd: strPtr(""),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+	assert.Empty(t, ch.consolidateWorkspaces)
+}
+
+func TestConsolidateWorkspace_InvalidWorkspaceUUID_ReturnsValidationError(t *testing.T) {
+	c, _, ch, _ := newCore()
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{
+		Workspace: "not-a-uuid",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrValidation)
+	assert.Empty(t, ch.consolidateWorkspaces, "chapterhouse must not be called with an invalid workspace")
+}
+
+func TestConsolidateWorkspace_PropagatesChapterhouseError(t *testing.T) {
+	c, _, ch, _ := newCore()
+	ch.consolidateErr = errors.New("mentat cluster (loud-fail): connection refused")
+	err := c.ConsolidateWorkspace(context.Background(), core.ConsolidateWorkspaceInput{
+		Workspace: "11111111-2222-3333-4444-555555555555",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connection refused")
 }
 
 func TestConsolidate_AdvancesWatermark(t *testing.T) {

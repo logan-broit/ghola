@@ -94,13 +94,16 @@ func callTool(t *testing.T, s *mcptest.Server, name string, args map[string]any)
 // Tests
 // ---------------------------------------------------------------------
 
-// TestTools_AgentSurface confirms the MCP catalog is exactly the five
+// TestTools_AgentSurface confirms the MCP catalog is exactly the six
 // agent-relevant tools. The lifecycle / admin operations (session_start,
 // session_end, list_sessions, branch, expand_session_workspace, share,
 // consolidate) are reachable over HTTP but deliberately hidden from
 // the model's tool list so it doesn't have to reason about session
-// boundaries it has no good signal for. If a future change re-adds
-// one to the catalog, this test surfaces that intentionally.
+// boundaries it has no good signal for. consolidate_workspace is the
+// one deliberate exception — it's a decision only the agent can make
+// (fire it before its own context gets cleared), so it's in the
+// catalog. If a future change re-adds one of the hidden ops to the
+// catalog, this test surfaces that intentionally.
 func TestTools_AgentSurface(t *testing.T) {
 	fg, hs := newFakeGhola(t)
 	_ = fg
@@ -117,7 +120,7 @@ func TestTools_AgentSurface(t *testing.T) {
 		names[tool.Name] = true
 	}
 
-	expected := []string{"record", "recall", "bookmark", "navigate", "forget"}
+	expected := []string{"record", "recall", "bookmark", "navigate", "forget", "consolidate_workspace"}
 	assert.Len(t, list.Tools, len(expected))
 	for _, want := range expected {
 		assert.True(t, names[want], "missing tool %q", want)
@@ -313,6 +316,78 @@ func TestProxy_SurfacesDaemonError(t *testing.T) {
 	text := out.Content[0].(mcppkg.TextContent).Text
 	assert.Contains(t, text, "401")
 	assert.Contains(t, text, "no api key")
+}
+
+// TestProxy_ConsolidateWorkspaceForwardsWorkspace pins the bridge shape
+// for the new tool: an explicit workspace uuid must reach ghola's
+// /v1/semantic/consolidate verbatim.
+func TestProxy_ConsolidateWorkspaceForwardsWorkspace(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	fg.response["/v1/semantic/consolidate"] = `{"status":"ok"}`
+
+	s := newClient(t, hs.URL)
+
+	out := callTool(t, s, "consolidate_workspace", map[string]any{
+		"workspace": "00000000-0000-0000-0000-0000000000ff",
+	})
+
+	require.False(t, out.IsError, "unexpected error result")
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	require.Len(t, fg.calls, 1)
+	assert.Equal(t, "/v1/semantic/consolidate", fg.calls[0].Path)
+	assert.Equal(t, "00000000-0000-0000-0000-0000000000ff", fg.calls[0].Body["workspace"])
+}
+
+// TestProxy_ConsolidateWorkspaceForwardsCwd mirrors
+// TestProxy_RecallForwardsCwd: an agent that only knows cwd must still
+// be able to trigger consolidation — the bridge forwards cwd verbatim
+// and the ghola daemon derives the workspace server-side.
+func TestProxy_ConsolidateWorkspaceForwardsCwd(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	fg.response["/v1/semantic/consolidate"] = `{"status":"ok"}`
+
+	s := newClient(t, hs.URL)
+
+	callTool(t, s, "consolidate_workspace", map[string]any{
+		"cwd": "/tmp/proj",
+	})
+
+	fg.mu.Lock()
+	defer fg.mu.Unlock()
+	require.Len(t, fg.calls, 1)
+	assert.Equal(t, "/v1/semantic/consolidate", fg.calls[0].Path)
+	assert.Equal(t, "/tmp/proj", fg.calls[0].Body["cwd"],
+		"consolidate_workspace must forward cwd so core can derive the workspace")
+}
+
+// TestTools_ConsolidateWorkspaceSchema pins the discoverability contract:
+// the tool's description must explain the context-clear use case (so an
+// agent knows when to call it), and its schema must expose both
+// workspace and cwd.
+func TestTools_ConsolidateWorkspaceSchema(t *testing.T) {
+	fg, hs := newFakeGhola(t)
+	_ = fg
+	s := newClient(t, hs.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	list, err := s.Client().ListTools(ctx, mcppkg.ListToolsRequest{})
+	require.NoError(t, err)
+
+	var tool *mcppkg.Tool
+	for i := range list.Tools {
+		if list.Tools[i].Name == "consolidate_workspace" {
+			tool = &list.Tools[i]
+			break
+		}
+	}
+	require.NotNil(t, tool, "consolidate_workspace tool must be present")
+	assert.Contains(t, tool.Description, "context",
+		"description must explain the context-clear use case so the agent knows when to call it")
+	assert.Contains(t, tool.InputSchema.Properties, "workspace")
+	assert.Contains(t, tool.InputSchema.Properties, "cwd")
 }
 
 // TestProxy_EndToEndOps exercises one tool per arg-family so the wire

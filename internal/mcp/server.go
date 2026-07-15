@@ -64,13 +64,22 @@ type toolSpec struct {
 	Path string // "/v1/<op>"
 }
 
-// tools is the agent-facing MCP surface: five tools the model uses
+// tools is the agent-facing MCP surface: six tools the model uses
 // turn-to-turn. The lifecycle / admin operations (session_start,
 // session_end, list_sessions, branch, expand_session_workspace,
 // share, consolidate) stay reachable over HTTP at /v1/* for hosts
 // that drive memory programmatically (pi-mono and friends) — they're
 // just hidden from the model's tool catalog so it doesn't have to
 // reason about session boundaries it has no good signal for.
+//
+// consolidate_workspace is the one exception to "consolidation stays
+// hidden": unlike the session-scoped `consolidate` op (sietch->episodic
+// flush, a bookkeeping detail the model has no good signal for), the
+// episodic->semantic batch is something the model itself decides to
+// trigger — typically right before its own context is about to be
+// cleared or compacted, so the semantic tier has fresh content when
+// the conversation resumes. That's a judgment call only the agent can
+// make, so it belongs in the model-facing catalog.
 //
 // `record` accepts an optional cwd; when session_id is omitted, core
 // uses cwd to derive the workspace and either reuses the most-recent
@@ -210,6 +219,27 @@ func tools() []toolSpec {
 					mcppkg.Items(map[string]any{"type": "string"})),
 			),
 			Path: "/v1/forget",
+		},
+		{
+			Tool: mcppkg.NewTool("consolidate_workspace",
+				mcppkg.WithDescription(
+					"Trigger chapterhouse's episodic->semantic consolidation batch "+
+						"for a workspace (cluster closed sessions, enrich with "+
+						"representative excerpts, optionally label/digest). Call this "+
+						"right before your own context is about to be cleared or "+
+						"compacted, so the semantic tier has fresh, readable content "+
+						"for recall to surface once the conversation resumes. "+
+						"Synchronous — the call blocks until the batch completes. "+
+						"Distinct from the hidden `consolidate` op, which flushes one "+
+						"session's pending working-memory events to episodic storage; "+
+						"this triggers the separate episodic->semantic clustering "+
+						"pipeline the nightly worker also runs."),
+				mcppkg.WithString("workspace",
+					mcppkg.Description("Workspace id (uuid). Optional when cwd is provided — the workspace is derived from cwd.")),
+				mcppkg.WithString("cwd",
+					mcppkg.Description("Current project directory. The workspace is derived from it when workspace is omitted — same mapping record/recall use.")),
+			),
+			Path: "/v1/semantic/consolidate",
 		},
 	}
 }

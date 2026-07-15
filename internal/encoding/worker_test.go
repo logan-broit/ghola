@@ -46,6 +46,9 @@ func (*recordingChapterhouse) AddSessionWorkspace(context.Context, core.AddSessi
 func (*recordingChapterhouse) QuerySemantic(context.Context, core.SemanticQuery) ([]core.RecallHit, error) {
 	return nil, nil
 }
+func (*recordingChapterhouse) ConsolidateWorkspace(context.Context, string) error {
+	return nil
+}
 
 type nullEmbedder struct{}
 

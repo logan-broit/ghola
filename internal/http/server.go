@@ -111,6 +111,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/share", s.share)
 	s.mux.HandleFunc("POST /v1/session_workspace", s.sessionWorkspace)
 	s.mux.HandleFunc("POST /v1/consolidate", s.consolidate)
+	s.mux.HandleFunc("POST /v1/semantic/consolidate", s.consolidateWorkspace)
 	s.mux.HandleFunc("GET /health", s.health)
 }
 
@@ -463,6 +464,26 @@ func (s *Server) consolidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"flushed": n})
+}
+
+// consolidateWorkspace handles the manual trigger for chapterhouse's
+// episodic->semantic consolidation batch (cluster + enrich +
+// label/digest). Distinct from consolidate above, which flushes one
+// session's pending sietch events to episodic — see
+// core.ConsolidateWorkspace's doc comment for the seam rationale.
+// Synchronous: chapterhouse runs the batch in-process, so this
+// request blocks for the run's full duration.
+func (s *Server) consolidateWorkspace(w http.ResponseWriter, r *http.Request) {
+	var req core.ConsolidateWorkspaceInput
+	if err := decode(r, &req); err != nil {
+		s.handleErr(w, r, err)
+		return
+	}
+	if err := s.core.ConsolidateWorkspace(r.Context(), req); err != nil {
+		s.handleErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // Errors is exported for tests that want to assert canonical error

@@ -254,6 +254,18 @@ type AddSessionWorkspaceInput struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// ConsolidateWorkspaceInput is the request shape for
+// Core.ConsolidateWorkspace — the manual trigger for chapterhouse's
+// episodic->semantic consolidation batch. Workspace resolution mirrors
+// RecallInput: an explicit Workspace wins; otherwise Cwd (when
+// non-empty) is derived via WorkspaceForCwd so MCP agents can trigger
+// consolidation with the directory they already know instead of a
+// workspace UUID they don't.
+type ConsolidateWorkspaceInput struct {
+	Workspace string  `json:"workspace,omitempty"`
+	Cwd       *string `json:"cwd,omitempty"`
+}
+
 // SessionStartInput for `session_start`.
 type SessionStartInput struct {
 	UserID       string  `json:"user_id"`

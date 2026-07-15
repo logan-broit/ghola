@@ -88,6 +88,15 @@ type ChapterhouseClient interface {
 	AddSessionWorkspace(ctx context.Context, in AddSessionWorkspaceInput) (added bool, err error)
 
 	QuerySemantic(ctx context.Context, q SemanticQuery) ([]RecallHit, error)
+
+	// ConsolidateWorkspace triggers chapterhouse's episodic->semantic
+	// consolidation batch (POST /v1/semantic/consolidate) for one
+	// workspace, synchronously — the manual counterpart to
+	// chapterhouse's nightly worker schedule, sharing its
+	// RunWorkspace code path. Distinct from Core.Consolidate, which
+	// flushes one session's pending sietch events to episodic
+	// (Pipeline A) — a different pipeline entirely.
+	ConsolidateWorkspace(ctx context.Context, workspaceID string) error
 }
 
 // EpisodicMultiQuery is the request shape for

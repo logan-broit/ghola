@@ -47,6 +47,9 @@ func (noopChapterhouse) AddSessionWorkspace(context.Context, core.AddSessionWork
 func (noopChapterhouse) QuerySemantic(context.Context, core.SemanticQuery) ([]core.RecallHit, error) {
 	return nil, nil
 }
+func (noopChapterhouse) ConsolidateWorkspace(context.Context, string) error {
+	return nil
+}
 
 type fixedEmbedder struct{}
 
@@ -299,8 +302,9 @@ func TestServer_ExpandSessionWorkspace_Happy(t *testing.T) {
 // going to a real chapterhouse server.
 type recordingChapterhouse struct {
 	noopChapterhouse
-	multiQueries []core.EpisodicMultiQuery
-	semQueries   []core.SemanticQuery
+	multiQueries          []core.EpisodicMultiQuery
+	semQueries            []core.SemanticQuery
+	consolidateWorkspaces []string
 }
 
 func (r *recordingChapterhouse) QueryEpisodicMulti(_ context.Context, q core.EpisodicMultiQuery) (core.EpisodicMultiResult, error) {
@@ -310,6 +314,10 @@ func (r *recordingChapterhouse) QueryEpisodicMulti(_ context.Context, q core.Epi
 func (r *recordingChapterhouse) QuerySemantic(_ context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	r.semQueries = append(r.semQueries, q)
 	return nil, nil
+}
+func (r *recordingChapterhouse) ConsolidateWorkspace(_ context.Context, workspaceID string) error {
+	r.consolidateWorkspaces = append(r.consolidateWorkspaces, workspaceID)
+	return nil
 }
 
 // TestServer_Recall_TagsAnyReachesEventGrainTiers — H3.c wire-level pin.
@@ -549,6 +557,83 @@ func TestServer_ExpandSessionWorkspace_PassesThrough409(t *testing.T) {
 		WorkspaceID: "11111111-2222-3333-4444-555555555555",
 	})
 	assert.Equal(t, stdhttp.StatusConflict, resp.StatusCode)
+}
+
+// ---------------------------------------------------------------------
+// /v1/semantic/consolidate — manual trigger for chapterhouse's
+// episodic->semantic consolidation batch. Distinct from /v1/consolidate
+// above (sietch->episodic session flush, Pipeline A).
+// ---------------------------------------------------------------------
+
+func TestServer_ConsolidateWorkspace_Happy(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	ws := "11111111-2222-3333-4444-555555555555"
+	resp, body := post(t, srv, "/v1/semantic/consolidate", map[string]any{
+		"workspace": ws,
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	var out struct {
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.Equal(t, "ok", out.Status)
+
+	require.Len(t, rch.consolidateWorkspaces, 1)
+	assert.Equal(t, ws, rch.consolidateWorkspaces[0])
+}
+
+// TestServer_ConsolidateWorkspace_DerivesFromCwd mirrors recall's cwd
+// ergonomics at the wire level: an agent that only knows cwd must still
+// be able to trigger consolidation.
+func TestServer_ConsolidateWorkspace_DerivesFromCwd(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	cwd := "/home/loganb/ghola"
+	resp, body := post(t, srv, "/v1/semantic/consolidate", map[string]any{
+		"cwd": cwd,
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
+
+	require.Len(t, rch.consolidateWorkspaces, 1)
+	assert.Equal(t, core.WorkspaceForCwd(cwd).String(), rch.consolidateWorkspaces[0])
+}
+
+func TestServer_ConsolidateWorkspace_MissingWorkspaceAndCwd_Returns400(t *testing.T) {
+	rch := &recordingChapterhouse{}
+	srv := newTestServerWithChapterhouse(t, rch)
+
+	resp, body := post(t, srv, "/v1/semantic/consolidate", map[string]any{})
+	assert.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode, "body=%s", body)
+	assert.Empty(t, rch.consolidateWorkspaces)
+}
+
+// consolidateFail500Chapterhouse simulates a mentat-down loud-fail from
+// consolidation.RunWorkspace: chapterhouse's own endpoint doesn't wrap
+// this as a *StatusError (it's a 500 INTERNAL_ERROR on the chapterhouse
+// side per Task 17), so the ghola client surfaces it as a plain error
+// and the HTTP layer's default classification (handleErr) must map it
+// to 500 — not silently swallow it as 200.
+type consolidateFail500Chapterhouse struct{ noopChapterhouse }
+
+func (consolidateFail500Chapterhouse) ConsolidateWorkspace(context.Context, string) error {
+	return &chapterhouse.StatusError{
+		Status:  stdhttp.StatusInternalServerError,
+		Path:    "/v1/semantic/consolidate",
+		Message: "consolidation failed: mentat cluster (loud-fail): connection refused",
+	}
+}
+
+func TestServer_ConsolidateWorkspace_PropagatesChapterhouseFailure(t *testing.T) {
+	srv := newTestServerWithChapterhouse(t, consolidateFail500Chapterhouse{})
+
+	resp, body := post(t, srv, "/v1/semantic/consolidate", map[string]any{
+		"workspace": "11111111-2222-3333-4444-555555555555",
+	})
+	assert.Equal(t, stdhttp.StatusInternalServerError, resp.StatusCode, "body=%s", body)
 }
 
 // ---------------------------------------------------------------------

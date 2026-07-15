@@ -291,6 +291,13 @@ type semanticQueryReq struct {
 	Limit          int       `json:"limit"`
 }
 
+// consolidateWorkspaceReq is the wire shape for the manual
+// consolidation trigger, mirroring chapterhouse's consolidateRequest
+// (_chapterhouse/ch-server/internal/handler/semantic.go).
+type consolidateWorkspaceReq struct {
+	Workspace string `json:"workspace"`
+}
+
 type semanticHitsResp struct {
 	Hits []semanticHitRow `json:"hits"`
 }
@@ -529,6 +536,20 @@ func (c *Client) AddSessionWorkspace(ctx context.Context, in core.AddSessionWork
 		return false, err
 	}
 	return r.Added, nil
+}
+
+// ConsolidateWorkspace POSTs to chapterhouse's
+// /v1/semantic/consolidate, the manual trigger for the episodic->
+// semantic consolidation batch (cluster closed sessions, enrich with
+// excerpts, optionally label/digest). The call is synchronous —
+// chapterhouse runs consolidation.RunWorkspace in-process and the HTTP
+// response doesn't return until the batch completes, so this method
+// blocks for the run's full duration. Distinct from ghola's own
+// Core.Consolidate (sietch->episodic session flush) — see
+// internal/core/core.go's ConsolidateWorkspace doc comment for the
+// seam rationale.
+func (c *Client) ConsolidateWorkspace(ctx context.Context, workspaceID string) error {
+	return c.do(ctx, "/v1/semantic/consolidate", consolidateWorkspaceReq{Workspace: workspaceID}, nil)
 }
 
 func (c *Client) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
