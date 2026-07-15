@@ -37,14 +37,29 @@ type MnemeHit struct {
 const mnemeExcerptCap = 500
 
 func boundExcerpt(s string) string {
-	if len(s) <= mnemeExcerptCap {
+	return TruncateRuneSafe(s, mnemeExcerptCap)
+}
+
+// TruncateRuneSafe bounds s to at most max bytes, walking back to the last
+// complete rune boundary at or before max so the result is always valid
+// UTF-8 (never splits a multibyte rune). Returns s unchanged when
+// len(s) <= max.
+//
+// Shared across the module: the consolidation pipeline (Excerpt,
+// LLMClient.Label) and the semantic handler's content-cap both need the
+// same byte-cap-without-mangling-UTF-8 behavior as this package's own
+// boundExcerpt. repository is the common import root — both consolidation
+// and handler already depend on it — so the helper lives here rather than
+// in a new grab-bag util package.
+func TruncateRuneSafe(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
-	b := s[:mnemeExcerptCap]
-	for len(b) > 0 && !utf8.ValidString(b) {
-		b = b[:len(b)-1]
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return b
+	return s[:cut]
 }
 
 // QueryMnemesByEmbedding runs HNSW cosine over semantic.mnemes and

@@ -4,9 +4,10 @@ import (
 	"math"
 	"sort"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 )
 
 // Candidate is one session (or event) considered for representative
@@ -113,25 +114,12 @@ type Aggregated struct {
 // complete rune boundary at or before the cap so the result is always
 // valid UTF-8 (never splits a multibyte rune). Deliberately a hard byte
 // cap — the mneme carries a COPY, and 500 bytes is enough to seed
-// recall without bloating the row.
+// recall without bloating the row. Delegates to repository.TruncateRuneSafe
+// — the shared rune-safe truncator, also used by LLMClient.Label and the
+// semantic handler/repository read paths (see that function's doc comment
+// for why repository is the shared spot).
 func Excerpt(text string) string {
-	return truncateRuneSafe(text, excerptMax)
-}
-
-// truncateRuneSafe bounds s to at most max bytes, walking back to the last
-// complete rune boundary at or before max so the result is always valid
-// UTF-8 (never splits a multibyte rune). Returns s unchanged when
-// len(s) <= max. Shared by Excerpt and LLMClient.Label — both need the
-// same byte-cap-without-mangling-UTF-8 behavior.
-func truncateRuneSafe(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	cut := max
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut]
+	return repository.TruncateRuneSafe(text, excerptMax)
 }
 
 // Aggregate unions tags/entities across reps (ordered by descending

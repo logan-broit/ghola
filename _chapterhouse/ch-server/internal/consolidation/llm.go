@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 )
 
 // LLMClient is a minimal OpenAI-compatible chat-completions client for
@@ -59,7 +61,7 @@ func (c *LLMClient) Label(ctx context.Context, excerpts []string) (string, error
 		return "", err
 	}
 	line := strings.TrimSpace(strings.SplitN(out, "\n", 2)[0])
-	line = truncateRuneSafe(line, 80)
+	line = repository.TruncateRuneSafe(line, 80)
 	return line, nil
 }
 

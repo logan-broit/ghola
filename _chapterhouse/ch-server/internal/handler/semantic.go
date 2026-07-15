@@ -7,13 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/consolidation"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/mentat"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/semantic"
 	"github.com/thinkwright/chapterhouse/ch-server/pkg/apierror"
 )
@@ -101,14 +101,9 @@ func semanticHitContent(label, excerpt string) string {
 	default:
 		content = excerpt
 	}
-	if len(content) <= semanticContentCap {
-		return content
-	}
-	b := content[:semanticContentCap]
-	for len(b) > 0 && !utf8.ValidString(b) {
-		b = b[:len(b)-1]
-	}
-	return b
+	// Shared rune-safe truncator (repository.TruncateRuneSafe) — see that
+	// function's doc comment for why repository is the shared spot.
+	return repository.TruncateRuneSafe(content, semanticContentCap)
 }
 
 func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +162,15 @@ func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
 	// client disconnect can't abort it and it adds ZERO latency to the
 	// recall response path. Bounded + logged, never surfaced: an access-
 	// tracking failure must not perturb recall.
+	//
+	// Deliberately untouched by level: this also bumps level-2 workspace
+	// digest mnemes when one is returned. Excluding the digest at write time
+	// would destroy information — its access data is a legitimate signal
+	// about whether the digest paragraph itself was useful, and it's
+	// trivially filterable downstream. Any HOLA weak-label analysis over
+	// access_count/last_access MUST filter to level=1 (the digest is
+	// synthetic — a workspace rollup, not a clustered representative — so
+	// mixing it into the level-1 signal would skew the label).
 	if len(hits) > 0 {
 		ids := make([]uuid.UUID, len(hits))
 		for i, hit := range hits {
