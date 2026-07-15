@@ -13,6 +13,7 @@ import (
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/config"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/consolidation"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/embedding"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/mentat"
@@ -224,6 +225,37 @@ func run() error {
 	querier := semantic.NewQuerier(repo, mentatClient, logger)
 	semanticHandler := handler.NewSemanticHandler(querier)
 
+	// Manual consolidation trigger (POST /v1/semantic/consolidate) runs
+	// consolidation.RunWorkspace synchronously — the same code path the
+	// worker's nightly schedule calls (plan seam decision 1; distinct
+	// from ghola's own /v1/consolidate session-flush verb). Wired only
+	// when mentat is configured, matching the L1 reconciler/cluster
+	// scheduler gate above: clustering has nothing to do without mentat.
+	// The LLM client and digest embedder are both optional/nil-safe —
+	// RunWorkspace skips labels/digest rather than failing when unset.
+	if mentatClient != nil {
+		consolidateLLM := consolidation.NewLLMClient(
+			cfg.ConsolidateLLM.URL, cfg.ConsolidateLLM.Model, cfg.ConsolidateLLM.APIKey,
+		)
+		semanticHandler = semanticHandler.WithConsolidateRunner(
+			func(ctx context.Context, ws uuid.UUID) error {
+				return consolidation.RunWorkspace(ctx, consolidation.Deps{
+					Repo:     repo,
+					Mentat:   mentatClient,
+					Pooler:   semantic.NewWriter(repo, mentatClient),
+					LLM:      consolidateLLM,
+					Embedder: ingestEmbedder,
+					Logger:   logger,
+				}, ws)
+			})
+		logger.Info("manual consolidation trigger wired (/v1/semantic/consolidate)",
+			slog.Bool("llm", consolidateLLM != nil),
+			slog.Bool("embedder", ingestEmbedder != nil),
+		)
+	} else {
+		logger.Info("manual consolidation trigger disabled — MENTAT_URL unset")
+	}
+
 	// Legacy MCP transport removed in v2: agents talk to the ghola
 	// local service, which in turn calls chapterhouse's internal /v1
 	// REST surface. The legacy stdio MCP server and frozen
@@ -331,12 +363,17 @@ func buildRouter(
 		})
 
 		r.Route("/semantic", func(r chi.Router) {
-			// v0.3 narrows the surface to /query only. The v0.2
+			// v0.3 narrows the read surface to /query only. The v0.2
 			// /feedback and /list paths are dropped: feedback is
 			// replaced by the dogfooding-tags mechanism in PR7, and
 			// /list returned mnemes with concept/content fields that
 			// no longer exist on the v0.3 schema.
 			r.Post("/query", semanticHandler.Query)
+			// Manual trigger for the episodic->semantic consolidation
+			// batch (cluster + enrich + label/digest). Distinct from
+			// ghola's own /v1/consolidate {session_id} session-flush
+			// verb — see internal/handler/semantic.go doc comment.
+			r.Post("/consolidate", semanticHandler.Consolidate)
 		})
 	})
 

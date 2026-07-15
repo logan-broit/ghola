@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -12,13 +13,15 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/pkg/apierror"
 )
 
-// SemanticHandler services /v1/semantic/query. The v0.2 surface
+// SemanticHandler services /v1/semantic/query and the manual
+// consolidation trigger /v1/semantic/consolidate. The v0.2 surface
 // (feedback + list) is gone — the v0.3 read path is just cosine over
 // pooled embeddings, and the dropped text columns mean list/feedback
 // have no shape that makes sense yet. PR7 introduces a new
 // dogfooding-tags feedback mechanism.
 type SemanticHandler struct {
-	q *semantic.Querier
+	q              *semantic.Querier
+	runConsolidate consolidateRunner
 }
 
 // NewSemanticHandler wraps the concrete Querier. Pass nil-tolerant
@@ -111,4 +114,64 @@ func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	OK(w, out)
+}
+
+// ---------------------------------------------------------------------
+// /v1/semantic/consolidate
+// ---------------------------------------------------------------------
+//
+// Manual trigger for the episodic->semantic consolidation batch (cluster
+// closed sessions, enrich, optionally label/digest). Distinct from
+// ghola's own POST /v1/consolidate {session_id} + MCP `consolidate` verb,
+// which flush one session's pending sietch events to episodic — a
+// different pipeline entirely. This endpoint and the chapterhouse
+// worker's nightly schedule both call consolidation.RunWorkspace, so
+// there is exactly one code path for the job (plan seam decision 1).
+
+// consolidateRunner runs the episodic->semantic batch for a workspace.
+// Defaulted in cmd/api to a closure over consolidation.RunWorkspace +
+// the API's deps; tests inject a fake. nil => 500 (not configured).
+type consolidateRunner func(ctx context.Context, workspaceID uuid.UUID) error
+
+// WithConsolidateRunner attaches the manual-trigger runner. Fluent.
+func (h *SemanticHandler) WithConsolidateRunner(fn consolidateRunner) *SemanticHandler {
+	h.runConsolidate = fn
+	return h
+}
+
+// consolidateRequest is the wire shape for POST /v1/semantic/consolidate.
+type consolidateRequest struct {
+	Workspace uuid.UUID `json:"workspace"`
+}
+
+// Consolidate handles POST /v1/semantic/consolidate. Synchronous: runs
+// the full workspace pipeline and returns when done. This is the manual
+// counterpart to the worker's nightly schedule — same code path
+// (consolidation.RunWorkspace). The job is idempotent (unchanged-
+// membership reinforcements are skipped, ArchivePriorDigest+
+// InsertDigestMneme converge on re-run), so a manual trigger racing the
+// nightly tick converges rather than corrupting state.
+func (h *SemanticHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
+	if auth.UserIDFromContext(r.Context()) == uuid.Nil {
+		apierror.Unauthorized("authentication required").WriteJSON(w)
+		return
+	}
+	var req consolidateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierror.BadRequest("invalid JSON body").WriteJSON(w)
+		return
+	}
+	if req.Workspace == uuid.Nil {
+		apierror.BadRequest("workspace is required").WriteJSON(w)
+		return
+	}
+	if h.runConsolidate == nil {
+		apierror.InternalError("consolidation not configured").WriteJSON(w)
+		return
+	}
+	if err := h.runConsolidate(r.Context(), req.Workspace); err != nil {
+		apierror.InternalError("consolidation failed").WithError(err).WriteJSON(w)
+		return
+	}
+	OK(w, map[string]string{"status": "ok"})
 }

@@ -30,6 +30,21 @@ type Config struct {
 	// cluster on each tick. Empty list = scheduler runs but does
 	// nothing — clustering is opt-in per workspace.
 	MentatClusterWorkspaces []string
+	// ConsolidateLLM configures the optional OpenAI-compatible chat
+	// client used by POST /v1/semantic/consolidate for per-cluster
+	// labels + the workspace digest. Empty URL means
+	// consolidation.NewLLMClient returns nil and the pipeline skips
+	// label/digest (never fails) — mirrors cmd/worker's CONSOLIDATE_LLM_*
+	// handling so the manual trigger and the nightly job behave alike.
+	ConsolidateLLM ConsolidateLLMConfig
+}
+
+// ConsolidateLLMConfig holds the optional chat-completions client
+// configuration for consolidation labels/digest.
+type ConsolidateLLMConfig struct {
+	URL    string
+	Model  string
+	APIKey string
 }
 
 // ServerConfig holds HTTP server configuration.
@@ -128,6 +143,11 @@ func Load() (*Config, error) {
 		MentatURL:               envcfg.String("MENTAT_URL", ""),
 		MentatClusterInterval:   envcfg.Duration("MENTAT_CLUSTER_INTERVAL", 24*time.Hour),
 		MentatClusterWorkspaces: parseCSV(envcfg.String("MENTAT_CLUSTER_WORKSPACES", "")),
+		ConsolidateLLM: ConsolidateLLMConfig{
+			URL:    envcfg.String("CONSOLIDATE_LLM_URL", ""),
+			Model:  envcfg.String("CONSOLIDATE_LLM_MODEL", "local-model"),
+			APIKey: envcfg.String("CONSOLIDATE_LLM_API_KEY", ""),
+		},
 	}
 
 	if err := cfg.validate(); err != nil {
