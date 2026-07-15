@@ -3,6 +3,7 @@ package consolidation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -14,6 +15,13 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/mentat"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 )
+
+// ErrConsolidationBusy signals that another consolidation run already holds
+// the workspace's advisory lock. RunWorkspace returns it instead of racing
+// a concurrent run (which could double-insert clusters or double-reinforce).
+// The manual-trigger handler maps it to 409 Conflict; the nightly job
+// logs-and-skips that workspace and retries next tick.
+var ErrConsolidationBusy = errors.New("consolidation already running for this workspace")
 
 // Embedder is the seam for embedding the digest text (satisfied by
 // *embedding.OpenAIProvider). Nil disables the digest write.
@@ -57,11 +65,30 @@ type Deps struct {
 // The design deliberately declines a workspace-wide transaction: the
 // stages touch two schemas and an external service, and the idempotency
 // above makes the transaction's only benefit — crash atomicity — moot.
+//
+// Concurrency: this is the single seam both the nightly job and the manual
+// trigger flow through, so it is where the per-workspace advisory lock is
+// acquired. A second concurrent run on the same workspace short-circuits
+// with ErrConsolidationBusy rather than racing the first (which could
+// double-insert a new cluster or double-reinforce an existing mneme). The
+// lock is held on a dedicated connection for the run's full duration and
+// released on return.
 func RunWorkspace(ctx context.Context, d Deps, workspaceID uuid.UUID) error {
 	log := d.Logger
 	if log == nil {
 		log = slog.Default()
 	}
+
+	// Serialize per workspace: decline rather than race a concurrent run.
+	release, acquired, err := d.Repo.TryWorkspaceConsolidationLock(ctx, workspaceID)
+	if err != nil {
+		return fmt.Errorf("acquire consolidation lock: %w", err)
+	}
+	if !acquired {
+		return ErrConsolidationBusy
+	}
+	defer release()
+
 	mcs := d.MinClusterSize
 	if mcs == 0 {
 		mcs = 3

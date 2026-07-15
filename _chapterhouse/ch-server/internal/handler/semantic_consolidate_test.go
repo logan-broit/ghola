@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/consolidation"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/handler"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/semantic"
 )
@@ -96,11 +99,12 @@ func TestSemanticConsolidate_RunnerError_ReturnsInternalError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-// TestSemanticConsolidate_RunnerNotConfigured_ReturnsInternalError pins
-// the nil-runner default: a deployment that never wired a runner (no
-// WithConsolidateRunner call) must not panic — it 500s with a clear
-// message.
-func TestSemanticConsolidate_RunnerNotConfigured_ReturnsInternalError(t *testing.T) {
+// TestSemanticConsolidate_RunnerNotConfigured_ReturnsServiceUnavailable
+// pins the nil-runner default: a deployment that never wired a runner (no
+// WithConsolidateRunner call) must not panic — it 503s (the feature is
+// unconfigured, not a server fault), so callers can distinguish a
+// deploy-time gap from a genuine 500.
+func TestSemanticConsolidate_RunnerNotConfigured_ReturnsServiceUnavailable(t *testing.T) {
 	h := handler.NewSemanticHandler(&semantic.Querier{})
 
 	req := authedSemanticRequest(t, http.MethodPost, "/v1/semantic/consolidate",
@@ -108,7 +112,71 @@ func TestSemanticConsolidate_RunnerNotConfigured_ReturnsInternalError(t *testing
 	rec := httptest.NewRecorder()
 	h.Consolidate(rec, req)
 
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestSemanticConsolidate_BusyLock_ReturnsConflict pins the concurrency
+// guard's HTTP mapping: when the runner reports the workspace is already
+// consolidating (consolidation.ErrConsolidationBusy from the advisory
+// lock), the handler must return 409 Conflict — a retryable signal — not
+// a 500 that reads as a server fault.
+func TestSemanticConsolidate_BusyLock_ReturnsConflict(t *testing.T) {
+	h := handler.NewSemanticHandler(&semantic.Querier{})
+	h = h.WithConsolidateRunner(func(_ context.Context, _ uuid.UUID) error {
+		return consolidation.ErrConsolidationBusy
+	})
+
+	req := authedSemanticRequest(t, http.MethodPost, "/v1/semantic/consolidate",
+		map[string]any{"workspace": uuid.New()}, uuid.New())
+	rec := httptest.NewRecorder()
+	h.Consolidate(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
+}
+
+// TestSemanticConsolidate_RunDetachedFromRequestContext pins Finding 1a:
+// the run must NOT be aborted when the client disconnects or its request
+// times out. The handler detaches the run from the request context
+// (context.WithoutCancel), so cancelling the request context leaves the
+// runner's context live — the batch completes server-side and an
+// idempotent re-trigger converges. The runner's context must still carry
+// request-scoped values (auth), proving it's a WithoutCancel derivation,
+// not a bare context.Background().
+func TestSemanticConsolidate_RunDetachedFromRequestContext(t *testing.T) {
+	userID := uuid.New()
+	h := handler.NewSemanticHandler(&semantic.Querier{})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var runCtx context.Context
+	h = h.WithConsolidateRunner(func(ctx context.Context, _ uuid.UUID) error {
+		runCtx = ctx
+		close(started)
+		<-release // hold the run open so we can cancel the request mid-flight
+		return nil
+	})
+
+	base := authedSemanticRequest(t, http.MethodPost, "/v1/semantic/consolidate",
+		map[string]any{"workspace": uuid.New()}, userID)
+	ctx, cancel := context.WithCancel(base.Context())
+	req := base.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.Consolidate(rec, req)
+		close(done)
+	}()
+
+	<-started
+	cancel() // client disconnect / timeout: the request context is now done
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, runCtx.Err(), "run context must survive request cancellation")
+	assert.Equal(t, userID, auth.UserIDFromContext(runCtx),
+		"detached run context must still carry request-scoped auth values")
+
+	close(release)
+	<-done
 }
 
 // TestSemanticConsolidate_Unauthenticated_ReturnsUnauthorized mirrors

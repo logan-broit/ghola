@@ -31,6 +31,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -197,6 +198,15 @@ func runNightlyConsolidation(ctx context.Context, d consolidation.Deps, workspac
 		}
 		for _, ws := range workspaces {
 			if err := consolidation.RunWorkspace(ctx, d, ws); err != nil {
+				// A concurrent run (e.g. a manual trigger) holds the
+				// workspace lock — skip and let the next tick retry rather
+				// than treating contention as a failure.
+				if errors.Is(err, consolidation.ErrConsolidationBusy) {
+					logger.Info("consolidation skipped; already running for workspace",
+						slog.String("workspace_id", ws.String()),
+					)
+					continue
+				}
 				logger.Error("consolidation run failed",
 					slog.String("workspace_id", ws.String()),
 					slog.String("error", err.Error()),

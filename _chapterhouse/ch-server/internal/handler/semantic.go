@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
 
 	"github.com/thinkwright/chapterhouse/ch-server/internal/auth"
+	"github.com/thinkwright/chapterhouse/ch-server/internal/consolidation"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/mentat"
 	"github.com/thinkwright/chapterhouse/ch-server/internal/semantic"
 	"github.com/thinkwright/chapterhouse/ch-server/pkg/apierror"
@@ -147,10 +149,23 @@ type consolidateRequest struct {
 // Consolidate handles POST /v1/semantic/consolidate. Synchronous: runs
 // the full workspace pipeline and returns when done. This is the manual
 // counterpart to the worker's nightly schedule — same code path
-// (consolidation.RunWorkspace). The job is idempotent (unchanged-
-// membership reinforcements are skipped, ArchivePriorDigest+
-// InsertDigestMneme converge on re-run), so a manual trigger racing the
-// nightly tick converges rather than corrupting state.
+// (consolidation.RunWorkspace).
+//
+// Concurrency safety is now ENFORCED, not merely tolerated: a per-workspace
+// advisory lock inside RunWorkspace serializes runs, so a manual trigger
+// racing the nightly tick (or a second manual trigger) sees
+// ErrConsolidationBusy and this handler returns 409 Conflict rather than
+// letting two runs race. Sequential re-runs still converge idempotently
+// (unchanged-membership reinforcements are skipped; ArchivePriorDigest+
+// InsertDigestMneme replace the single active digest), which is what makes
+// the 409-then-retry safe.
+//
+// Detached run context: the pipeline runs on context.WithoutCancel(r.Context())
+// so a client disconnect or a client-side timeout does NOT abort a run
+// already in flight — consolidation legitimately takes tens of seconds to
+// minutes. The run completes server-side; if the response was lost, an
+// idempotent re-trigger converges. The detached context still carries
+// request-scoped values (auth) so downstream reads stay authorized.
 func (h *SemanticHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
 	if auth.UserIDFromContext(r.Context()) == uuid.Nil {
 		apierror.Unauthorized("authentication required").WriteJSON(w)
@@ -166,10 +181,20 @@ func (h *SemanticHandler) Consolidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.runConsolidate == nil {
-		apierror.InternalError("consolidation not configured").WriteJSON(w)
+		// The feature is unconfigured (deployment ran without mentat), not a
+		// server fault — 503 lets callers distinguish a deploy-time gap from
+		// a genuine 500.
+		apierror.ServiceUnavailable("consolidation not configured").WriteJSON(w)
 		return
 	}
-	if err := h.runConsolidate(r.Context(), req.Workspace); err != nil {
+	// Detach from the request context so a client disconnect/timeout can't
+	// abort a run mid-flight (Finding 1a). WithoutCancel preserves values.
+	runCtx := context.WithoutCancel(r.Context())
+	if err := h.runConsolidate(runCtx, req.Workspace); err != nil {
+		if errors.Is(err, consolidation.ErrConsolidationBusy) {
+			apierror.Conflict("consolidation already running for this workspace").WriteJSON(w)
+			return
+		}
 		apierror.InternalError("consolidation failed").WithError(err).WriteJSON(w)
 		return
 	}

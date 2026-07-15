@@ -42,9 +42,10 @@ type ClusterAssignment struct {
 // label-partitioning in groupClusters guarantees — each session id maps to
 // at most one non-noise label). This function does not enforce disjointness:
 // overlapping assignments passed in one call can both match the same
-// existing mneme and reinforce it in sequence, so the result silently merges
-// them into one row via reinforce-with-superset semantics (the second
-// reinforcement's MemberIDs simply replace the first's) rather than
+// existing mneme and reinforce it in sequence, so the result silently
+// collapses them into one row via last-write-wins overwrite — ReinforceMneme's
+// UPDATE replaces member_ids outright (the second reinforcement's MemberIDs
+// overwrite the first's; it is not a union/superset merge) — rather than
 // producing two mnemes.
 func ApplyClusters(ctx context.Context, repo *repository.Repository, workspaceID uuid.UUID, assigns []ClusterAssignment) (int, error) {
 	existing, err := repo.WorkspaceLevel1Mnemes(ctx, workspaceID)
