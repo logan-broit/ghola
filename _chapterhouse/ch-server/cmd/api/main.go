@@ -193,8 +193,8 @@ func run() error {
 	// consolidation.RunWorkspace synchronously — the same code path the
 	// worker's nightly schedule calls (plan seam decision 1; distinct
 	// from ghola's own /v1/consolidate session-flush verb). Wired only
-	// when mentat is configured, matching the L1 reconciler/cluster
-	// scheduler gate above: clustering has nothing to do without mentat.
+	// when mentat is configured, matching the L1 reconciler gate above:
+	// clustering has nothing to do without mentat.
 	// The LLM client and digest embedder are both optional/nil-safe —
 	// RunWorkspace skips labels/digest rather than failing when unset.
 	if mentatClient != nil {
