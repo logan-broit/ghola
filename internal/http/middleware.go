@@ -112,3 +112,12 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	return nil, nil, http.ErrNotSupported
 }
+
+// Unwrap exposes the underlying ResponseWriter so http.ResponseController
+// can reach connection-level controls (e.g. SetWriteDeadline) that the base
+// writer implements but this status-capturing wrapper does not. The
+// consolidate route uses it to lift the server-wide WriteTimeout for a
+// legitimately long batch.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}

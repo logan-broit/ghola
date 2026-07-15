@@ -46,6 +46,29 @@ type Client struct {
 	http    *http.Client
 }
 
+const (
+	// defaultRequestTimeout bounds a normal chapterhouse call end-to-end.
+	// Applied per-request via context in do() (not as a fixed
+	// http.Client.Timeout) so a single route can be lifted without a
+	// separate client.
+	defaultRequestTimeout = 30 * time.Second
+	// consolidateTimeout bounds the manual consolidation trigger, which is
+	// synchronous and blocks for the full episodic->semantic batch (tens of
+	// seconds to minutes) — far past the default. See ConsolidateWorkspace.
+	consolidateTimeout = 10 * time.Minute
+)
+
+// requestTimeout returns the per-request deadline for a chapterhouse path.
+// The consolidate route legitimately runs for minutes; everything else uses
+// the default. do() consults this single knob, so lifting a route is a
+// one-line change here rather than a bespoke client per method.
+func requestTimeout(path string) time.Duration {
+	if path == "/v1/semantic/consolidate" {
+		return consolidateTimeout
+	}
+	return defaultRequestTimeout
+}
+
 // New builds a Client. `baseURL` is chapterhouse's root URL
 // (e.g. "http://localhost:8080" or
 // "https://chapterhouse.example.com"). apiKey is the per-user
@@ -54,9 +77,11 @@ func New(baseURL, apiKey string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		// No client-level Timeout: per-request deadlines are applied in do()
+		// via requestTimeout(path). A fixed http.Client.Timeout would clip
+		// every request uniformly and cap the long-running consolidate call
+		// below its legitimate multi-minute duration.
+		http: &http.Client{},
 	}
 }
 
@@ -68,6 +93,14 @@ func (c *Client) WithHTTPClient(h *http.Client) *Client {
 }
 
 func (c *Client) do(ctx context.Context, path string, body, out any) error {
+	// Per-request deadline: bounds normal calls at defaultRequestTimeout and
+	// lifts the long-running consolidate call to consolidateTimeout. Layered
+	// on ctx (WithTimeout takes the min) so an earlier caller deadline still
+	// wins. Replaces the former fixed 30s http.Client.Timeout, which would
+	// have aborted consolidate mid-batch.
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout(path))
+	defer cancel()
+
 	buf := new(bytes.Buffer)
 	if body != nil {
 		if err := json.NewEncoder(buf).Encode(body); err != nil {
@@ -544,8 +577,10 @@ func (c *Client) AddSessionWorkspace(ctx context.Context, in core.AddSessionWork
 // excerpts, optionally label/digest). The call is synchronous —
 // chapterhouse runs consolidation.RunWorkspace in-process and the HTTP
 // response doesn't return until the batch completes, so this method
-// blocks for the run's full duration. Distinct from ghola's own
-// Core.Consolidate (sietch->episodic session flush) — see
+// blocks for the run's full duration. do() therefore grants this path the
+// generous consolidateTimeout (10m) instead of the shared 30s — a batch of
+// tens of seconds to minutes must not be aborted mid-run. Distinct from
+// ghola's own Core.Consolidate (sietch->episodic session flush) — see
 // internal/core/core.go's ConsolidateWorkspace doc comment for the
 // seam rationale.
 func (c *Client) ConsolidateWorkspace(ctx context.Context, workspaceID string) error {
