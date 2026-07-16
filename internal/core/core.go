@@ -289,6 +289,14 @@ func lastActivity(s Session) time.Time {
 // append to. idle <= 0 disables the check (always reusable). Otherwise
 // the session is reusable only if its last activity is strictly younger
 // than idle — age exactly equal to the timeout counts as stale.
+//
+// Traced edge: if the embedder is down, an event can get stuck on
+// needsEmbedding, which blocks that session's drain-to-episodic. If
+// such a session then goes stale (per this function), it falls out of
+// the sietch tier's reusable scope while its tail is still not in
+// episodic — a temporary recall blind spot. This self-heals once the
+// embedder recovers: the encoding worker retries the stuck event every
+// tick regardless of the session's staleness.
 func sessionReusable(s Session, now time.Time, idle time.Duration) bool {
 	if idle <= 0 {
 		return true
