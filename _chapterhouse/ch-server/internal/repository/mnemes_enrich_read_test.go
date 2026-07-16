@@ -28,17 +28,35 @@ func TestWorkspaceSessionL1s_ReturnsOnlyPopulated(t *testing.T) {
 	ctx := context.Background()
 	ws := uuid.New()
 
-	// One session WITH l1_embedding, one WITHOUT.
+	// user_id MUST differ from the workspace id: the workspace<->session
+	// mapping lives in episodic.session_workspaces (migration 006), NOT on
+	// episodic.sessions.user_id. Seeding user_id == ws would make the old
+	// `WHERE user_id = $1` SQL pass by coincidence; a distinct user_id forces
+	// the query to scope through the join table (the real prod shape, where a
+	// workspace pools many users' sessions).
+	userID := uuid.New()
+	require.NotEqual(t, ws, userID)
+
+	// One session WITH l1_embedding, one WITHOUT — both mapped to ws via
+	// session_workspaces so the IS NOT NULL filter (not the mapping) is what
+	// excludes the second.
 	with := uuid.New()
+	without := uuid.New()
 	lit := "[" + repeatCsv("0.1", 1024) + "]"
 	_, err := pg.Pool.Exec(ctx, `
 		INSERT INTO episodic.sessions (id, user_id, started_at, ended_at, event_count, l1_embedding)
-		VALUES ($1, $2, now(), now(), 0, ($3::text)::vector)`, with, ws, lit)
+		VALUES ($1, $2, now(), now(), 0, ($3::text)::vector)`, with, userID, lit)
 	require.NoError(t, err)
 	_, err = pg.Pool.Exec(ctx, `
 		INSERT INTO episodic.sessions (id, user_id, started_at, ended_at, event_count)
-		VALUES ($1, $2, now(), now(), 0)`, uuid.New(), ws)
+		VALUES ($1, $2, now(), now(), 0)`, without, userID)
 	require.NoError(t, err)
+	for _, sid := range []uuid.UUID{with, without} {
+		_, err = pg.Pool.Exec(ctx, `
+			INSERT INTO episodic.session_workspaces (session_id, workspace_id)
+			VALUES ($1, $2)`, sid, ws)
+		require.NoError(t, err)
+	}
 
 	got, err := repo.WorkspaceSessionL1s(ctx, ws)
 	require.NoError(t, err)

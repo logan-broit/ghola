@@ -340,14 +340,23 @@ type SessionL1 struct {
 
 // WorkspaceSessionL1s returns every closed session in the workspace with
 // a populated l1_embedding, as parallel (id, vector) rows for clustering.
-// Workspace is scoped via user_id (chapterhouse maps user_id==workspace
-// in the single-tenant dev deployment; see ClosedSessionsMissingL1).
+//
+// Workspace scoping goes through episodic.session_workspaces (migration
+// 006): a session belongs to >=1 workspace and that mapping is NOT a
+// column on episodic.sessions. The earlier `WHERE user_id = $1` was wrong
+// — it matched the workspace uuid against the session owner's user_id,
+// which only coincides when a workspace happens to equal a user id.
+// In prod the dogfooding workspace pools 16 sessions under a workspace id
+// that is not any user's id, so that filter read zero rows and
+// consolidation logged "no L1 sessions; nothing to do". The join here
+// mirrors the episodic read path (QueryEpisodicSessionVector).
 func (r *Repository) WorkspaceSessionL1s(ctx context.Context, workspaceID uuid.UUID) ([]SessionL1, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, l1_embedding::text
-		FROM episodic.sessions
-		WHERE user_id = $1 AND l1_embedding IS NOT NULL
-		ORDER BY id ASC`, workspaceID)
+		SELECT s.id, s.l1_embedding::text
+		FROM episodic.sessions s
+		JOIN episodic.session_workspaces sw ON sw.session_id = s.id
+		WHERE sw.workspace_id = $1 AND s.l1_embedding IS NOT NULL
+		ORDER BY s.id ASC`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("workspace session l1s: %w", err)
 	}

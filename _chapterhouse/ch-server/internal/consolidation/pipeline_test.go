@@ -54,11 +54,20 @@ func seedWorkspace(t *testing.T, repo *repository.Repository, ws uuid.UUID, n in
 	ctx := context.Background()
 	for i := 0; i < n; i++ {
 		sid := uuid.New()
+		// user_id is distinct from the workspace id: workspace scoping lives
+		// in episodic.session_workspaces, not on sessions.user_id (migration
+		// 006). Seeding user_id == ws would let a user_id-based query pass by
+		// coincidence and hide a regression of the WorkspaceSessionL1s join.
+		uid := uuid.New()
 		_, err := repo.Pool().Exec(ctx, `
 			INSERT INTO episodic.sessions
 			  (id, user_id, started_at, ended_at, event_count, cwd, git_branch)
 			VALUES ($1, $2, now(), now(), 2, '/home/loganb/ghola', 'feat/consolidation')`,
-			sid, ws)
+			sid, uid)
+		require.NoError(t, err)
+		_, err = repo.Pool().Exec(ctx, `
+			INSERT INTO episodic.session_workspaces (session_id, workspace_id)
+			VALUES ($1, $2)`, sid, ws)
 		require.NoError(t, err)
 
 		for j := 0; j < 2; j++ {
@@ -74,7 +83,7 @@ func seedWorkspace(t *testing.T, repo *repository.Repository, ws uuid.UUID, n in
 				   tags, entities, created_at)
 				VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, ($6::text)::vector,
 				        $7, $8, now())`,
-				eid, sid, ws, typ,
+				eid, sid, uid, typ,
 				"event text for session "+strconv.Itoa(i)+" blob "+strconv.Itoa(j),
 				vecLit(vec1024(fill)),
 				[]string{"go", "consolidation"}, []string{"ghola"})
@@ -125,11 +134,18 @@ func seedSession(t *testing.T, repo *repository.Repository, ws uuid.UUID, l1fill
 	t.Helper()
 	ctx := context.Background()
 	sid := uuid.New()
+	// Distinct user_id: workspace membership is carried by
+	// episodic.session_workspaces, not sessions.user_id (see seedWorkspace).
+	uid := uuid.New()
 	_, err := repo.Pool().Exec(ctx, `
 		INSERT INTO episodic.sessions
 		  (id, user_id, started_at, ended_at, event_count, cwd, git_branch)
 		VALUES ($1, $2, $3, $3, 2, '/home/loganb/ghola', 'feat/consolidation')`,
-		sid, ws, createdAt)
+		sid, uid, createdAt)
+	require.NoError(t, err)
+	_, err = repo.Pool().Exec(ctx, `
+		INSERT INTO episodic.session_workspaces (session_id, workspace_id)
+		VALUES ($1, $2)`, sid, ws)
 	require.NoError(t, err)
 	for j := 0; j < 2; j++ {
 		typ := "user"
@@ -142,7 +158,7 @@ func seedSession(t *testing.T, repo *repository.Repository, ws uuid.UUID, l1fill
 			   tags, entities, created_at)
 			VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, ($6::text)::vector,
 			        $7, $8, $9)`,
-			uuid.New(), sid, ws, typ, token+" cluster session work",
+			uuid.New(), sid, uid, typ, token+" cluster session work",
 			vecLit(vec1024(l1fill)),
 			[]string{"go", token}, []string{token}, createdAt)
 		require.NoError(t, err)

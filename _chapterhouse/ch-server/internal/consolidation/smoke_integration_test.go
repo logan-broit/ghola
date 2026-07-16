@@ -125,11 +125,20 @@ func seedSmokeBlob(t *testing.T, ctx context.Context, repo *repository.Repositor
 	blobTag := smokeBlobTag(blob)
 	for i := 0; i < n; i++ {
 		sid := uuid.New()
+		// Distinct user_id from the scratch workspace id: workspace scoping
+		// goes through episodic.session_workspaces (migration 006), so the
+		// smoke exercises the real WorkspaceSessionL1s join rather than the
+		// old user_id==workspace coincidence.
+		uid := uuid.New()
 		_, err := repo.Pool().Exec(ctx, `
 			INSERT INTO episodic.sessions
 			  (id, user_id, started_at, ended_at, event_count, cwd, git_branch)
 			VALUES ($1, $2, now(), now(), 2, '/tmp/consolidation-smoke', 'integration-smoke')`,
-			sid, ws)
+			sid, uid)
+		require.NoError(t, err)
+		_, err = repo.Pool().Exec(ctx, `
+			INSERT INTO episodic.session_workspaces (session_id, workspace_id)
+			VALUES ($1, $2)`, sid, ws)
 		require.NoError(t, err)
 
 		for j, typ := range []string{"user", "assistant"} {
@@ -139,7 +148,7 @@ func seedSmokeBlob(t *testing.T, ctx context.Context, repo *repository.Repositor
 				   tags, entities, created_at)
 				VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, ($6::text)::vector,
 				        $7, $8, now())`,
-				uuid.New(), sid, ws, typ,
+				uuid.New(), sid, uid, typ,
 				fmt.Sprintf("consolidation smoke event text blob=%d session=%d role=%s", blob, i, typ),
 				smokeVecLit(dim, blob, i*2+j),
 				[]string{"integration-smoke", "consolidation", blobTag}, []string{"smoke"})
