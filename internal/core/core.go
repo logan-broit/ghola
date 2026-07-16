@@ -360,6 +360,15 @@ func (c *Core) SweepIdleSession(ctx context.Context, sessionID string) (bool, er
 		return false, nil // still active
 	}
 	if err := c.SessionEnd(ctx, sessionID); err != nil {
+		// Residual: if MarkEnded landed but the later CloseSession call
+		// failed, EndedAt is now non-nil, so every later sweep sees
+		// "already closed" above and skips this session forever -- it is
+		// never retried here. That is acceptable: GCSession keys off the
+		// same EndedAt (not off whether CloseSession succeeded), so once
+		// the retention window passes it still reaps the file and its fd
+		// (or a process restart does); and this tick's Consolidate call,
+		// which ran before CloseSession inside SessionEnd, already
+		// drained any tail events, so nothing is lost.
 		return false, fmt.Errorf("sweep session end (session=%q): %w", sessionID, err)
 	}
 	slog.InfoContext(ctx, "swept idle session closed",

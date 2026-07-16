@@ -133,3 +133,64 @@ func TestExecute_SegmentsSessionByGap(t *testing.T) {
 		assert.Equal(t, sid, backup[eid], "backup maps event -> original session")
 	}
 }
+
+// TestExecute_ClosesOrphanSession exercises the orphan-close path: a
+// second, unrelated open session (the known "second open session"
+// shape the dogfooding DB has) is passed as orphanSessionID and must
+// end up closed, with ended_at set from its own last event.
+func TestExecute_ClosesOrphanSession(t *testing.T) {
+	pg := testutil.NewEphemeralPostgres(t)
+	t.Setenv("EMBEDDING_DIM", "1024")
+	ctx := context.Background()
+	require.NoError(t, repository.ApplyMigrations(ctx, pg.Pool))
+
+	sid := uuid.NewString()
+	uid := uuid.NewString()
+	base := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+
+	// Original session: a single short episode, no split needed here --
+	// this test is only about the orphan-close side effect of Execute.
+	_, err := pg.Pool.Exec(ctx, `
+		INSERT INTO episodic.sessions (id, user_id, started_at, event_count, cwd)
+		VALUES ($1::uuid, $2::uuid, $3, 1, '/tmp/dog')`,
+		sid, uid, base)
+	require.NoError(t, err)
+	_, err = pg.Pool.Exec(ctx, `
+		INSERT INTO episodic.events (id, session_id, user_id, type, text, raw_event, created_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'user', 'hi', '{}'::jsonb, $4)`,
+		uuid.NewString(), sid, uid, base)
+	require.NoError(t, err)
+
+	// A second, orphaned OPEN session (ended_at NULL) with its own event.
+	orphanID := uuid.NewString()
+	orphanEventTime := base.Add(1*time.Hour + 5*time.Minute)
+	_, err = pg.Pool.Exec(ctx, `
+		INSERT INTO episodic.sessions (id, user_id, started_at, event_count, cwd)
+		VALUES ($1::uuid, $2::uuid, $3, 1, '/tmp/dog')`,
+		orphanID, uid, base.Add(time.Hour))
+	require.NoError(t, err)
+	_, err = pg.Pool.Exec(ctx, `
+		INSERT INTO episodic.events (id, session_id, user_id, type, text, raw_event, created_at)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'user', 'hi', '{}'::jsonb, $4)`,
+		uuid.NewString(), orphanID, uid, orphanEventTime)
+	require.NoError(t, err)
+
+	plan, err := BuildPlan(ctx, pg.Pool, sid, 4*time.Hour)
+	require.NoError(t, err)
+	require.Len(t, plan.Segments, 1, "single episode, no split")
+
+	backupPath := filepath.Join(t.TempDir(), "backup.json")
+	require.NoError(t, Execute(ctx, pg.Pool, plan, backupPath, orphanID))
+
+	var orphanClosed bool
+	require.NoError(t, pg.Pool.QueryRow(ctx,
+		`SELECT ended_at IS NOT NULL FROM episodic.sessions WHERE id = $1::uuid`, orphanID).
+		Scan(&orphanClosed))
+	require.True(t, orphanClosed, "orphan session must end up closed")
+
+	var matchesLastEvent bool
+	require.NoError(t, pg.Pool.QueryRow(ctx,
+		`SELECT ended_at = $2 FROM episodic.sessions WHERE id = $1::uuid`,
+		orphanID, orphanEventTime).Scan(&matchesLastEvent))
+	assert.True(t, matchesLastEvent, "orphan ended_at set from its own last event")
+}

@@ -135,13 +135,29 @@ func Execute(ctx context.Context, pool *pgxpool.Pool, p Plan, backupPath, orphan
 	if backupPath == "" {
 		return errors.New("backup path required")
 	}
-	// Write the restore backup BEFORE mutating anything.
+	// Write the restore backup BEFORE mutating anything. fsync explicitly
+	// (rather than os.WriteFile) so "backup before mutate" is actually
+	// crash-durable: a bare write can sit in the page cache and vanish on
+	// a crash between this call and the transaction below, leaving no
+	// restore key for a mutation that DID land.
 	raw, err := json.MarshalIndent(p.Backup, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal backup: %w", err)
 	}
-	if err := os.WriteFile(backupPath, raw, 0o644); err != nil {
+	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create backup %s: %w", backupPath, err)
+	}
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
 		return fmt.Errorf("write backup %s: %w", backupPath, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("fsync backup %s: %w", backupPath, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close backup %s: %w", backupPath, err)
 	}
 
 	// Source the original session's metadata + its workspaces to copy
