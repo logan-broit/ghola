@@ -327,6 +327,48 @@ func (c *Core) SessionEnd(ctx context.Context, sessionID string) error {
 	return c.Sietch.CloseSession(ctx, sessionID)
 }
 
+// SweepIdleSession closes an open session that has gone quiet past the
+// idle timeout, running the full SessionEnd sequence (MarkEnded ->
+// Consolidate flush -> CloseSession). Returns true when it closed the
+// session. It is a no-op (false, nil) when: the idle timeout is disabled
+// (<= 0); the session row is missing (a schema-only orphan — GCSession's
+// job); the session is already ended; or its last activity is still
+// within the timeout. This is the guaranteed-closure counterpart to the
+// record-time staleness filter in findOpenSession: nothing on the MCP
+// path calls SessionEnd, so without the sweep an open session never
+// closes and its L1 pooling + consolidation never fire. Called per
+// session by the encoding worker's Tick.
+func (c *Core) SweepIdleSession(ctx context.Context, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, ErrMissingSessionID
+	}
+	if c.SessionIdleTimeout <= 0 {
+		return false, nil
+	}
+	sess, err := c.Sietch.GetSession(ctx, sessionID)
+	if errors.Is(err, ErrSessionNotFound) {
+		return false, nil // schema-only orphan; GCSession reaps it
+	}
+	if err != nil {
+		return false, fmt.Errorf("sweep get session (session=%q): %w", sessionID, err)
+	}
+	if sess.EndedAt != nil {
+		return false, nil // already closed
+	}
+	idleFor := c.Now().Sub(lastActivity(sess))
+	if idleFor < c.SessionIdleTimeout {
+		return false, nil // still active
+	}
+	if err := c.SessionEnd(ctx, sessionID); err != nil {
+		return false, fmt.Errorf("sweep session end (session=%q): %w", sessionID, err)
+	}
+	slog.InfoContext(ctx, "swept idle session closed",
+		"session_id", sessionID,
+		"idle", idleFor.String(),
+		"event_count", sess.EventCount)
+	return true, nil
+}
+
 // ListSessions enumerates a user's sessions (sietch-visible slice
 // only for now — episodic listing lands with Pipeline B in Phase 8).
 func (c *Core) ListSessions(ctx context.Context, userID string) ([]Session, error) {

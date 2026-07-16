@@ -444,3 +444,91 @@ func TestWorker_PerSessionErrorDoesNotAbortTick(t *testing.T) {
 	// (no events table row yet) and no error bubbles up.
 	assert.Equal(t, int32(1), ch.ingestCalls.Load())
 }
+
+// --- Task 3: idle sweep ----------------------------------------------
+
+// seedOpenSession writes an OPEN session with one event whose created_at
+// (and therefore the row's last_event_at) is `idleFor` before `now`.
+func seedOpenSession(t *testing.T, store *sietch.Store, id string, now time.Time, idleFor time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	started := now.Add(-idleFor)
+	require.NoError(t, store.OpenSession(ctx, core.Session{
+		ID: id, UserID: "u1", StartedAt: started,
+		WorkspaceID: core.WorkspaceForCwd("/tmp/sweep").String(),
+	}))
+	text := "hello from " + id
+	_, err := store.RecordEvent(ctx, core.Event{
+		ID: core.NewID(), SessionID: id, UserID: "u1", Type: "user",
+		Text: &text, RawEvent: json.RawMessage(`{}`),
+		Embedding: []float32{0.1, 0.2, 0.3, 0.4}, CreatedAt: started,
+	})
+	require.NoError(t, err)
+}
+
+func newSweepWorker(c *core.Core, store *sietch.Store) *encoding.Worker {
+	return encoding.NewWorker(c,
+		func(ctx context.Context) ([]string, error) { return store.ActiveSessionIDs(ctx) },
+		time.Hour, quietLogger())
+}
+
+func TestTick_SweepsIdleOpenSession(t *testing.T) {
+	c, store, _ := newCoreWithStore(t)
+	now := time.Now().UTC()
+	c.Now = func() time.Time { return now }
+	c.SessionIdleTimeout = 4 * time.Hour
+	seedOpenSession(t, store, "idle-sess", now, 5*time.Hour) // 5h > 4h
+
+	require.NoError(t, newSweepWorker(c, store).Tick(context.Background()))
+
+	got, err := store.GetSession(context.Background(), "idle-sess")
+	require.NoError(t, err)
+	assert.NotNil(t, got.EndedAt, "idle session must be closed by the sweep")
+}
+
+func TestTick_SkipsActiveSession(t *testing.T) {
+	c, store, _ := newCoreWithStore(t)
+	now := time.Now().UTC()
+	c.Now = func() time.Time { return now }
+	c.SessionIdleTimeout = 4 * time.Hour
+	seedOpenSession(t, store, "active-sess", now, 1*time.Hour) // 1h < 4h
+
+	require.NoError(t, newSweepWorker(c, store).Tick(context.Background()))
+
+	got, err := store.GetSession(context.Background(), "active-sess")
+	require.NoError(t, err)
+	assert.Nil(t, got.EndedAt, "active session must stay open")
+}
+
+func TestTick_SweepDisabledIsNoOp(t *testing.T) {
+	c, store, _ := newCoreWithStore(t)
+	now := time.Now().UTC()
+	c.Now = func() time.Time { return now }
+	c.SessionIdleTimeout = 0 // disabled
+	seedOpenSession(t, store, "ancient-sess", now, 100*time.Hour)
+
+	require.NoError(t, newSweepWorker(c, store).Tick(context.Background()))
+
+	got, err := store.GetSession(context.Background(), "ancient-sess")
+	require.NoError(t, err)
+	assert.Nil(t, got.EndedAt, "timeout 0 -> sweep never closes anything")
+}
+
+func TestTick_AlreadyClosedSessionUntouched(t *testing.T) {
+	c, store, _ := newCoreWithStore(t)
+	now := time.Now().UTC()
+	c.Now = func() time.Time { return now }
+	c.SessionIdleTimeout = 4 * time.Hour
+	seedOpenSession(t, store, "closed-sess", now, 5*time.Hour)
+	// Close it up front at a pinned timestamp.
+	endedAt := now.Add(-30 * time.Minute)
+	require.NoError(t, store.MarkEnded(context.Background(), "closed-sess", endedAt))
+
+	require.NoError(t, newSweepWorker(c, store).Tick(context.Background()))
+
+	got, err := store.GetSession(context.Background(), "closed-sess")
+	require.NoError(t, err)
+	require.NotNil(t, got.EndedAt)
+	assert.Equal(t, endedAt.UnixMilli(), got.EndedAt.UnixMilli(),
+		"already-closed session's ended_at must not be overwritten")
+}
