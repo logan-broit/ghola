@@ -14,13 +14,17 @@ hit — each leaf is a real reader+judge invocation over the fake. Pins:
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 
 import pytest
 
 from lme_qa import sweep
+from lme_qa.scorer import make_scorer
 from tests.fake_claude_bin import call_count, write_fake_claude
+
+from .fake_truthsayer_server import FakeScorerServer
 
 
 @pytest.fixture
@@ -194,17 +198,27 @@ def test_sweep_expansion_reserve_creates_distinct_leaves(
     distinct leaf directories so their results don't collide."""
     _use_fake(monkeypatch, tmp_path, {"answer": "yes"})
     outdir = tmp_path / "sweep"
-    rc = sweep.sweep_main(
-        [
-            "--dataset", str(dataset_file),
-            "--run", str(run_file),
-            "--outdir", str(outdir),
-            "--settings", str(reserve_settings_file),
-            "--samples", "1",
-            "--backend", "claude-code",
-            "--parallel", "1",
-        ]
-    )
+    # extractive_relevance_expanded needs a relevance scorer; sweep_main's
+    # --scorer defaults to "truthsayer", a live HTTP reranker normally at
+    # :8085. Point the factory at a local fake server instead of the real
+    # network endpoint -- this test only cares about leaf-path uniqueness,
+    # not reranker quality, and CI has no truthsayer running.
+    with FakeScorerServer() as fake_truthsayer:
+        monkeypatch.setattr(
+            "lme_qa.scorer.make_scorer",
+            functools.partial(make_scorer, base_url=fake_truthsayer.url),
+        )
+        rc = sweep.sweep_main(
+            [
+                "--dataset", str(dataset_file),
+                "--run", str(run_file),
+                "--outdir", str(outdir),
+                "--settings", str(reserve_settings_file),
+                "--samples", "1",
+                "--backend", "claude-code",
+                "--parallel", "1",
+            ]
+        )
     assert rc == 0
     # Three distinct leaves at the same budget, distinguished by __r suffix.
     assert (outdir / "extractive_relevance_expanded__b50__r0.0" / "s0" / "judgments.jsonl").exists()
