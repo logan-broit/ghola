@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first question"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second question"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"final answer"}]}}

@@ -622,6 +622,144 @@ func TestRecord_IgnoresEndedSessionsAndCreatesNew(t *testing.T) {
 	require.Len(t, s.opened, 1, "must auto-create a new session")
 }
 
+// --- Task 2: record-time staleness -----------------------------------
+
+// A session whose last event is within the idle timeout is still hot:
+// reuse it.
+func TestRecord_ReusesFreshOpenSession(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	last := c.Now().Add(-1 * time.Hour) // 1h < 4h -> fresh
+	s.sessions = []core.Session{{
+		ID:          "sess-fresh",
+		UserID:      "u1",
+		WorkspaceID: core.WorkspaceForCwd(cwd).String(),
+		StartedAt:   c.Now().Add(-3 * time.Hour),
+		LastEventAt: &last,
+	}}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("turn 2")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "sess-fresh", ev.SessionID, "fresh session reused")
+	assert.Empty(t, s.opened, "no new session minted")
+}
+
+// A session idle past the timeout is refused; a fresh session is minted.
+// The stale session is left open (the sweep closes it), not touched here.
+func TestRecord_RefusesStaleOpenSessionAndMintsNew(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	last := c.Now().Add(-5 * time.Hour) // 5h > 4h -> stale
+	s.sessions = []core.Session{{
+		ID:          "sess-stale",
+		UserID:      "u1",
+		WorkspaceID: core.WorkspaceForCwd(cwd).String(),
+		StartedAt:   c.Now().Add(-6 * time.Hour),
+		LastEventAt: &last,
+	}}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("new episode")},
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, "sess-stale", ev.SessionID, "must not reuse a stale session")
+	require.Len(t, s.opened, 1, "a fresh session is minted")
+	assert.Empty(t, s.closed, "stale session is NOT closed inline")
+}
+
+// Boundary: age exactly equal to the timeout is stale (refused).
+func TestRecord_StalenessBoundaryIsStale(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	last := c.Now().Add(-c.SessionIdleTimeout) // exactly 4h old
+	s.sessions = []core.Session{{
+		ID:          "sess-boundary",
+		UserID:      "u1",
+		WorkspaceID: core.WorkspaceForCwd(cwd).String(),
+		StartedAt:   c.Now().Add(-5 * time.Hour),
+		LastEventAt: &last,
+	}}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("x")},
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, "sess-boundary", ev.SessionID, "age == timeout is stale")
+	require.Len(t, s.opened, 1)
+}
+
+// Timeout 0 disables the predicate entirely: an ancient session is reused.
+func TestRecord_StalenessDisabledReusesAncient(t *testing.T) {
+	c, s, _, _ := newCore()
+	c.SessionIdleTimeout = 0 // disabled
+	cwd := "/tmp/proj"
+	last := c.Now().Add(-100 * time.Hour)
+	s.sessions = []core.Session{{
+		ID:          "sess-ancient",
+		UserID:      "u1",
+		WorkspaceID: core.WorkspaceForCwd(cwd).String(),
+		StartedAt:   c.Now().Add(-200 * time.Hour),
+		LastEventAt: &last,
+	}}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("x")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "sess-ancient", ev.SessionID, "disabled -> reuse regardless of age")
+	assert.Empty(t, s.opened)
+}
+
+// TestRecord_PicksFreshSessionOverStaleNewerStarted: two open sessions
+// exist for the same user+workspace — "older-but-fresh" (started 8h
+// ago, last active 30m ago) and "newer-but-stale" (started 5h ago,
+// last active 5h ago, past the 4h default idle timeout). Record must
+// reuse "older-but-fresh" and mint nothing.
+//
+// This pins findOpenSession's filter-then-pick order: staleness is
+// filtered out first, and the most-recent StartedAt is picked among
+// the survivors. A pick-then-filter regression would rank by
+// StartedAt first, land on "newer-but-stale", find it unreusable, and
+// wrongly refuse-and-mint instead of falling back to the older, still
+// fresh session.
+func TestRecord_PicksFreshSessionOverStaleNewerStarted(t *testing.T) {
+	c, s, _, _ := newCore()
+	cwd := "/tmp/proj"
+	ws := core.WorkspaceForCwd(cwd).String()
+	olderFreshLast := c.Now().Add(-30 * time.Minute)
+	newerStaleLast := c.Now().Add(-5 * time.Hour)
+	s.sessions = []core.Session{
+		{
+			ID:          "older-but-fresh",
+			UserID:      "u1",
+			WorkspaceID: ws,
+			StartedAt:   c.Now().Add(-8 * time.Hour),
+			LastEventAt: &olderFreshLast,
+		},
+		{
+			ID:          "newer-but-stale",
+			UserID:      "u1",
+			WorkspaceID: ws,
+			StartedAt:   c.Now().Add(-5 * time.Hour),
+			LastEventAt: &newerStaleLast,
+		},
+	}
+
+	ev, err := c.Record(context.Background(), core.RecordInput{
+		UserID: "u1", Cwd: &cwd,
+		Event: core.Event{Type: "user", Text: strPtr("x")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "older-but-fresh", ev.SessionID, "must reuse the fresh session even though it started earlier")
+	assert.Empty(t, s.opened, "no new session minted when a fresh session exists")
+}
+
 // TestRecord_NoSessionNoCwdReturnsValidation: without session_id AND
 // without cwd, Record can't derive a workspace and must surface a
 // validation error so the boundary returns 400 instead of leaking

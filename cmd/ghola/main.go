@@ -22,6 +22,7 @@
 //	GHOLA_TIER_TIMEOUT_MS     per-recall-tier timeout in ms (10000)
 //	ENCODING_INTERVAL         sietch -> episodic tick cadence (5m)
 //	GHOLA_SIETCH_RETENTION    keep drained session files this long (7d; 0 disables GC)
+//	GHOLA_SESSION_IDLE_HOURS  idle hours before a session is stale/swept (4; 0 disables)
 package main
 
 import (
@@ -177,6 +178,16 @@ func run() error {
 	// New() default (7d); an explicit 0 disables GC (GCSession
 	// short-circuits on SietchRetention <= 0).
 	c.SietchRetention = envcfg.Duration("GHOLA_SIETCH_RETENTION", c.SietchRetention)
+	// Idle timeout for record-time staleness + the worker sweep, in
+	// whole hours. Unset keeps the New() default (4h); 0 disables both
+	// seams (the kill-switch). Negative is rejected.
+	if v := os.Getenv("GHOLA_SESSION_IDLE_HOURS"); v != "" {
+		h, err := strconv.Atoi(v)
+		if err != nil || h < 0 {
+			return fmt.Errorf("parse GHOLA_SESSION_IDLE_HOURS: must be a non-negative integer (hours), got %q", v)
+		}
+		c.SessionIdleTimeout = time.Duration(h) * time.Hour
+	}
 	srv := ghttp.NewServer(c, logger)
 	srv.LoopbackOnly = loopbackOnly
 	if defaultUser := os.Getenv("AUTH_DEFAULT_USER"); defaultUser != "" {

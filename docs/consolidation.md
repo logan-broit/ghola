@@ -78,6 +78,75 @@ it resolves itself once the workspace's session history diversifies
 enough for HDBSCAN to see more than one direction in the embedding
 space.
 
+## Session hygiene
+
+Nothing on the MCP path calls `session_end`, so without hygiene a
+`(user, workspace)` reuses one session forever: L1 pooling and
+episodic->semantic consolidation never fire, and orphaned second-open
+sessions idle indefinitely. Two seams, sharing one idle threshold, fix
+this.
+
+- **Idle threshold** — `GHOLA_SESSION_IDLE_HOURS` (whole hours, default
+  `4`). Read once at daemon start into `Core.SessionIdleTimeout`. Set
+  `0` to disable BOTH seams (the kill-switch); negative is rejected at
+  startup.
+- **Record-time staleness** — `findOpenSession` refuses to reuse a
+  session whose last activity (its `last_event_at`, or `started_at`
+  when it has no events) is older than the threshold. The record path
+  mints a fresh session instead, so consolidation sees real episode
+  boundaries. The stale session is left open (the hot path stays
+  write-free); the sweep closes it. Recall's working-tier scoping uses
+  the same helper, so a stale session also stops being the working-tier
+  target -- correct, since its content is already drained to episodic.
+- **Idle sweep** — the encoding worker's tick calls
+  `Core.SweepIdleSession` for every session it walks. An open session
+  idle past the threshold gets the full `SessionEnd` sequence
+  (`MarkEnded` -> `Consolidate` flush -> `CloseSession`). This is the
+  guaranteed-closure mechanism and also reaps orphaned second-open
+  sessions. Sietch GC (existing, 7d after close) then removes the file.
+
+Rollback: `GHOLA_SESSION_IDLE_HOURS=0` (redeploy) disables staleness +
+sweep with no schema change.
+
+### Auto-capture hooks (Claude Code)
+
+`scripts/ghola-capture-hook.sh` captures user + assistant turns into
+ghola. Wire it into the user-global `~/.claude/settings.json` (operator
+applies; merge into any existing `hooks` block). The daemon must run
+with `AUTH_DEFAULT_USER` set (the docker-compose stack does) so the
+hook can omit `user_id`:
+
+**[operator-applies]** merge into `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/loganb/ghola/scripts/ghola-capture-hook.sh UserPromptSubmit" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/home/loganb/ghola/scripts/ghola-capture-hook.sh Stop" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Removing these two entries fully disables capture. The hook is
+fire-and-forget (`curl --max-time 1`, always exits 0), so a down ghola
+never blocks Claude Code.
+
+> The `command` path above points at the operator's canonical checkout
+> (`/home/loganb/ghola/scripts/...`). If the operator runs the
+> daemon/hooks from a different clone, adjust the path when applying.
+
 ## Rollback
 
 Disable future runs by clearing `CONSOLIDATE_WORKSPACES` (redeploy the

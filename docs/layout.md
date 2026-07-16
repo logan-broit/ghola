@@ -34,6 +34,9 @@ at a single SHA. State as of 2026-05-16.
 - `truthsayer/` — Python sidecar. Cross-encoder reranker
   (`BAAI/bge-reranker-v2-m3` by default; fp16 on CUDA; 8k context).
   Called by ghola during stage-2 rerank.
+- `scripts/ghola-capture-hook.sh` — Claude Code UserPromptSubmit + Stop
+  hook; POSTs user/assistant turns to the daemon `/v1/record`
+  (fire-and-forget). Fixture test alongside it.
 
 ## `internal/` — shared Go libraries
 
@@ -85,6 +88,9 @@ at a single SHA. State as of 2026-05-16.
   Bearer-token auth + request middleware.
 - `internal/config/` — env config loader.
 - `internal/testutil/` — test helpers.
+- `internal/backfill/` + `cmd/backfill-sessions/` — one-time,
+  operator-run tool that segments an over-long episodic session into
+  4h-gap episodes (dry-run by default, `--execute` to apply).
 
 The older standalone MCP stdio server (`cmd/mcp-server/`) and the
 frozen `internal/mcp_legacy/` package were removed pre-v0.1.0; new

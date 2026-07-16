@@ -411,3 +411,29 @@ func TestListSessions_UserScoping(t *testing.T) {
 	require.Len(t, out, 1)
 	assert.Equal(t, alice.ID, out[0].ID)
 }
+
+func TestGetSession_SurfacesLastEventAt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(ctx, sess))
+
+	// A freshly-opened session has no events -> last_event_at is NULL.
+	got, err := s.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Nil(t, got.LastEventAt, "no events yet -> LastEventAt nil")
+
+	// Record two events; last_event_at tracks the most recent one.
+	_, err = s.RecordEvent(ctx, mkEvent(sess, "one", nil))
+	require.NoError(t, err)
+	last := mkEvent(sess, "two", nil)
+	last.CreatedAt = time.Now().UTC().Add(time.Minute)
+	_, err = s.RecordEvent(ctx, last)
+	require.NoError(t, err)
+
+	got, err = s.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastEventAt, "recorded events -> LastEventAt set")
+	assert.Equal(t, last.CreatedAt.UnixMilli(), got.LastEventAt.UnixMilli(),
+		"LastEventAt equals the most recent event's created_at")
+}

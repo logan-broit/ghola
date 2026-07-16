@@ -157,6 +157,18 @@ func (w *Worker) Tick(ctx context.Context) error {
 			total += n
 		}
 
+		// Close sessions gone idle past the configured timeout. Nothing
+		// on the MCP path calls session_end, so this is the guaranteed-
+		// closure mechanism; it also reaps orphaned second-open
+		// sessions. Disabled (idle timeout <= 0) is a cheap no-op.
+		// SweepIdleSession itself logs the richer success line
+		// (session_id, idle duration, event_count) via slog on close, so
+		// only the failure case is logged here -- one success log, not
+		// two.
+		if _, err := w.core.SweepIdleSession(ctx, id); err != nil {
+			w.logger.Warn("idle sweep failed", "session_id", id, "error", err.Error())
+		}
+
 		// GC the session's sietch file once it is ended, fully drained,
 		// and past the retention window. Runs after Consolidate so this
 		// same tick's flush is reflected in the watermark the GC checks.

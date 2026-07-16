@@ -83,23 +83,34 @@ type Core struct {
 	// the buffer exists so a consolidation bug can be debugged against
 	// the original. 0 disables GC entirely.
 	SietchRetention time.Duration
+	// SessionIdleTimeout is how long a session may sit without a new
+	// event before it stops being reusable on the record path
+	// (findOpenSession refuses it) and becomes eligible for the
+	// encoding worker's idle sweep (SweepIdleSession closes it). Wired
+	// from GHOLA_SESSION_IDLE_HOURS in main.go. 0 (or negative)
+	// disables both seams: findOpenSession reuses regardless of age and
+	// the sweep is a no-op. Default 4h (design: 13 gaps > 4h in the
+	// dogfooding session yield ~14 natural episodes; 1h over-fragments,
+	// 24h under-fragments).
+	SessionIdleTimeout time.Duration
 }
 
 // New builds a Core with sensible defaults.
 func New(s SietchStore, ch ChapterhouseClient, emb Embedder) *Core {
 	return &Core{
-		Sietch:           s,
-		Chapterhouse:     ch,
-		Embedder:         emb,
-		Now:              func() time.Time { return time.Now().UTC() },
-		RRFK:             60,
-		RerankTopK:       50,
-		RerankWeight:     0.5,
-		Settle:           "channel",
-		ActivationWeight: 0.40,
-		RerankTimeout:    30 * time.Second,
-		TierTimeout:      10 * time.Second,
-		SietchRetention:  7 * 24 * time.Hour,
+		Sietch:             s,
+		Chapterhouse:       ch,
+		Embedder:           emb,
+		Now:                func() time.Time { return time.Now().UTC() },
+		RRFK:               60,
+		RerankTopK:         50,
+		RerankWeight:       0.5,
+		Settle:             "channel",
+		ActivationWeight:   0.40,
+		RerankTimeout:      30 * time.Second,
+		TierTimeout:        10 * time.Second,
+		SietchRetention:    7 * 24 * time.Hour,
+		SessionIdleTimeout: 4 * time.Hour,
 	}
 }
 
@@ -231,17 +242,26 @@ func (c *Core) resolveImplicitSession(ctx context.Context, in RecordInput) (stri
 	return sess.ID, nil
 }
 
-// findOpenSession returns the most-recent un-ended session for
-// (userID, workspaceID), or ok=false when there is none.
+// findOpenSession returns the most-recent un-ended, still-fresh session
+// for (userID, workspaceID), or ok=false when there is none. "Fresh"
+// means its last activity is younger than c.SessionIdleTimeout (see
+// sessionReusable). A stale session is skipped here — it stays open for
+// the encoding worker's sweep to close — so the record path never
+// fragments a live conversation yet also never re-attaches to a session
+// that has gone cold.
 func (c *Core) findOpenSession(ctx context.Context, userID, workspaceID string) (string, bool, error) {
 	sessions, err := c.Sietch.ListSessions(ctx, userID)
 	if err != nil {
 		return "", false, fmt.Errorf("list sessions (user=%q): %w", userID, err)
 	}
+	now := c.Now()
 	var best *Session
 	for i := range sessions {
 		s := &sessions[i]
 		if s.WorkspaceID != workspaceID || s.EndedAt != nil {
+			continue
+		}
+		if !sessionReusable(*s, now, c.SessionIdleTimeout) {
 			continue
 		}
 		if best == nil || s.StartedAt.After(best.StartedAt) {
@@ -252,6 +272,36 @@ func (c *Core) findOpenSession(ctx context.Context, userID, workspaceID string) 
 		return "", false, nil
 	}
 	return best.ID, true, nil
+}
+
+// lastActivity is a session's most recent activity timestamp: its last
+// event's created_at when present, else its start. The single source of
+// truth for "how cold is this session", shared by sessionReusable
+// (record path) and SweepIdleSession (worker path).
+func lastActivity(s Session) time.Time {
+	if s.LastEventAt != nil {
+		return *s.LastEventAt
+	}
+	return s.StartedAt
+}
+
+// sessionReusable reports whether an open session is fresh enough to
+// append to. idle <= 0 disables the check (always reusable). Otherwise
+// the session is reusable only if its last activity is strictly younger
+// than idle — age exactly equal to the timeout counts as stale.
+//
+// Traced edge: if the embedder is down, an event can get stuck on
+// needsEmbedding, which blocks that session's drain-to-episodic. If
+// such a session then goes stale (per this function), it falls out of
+// the sietch tier's reusable scope while its tail is still not in
+// episodic — a temporary recall blind spot. This self-heals once the
+// embedder recovers: the encoding worker retries the stuck event every
+// tick regardless of the session's staleness.
+func sessionReusable(s Session, now time.Time, idle time.Duration) bool {
+	if idle <= 0 {
+		return true
+	}
+	return now.Sub(lastActivity(s)) < idle
 }
 
 // SessionEnd finalizes the session — flushes any remaining events to
@@ -275,6 +325,57 @@ func (c *Core) SessionEnd(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("consolidate before end (session=%q): %w", sessionID, err)
 	}
 	return c.Sietch.CloseSession(ctx, sessionID)
+}
+
+// SweepIdleSession closes an open session that has gone quiet past the
+// idle timeout, running the full SessionEnd sequence (MarkEnded ->
+// Consolidate flush -> CloseSession). Returns true when it closed the
+// session. It is a no-op (false, nil) when: the idle timeout is disabled
+// (<= 0); the session row is missing (a schema-only orphan — GCSession's
+// job); the session is already ended; or its last activity is still
+// within the timeout. This is the guaranteed-closure counterpart to the
+// record-time staleness filter in findOpenSession: nothing on the MCP
+// path calls SessionEnd, so without the sweep an open session never
+// closes and its L1 pooling + consolidation never fire. Called per
+// session by the encoding worker's Tick.
+func (c *Core) SweepIdleSession(ctx context.Context, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, ErrMissingSessionID
+	}
+	if c.SessionIdleTimeout <= 0 {
+		return false, nil
+	}
+	sess, err := c.Sietch.GetSession(ctx, sessionID)
+	if errors.Is(err, ErrSessionNotFound) {
+		return false, nil // schema-only orphan; GCSession reaps it
+	}
+	if err != nil {
+		return false, fmt.Errorf("sweep get session (session=%q): %w", sessionID, err)
+	}
+	if sess.EndedAt != nil {
+		return false, nil // already closed
+	}
+	idleFor := c.Now().Sub(lastActivity(sess))
+	if idleFor < c.SessionIdleTimeout {
+		return false, nil // still active
+	}
+	if err := c.SessionEnd(ctx, sessionID); err != nil {
+		// Residual: if MarkEnded landed but the later CloseSession call
+		// failed, EndedAt is now non-nil, so every later sweep sees
+		// "already closed" above and skips this session forever -- it is
+		// never retried here. That is acceptable: GCSession keys off the
+		// same EndedAt (not off whether CloseSession succeeded), so once
+		// the retention window passes it still reaps the file and its fd
+		// (or a process restart does); and this tick's Consolidate call,
+		// which ran before CloseSession inside SessionEnd, already
+		// drained any tail events, so nothing is lost.
+		return false, fmt.Errorf("sweep session end (session=%q): %w", sessionID, err)
+	}
+	slog.InfoContext(ctx, "swept idle session closed",
+		"session_id", sessionID,
+		"idle", idleFor.String(),
+		"event_count", sess.EventCount)
+	return true, nil
 }
 
 // ListSessions enumerates a user's sessions (sietch-visible slice
