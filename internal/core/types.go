@@ -63,6 +63,12 @@ type Session struct {
 	UserID       string     `json:"user_id"`
 	StartedAt    time.Time  `json:"started_at"`
 	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	// LastEventAt is the created_at of the session's most recent event
+	// (sietch bumps it on every RecordEvent). nil when no event has
+	// landed yet. The record-time staleness check and the idle sweep
+	// read it to decide whether a session is still "hot"; both fall
+	// back to StartedAt when it is nil.
+	LastEventAt  *time.Time `json:"last_event_at,omitempty"`
 	EventCount   int        `json:"event_count"`
 	Summary      *string    `json:"summary,omitempty"`
 	WorkspaceID  string     `json:"workspace_id,omitempty"`

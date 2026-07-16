@@ -534,6 +534,10 @@ func (s *Store) readSessionRow(ctx context.Context, sessionID string) (core.Sess
 		t := time.UnixMilli(ended.Int64).UTC()
 		sess.EndedAt = &t
 	}
+	if lastEvent.Valid {
+		t := time.UnixMilli(lastEvent.Int64).UTC()
+		sess.LastEventAt = &t
+	}
 	return sess, nil
 }
 
