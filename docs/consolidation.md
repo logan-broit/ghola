@@ -68,6 +68,16 @@ tick rather than treated as an error; the next night retries. Other
 per-workspace failures (e.g. mentat down) are logged and don't abort the
 rest of the batch.
 
+A brand-new, single-topic workspace can legitimately consolidate to zero
+mnemes: mentat's HDBSCAN runs with `allow_single_cluster=False` (the
+library default), which never emits a cluster when the *entire* corpus is
+one dense blob — there's no density contrast for anything to be a
+cluster relative to, so every point comes back labeled noise (`-1`) and
+`RunWorkspace` writes nothing. This is expected behavior, not a failure:
+it resolves itself once the workspace's session history diversifies
+enough for HDBSCAN to see more than one direction in the embedding
+space.
+
 ## Rollback
 
 Disable future runs by clearing `CONSOLIDATE_WORKSPACES` (redeploy the

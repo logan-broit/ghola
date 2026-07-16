@@ -26,17 +26,27 @@ import (
 	"github.com/thinkwright/chapterhouse/ch-server/internal/repository"
 )
 
-// smokeSessionCount is N: the number of synthetic sessions seeded into
-// the scratch workspace. Comfortably above the pipeline's default
-// min_cluster_size (3, see Deps.MinClusterSize / pipeline.go) so the real
-// mentat HDBSCAN reliably finds one non-noise cluster instead of noise.
-const smokeSessionCount = 5
+// smokeBlobSize is N per blob: the number of synthetic sessions seeded
+// into each of two direction blobs (8 total). Comfortably above the
+// pipeline's default min_cluster_size (3, see Deps.MinClusterSize /
+// pipeline.go) so the real mentat HDBSCAN reliably finds two non-noise
+// clusters instead of noise.
+//
+// Two blobs, not one: HDBSCAN's default allow_single_cluster=false never
+// emits a cluster when the *entire* corpus is a single dense blob — there
+// is no density contrast for anything to be a cluster relative to.
+// Confirmed empirically against the live mentat service: a single
+// 5-point blob labels every point -1 (noise); two 4-point blobs label
+// [0,0,0,0,1,1,1,1]. Seeding two well-separated blobs gives HDBSCAN the
+// contrast it needs to emit real clusters (see also
+// docs/consolidation.md's note on this).
+const smokeBlobSize = 4
 
 // noopPooler is a no-op consolidation.SessionPooler for the smoke run.
 // Reconcile's ClosedSessionsMissingL1 read is NOT workspace-scoped — on a
 // live stack it may surface real, unrelated closed sessions still missing
 // an L1 vector. This test's own seeded sessions already carry a populated
-// l1_embedding (see seedSmokeWorkspace), so Reconcile never needs a real
+// l1_embedding (see seedSmokeBlob), so Reconcile never needs a real
 // pooler for them; no-op-succeeding for anything else is strictly safer
 // than wiring a real mentat Pool call against production data this test
 // does not own.
@@ -44,17 +54,22 @@ type noopPooler struct{}
 
 func (noopPooler) PoolSessionToL1(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
-// smokeVec returns a dim-length vector that points in (almost) the same
-// direction for every idx: all components are 1.0 except one, which is
-// nudged by a tiny amount keyed on idx. mentat's HDBSCAN clusters under
-// cosine distance on L2-normalized vectors (see mentat/clustering.py), so
-// this whole seeded batch lands at ~0 mutual distance — one dense,
-// non-noise cluster — while still giving every row a distinct value
-// (never bit-identical rows).
-func smokeVec(dim, idx int) []float32 {
+// smokeVec returns a dim-length vector for one of two well-separated
+// direction blobs (blob 0 or blob 1), nudged by a tiny idx-keyed amount
+// so no two rows in the same blob are bit-identical. mentat's HDBSCAN
+// clusters under cosine distance on L2-normalized vectors (see
+// mentat/clustering.py): blob 0 points in the all-ones direction, blob 1
+// flips the sign of the vector's second half, so the two blobs sit at
+// ~0 cosine similarity (well-separated) while every row within a blob
+// lands at ~0 mutual distance from its blobmates (dense, non-noise).
+func smokeVec(dim, blob, idx int) []float32 {
 	v := make([]float32, dim)
 	for i := range v {
-		v[i] = 1.0
+		if blob != 0 && i >= dim/2 {
+			v[i] = -1.0
+		} else {
+			v[i] = 1.0
+		}
 	}
 	if dim > 0 {
 		v[idx%dim] += 0.001
@@ -62,11 +77,12 @@ func smokeVec(dim, idx int) []float32 {
 	return v
 }
 
-// smokeVecLit renders smokeVec(dim, idx) as a pgvector text literal for
-// seeding episodic.events.embedding directly (mirrors pipeline_test.go's
-// vecLit — the repo's own vector-literal helper is unexported).
-func smokeVecLit(dim, idx int) string {
-	v := smokeVec(dim, idx)
+// smokeVecLit renders smokeVec(dim, blob, idx) as a pgvector text literal
+// for seeding episodic.events.embedding directly (mirrors
+// pipeline_test.go's vecLit — the repo's own vector-literal helper is
+// unexported).
+func smokeVecLit(dim, blob, idx int) string {
+	v := smokeVec(dim, blob, idx)
 	var b strings.Builder
 	b.WriteByte('[')
 	for i, x := range v {
@@ -79,14 +95,34 @@ func smokeVecLit(dim, idx int) string {
 	return b.String()
 }
 
-// seedSmokeWorkspace inserts n closed synthetic sessions into ws, each
-// with a user + assistant event (embedded, tagged, texted) and a pooled
-// L1 vector, all pointing in the same direction (smokeVec) so the real
-// mentat clustering call groups the whole batch into one cluster with
-// live, content-bearing member events for the enrichment step to select
-// representatives from.
-func seedSmokeWorkspace(t *testing.T, ctx context.Context, repo *repository.Repository, ws uuid.UUID, dim, n int) {
+// smokeBlobTag returns the distinguishing tag seeded onto every event in
+// a blob, so the test can identify which enriched mneme owns which
+// blob's content by its aggregated tags (see Aggregate in enrich.go).
+func smokeBlobTag(blob int) string {
+	return fmt.Sprintf("smoke-blob-%d", blob)
+}
+
+// containsTag reports whether tags contains want.
+func containsTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
+}
+
+// seedSmokeBlob inserts n closed synthetic sessions into ws for one
+// direction blob, each with a user + assistant event (embedded, tagged,
+// texted) and a pooled L1 vector, all pointing in blob's direction
+// (smokeVec) so the real mentat clustering call groups this blob into
+// its own cluster with live, content-bearing member events for the
+// enrichment step to select representatives from. Every event also
+// carries smokeBlobTag(blob) so the resulting mneme's aggregated tags
+// (see Aggregate in enrich.go) identify which blob produced it.
+func seedSmokeBlob(t *testing.T, ctx context.Context, repo *repository.Repository, ws uuid.UUID, dim, blob, n int) {
 	t.Helper()
+	blobTag := smokeBlobTag(blob)
 	for i := 0; i < n; i++ {
 		sid := uuid.New()
 		_, err := repo.Pool().Exec(ctx, `
@@ -104,23 +140,26 @@ func seedSmokeWorkspace(t *testing.T, ctx context.Context, repo *repository.Repo
 				VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, ($6::text)::vector,
 				        $7, $8, now())`,
 				uuid.New(), sid, ws, typ,
-				fmt.Sprintf("consolidation smoke event text session=%d role=%s", i, typ),
-				smokeVecLit(dim, i*2+j),
-				[]string{"integration-smoke", "consolidation"}, []string{"smoke"})
+				fmt.Sprintf("consolidation smoke event text blob=%d session=%d role=%s", blob, i, typ),
+				smokeVecLit(dim, blob, i*2+j),
+				[]string{"integration-smoke", "consolidation", blobTag}, []string{"smoke"})
 			require.NoError(t, err)
 		}
 
-		require.NoError(t, repo.UpdateSessionL1(ctx, sid, smokeVec(dim, i),
-			fmt.Sprintf("smoke chunk %d", i)))
+		require.NoError(t, repo.UpdateSessionL1(ctx, sid, smokeVec(dim, blob, i),
+			fmt.Sprintf("smoke chunk blob=%d %d", blob, i)))
 	}
 }
 
-// TestConsolidationSmoke seeds N synthetic sessions (member events +
-// embeddings) into a fresh scratch workspace against a live DB, runs the
-// real consolidation.RunWorkspace pipeline against a real mentat client,
-// and asserts the pipeline actually produced content: (a) a level-1 mneme
-// with non-empty representatives + tags + span_start, and (b) a semantic
-// query near the seeded cluster returns a hit with a non-empty TopExcerpt.
+// TestConsolidationSmoke seeds two well-separated direction blobs of
+// synthetic sessions (member events + embeddings; smokeBlobSize each, 8
+// total) into a fresh scratch workspace against a live DB, runs the real
+// consolidation.RunWorkspace pipeline against a real mentat client, and
+// asserts the pipeline actually produced content: (a) two enriched
+// level-1 mnemes exist (one per blob), each with non-empty
+// representatives + tags + span_start, and (b) a semantic query near
+// blob A's direction returns a hit whose top result is blob A's mneme
+// (not blob B's) with a non-empty TopExcerpt.
 //
 // Run via scripts/consolidation-smoke.sh against the compose stack —
 // OPERATOR-GATED, requires DATABASE_URL + MENTAT_URL pointed at a live,
@@ -156,7 +195,8 @@ func TestConsolidationSmoke(t *testing.T) {
 	// a scratch UUID is inert and never overlaps real workspace data.
 	ws := uuid.New()
 
-	seedSmokeWorkspace(t, ctx, repo, ws, dim, smokeSessionCount)
+	seedSmokeBlob(t, ctx, repo, ws, dim, 0, smokeBlobSize)
+	seedSmokeBlob(t, ctx, repo, ws, dim, 1, smokeBlobSize)
 
 	d := consolidation.Deps{
 		Repo:   repo,
@@ -166,26 +206,43 @@ func TestConsolidationSmoke(t *testing.T) {
 
 	require.NoError(t, consolidation.RunWorkspace(ctx, d, ws), "RunWorkspace against the live stack")
 
-	// (a) mnemes exist with non-empty representatives + tags + span_start.
-	var (
-		reps      []byte
-		tags      []string
-		spanStart *time.Time
-	)
-	err = pool.QueryRow(ctx, `
-		SELECT representatives, tags, span_start
+	// (a) two enriched level-1 mnemes exist (one per seeded blob), each
+	// with non-empty representatives + tags + span_start.
+	rows, err := pool.Query(ctx, `
+		SELECT id, representatives, tags, span_start
 		FROM semantic.mnemes
-		WHERE workspace_id = $1 AND level = 1 AND state = 'active'`, ws).
-		Scan(&reps, &tags, &spanStart)
-	require.NoError(t, err, "expected an enriched level-1 mneme for the seeded cluster")
-	require.NotEmpty(t, reps, "representatives populated")
-	require.NotEmpty(t, tags, "aggregated tags populated")
-	require.NotNil(t, spanStart, "span_start populated")
+		WHERE workspace_id = $1 AND level = 1 AND state = 'active'`, ws)
+	require.NoError(t, err, "query enriched level-1 mnemes")
+	defer rows.Close()
 
-	// (b) QueryMnemesByEmbedding near the seeded cluster returns a hit
-	// with a non-empty TopExcerpt.
-	hits, err := repo.QueryMnemesByEmbedding(ctx, ws, smokeVec(dim, 0), 5)
+	var blobAID uuid.UUID
+	count := 0
+	for rows.Next() {
+		var (
+			id        uuid.UUID
+			reps      []byte
+			tags      []string
+			spanStart *time.Time
+		)
+		require.NoError(t, rows.Scan(&id, &reps, &tags, &spanStart))
+		require.NotEmpty(t, reps, "representatives populated")
+		require.NotEmpty(t, tags, "aggregated tags populated")
+		require.NotNil(t, spanStart, "span_start populated")
+		count++
+		if containsTag(tags, smokeBlobTag(0)) {
+			blobAID = id
+		}
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, 2, count, "expected one enriched level-1 mneme per seeded blob")
+	require.NotEqual(t, uuid.Nil, blobAID, "blob A's mneme identified by its aggregated tag")
+
+	// (b) QueryMnemesByEmbedding near blob A's direction returns a hit
+	// whose top result is blob A's mneme (not blob B's), with a
+	// non-empty TopExcerpt.
+	hits, err := repo.QueryMnemesByEmbedding(ctx, ws, smokeVec(dim, 0, 0), 5)
 	require.NoError(t, err)
-	require.NotEmpty(t, hits, "semantic query returns at least one hit near the seeded cluster")
+	require.NotEmpty(t, hits, "semantic query returns at least one hit near blob A")
+	require.Equal(t, blobAID, hits[0].ID, "top hit is blob A's mneme, not blob B's")
 	require.NotEmpty(t, hits[0].TopExcerpt, "top hit carries a non-empty excerpt")
 }
