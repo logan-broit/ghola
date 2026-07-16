@@ -70,5 +70,24 @@ wait "$server_pid" 2>/dev/null
 len="$(jq -r '.event.text' "$out" | tr -d '\n' | wc -c)"
 if [ "$len" -le 16384 ]; then echo "ok   - truncated to <=16384 ($len)"; else echo "FAIL - not truncated ($len)"; fails=$((fails+1)); fi
 
+# --- Stop on a large transcript (bounded read, must stay fast) ---
+big_transcript="$(mktemp)"
+for i in $(seq 1 4996); do
+  printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"filler %d"}]}}\n' "$i"
+done >"$big_transcript"
+cat "$here/testdata/transcript.jsonl" >>"$big_transcript"
+wc -l "$big_transcript" | awk '{if ($1 < 5000) { print "FAIL - fixture too small (" $1 " lines)"; exit 1 }}'
+
+out="$(mktemp)"; capture "$out"
+start=$(date +%s)
+jq -n --arg t "$big_transcript" --arg c /tmp/proj \
+  '{hook_event_name:"Stop", cwd:$c, transcript_path:$t}' \
+  | GHOLA_CAPTURE_URL="$url" "$hook" Stop
+wait "$server_pid" 2>/dev/null
+elapsed=$(( $(date +%s) - start ))
+check "large-transcript stop text" "final answer" "$(jq -r '.event.text' "$out")"
+if [ "$elapsed" -lt 5 ]; then echo "ok   - large transcript handled fast (${elapsed}s)"; else echo "FAIL - large transcript too slow (${elapsed}s)"; fails=$((fails+1)); fi
+rm -f "$big_transcript"
+
 echo "---"
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails FAILURE(S)"; exit 1; fi
