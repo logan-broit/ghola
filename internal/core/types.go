@@ -59,10 +59,10 @@ type Event struct {
 
 // Session metadata — shared shape across sietch + episodic.
 type Session struct {
-	ID           string     `json:"id"`
-	UserID       string     `json:"user_id"`
-	StartedAt    time.Time  `json:"started_at"`
-	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	ID        string     `json:"id"`
+	UserID    string     `json:"user_id"`
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	// LastEventAt is the created_at of the session's most recent event
 	// (sietch bumps it on every RecordEvent). nil when no event has
 	// landed yet. The record-time staleness check and the idle sweep
