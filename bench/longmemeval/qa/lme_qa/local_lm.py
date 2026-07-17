@@ -1,15 +1,26 @@
 """Local LM token-logprob client for the perplexity_prune compressor.
 
 The "small local oracle" tier: a small instruction LM (e.g. Qwen2.5-1.5B) served
-by vLLM's OpenAI-compatible ``/v1/completions`` endpoint, queried with
-``echo=True, max_tokens=0, prompt_logprobs=1`` to get per-token logprobs over the
-prompt itself. The compressor turns those logprobs into surprisal and keeps the
-highest-surprisal (most informative) turns -- the LM-based twin of
+by vLLM's OpenAI-compatible ``/v1/completions`` endpoint, queried on the echo
+path (``echo=True, max_tokens=0, logprobs=0``) to get the per-token logprobs of
+the ACTUAL prompt tokens. The compressor turns those logprobs into surprisal and
+keeps the highest-surprisal (most informative) turns -- the LM-based twin of
 ``statistical_prune``'s free IDF self-information.
+
+Why the echo path and not ``prompt_logprobs``: vLLM's ``prompt_logprobs`` returns
+the top candidate(s) per position, and the ``rank == 1`` entry is the model's
+ARGMAX token -- not necessarily the actual prompt token. Reading rank==1 measures
+the model's confidence in *its own* prediction, not the surprisal of the actual
+text (on a real prompt these diverged at ~6/14 positions: argmax ' following'
+-0.34 vs actual ' capital' -11.13). The standard OpenAI echo logprobs
+(``choices[0].logprobs.token_logprobs``) are the actual prompt-token logprobs by
+construction, so surprisal of the real text falls out directly with no per-entry
+rank heuristic. This matches the directional-cross-entropy pilot, which verified
+the echo logprobs against the same oracle.
 
 Two pieces, mirroring scorer.py:
 
-  - ``parse_prompt_logprobs`` -- a PURE function over vLLM's response dict, unit
+  - ``parse_echo_logprobs`` -- a PURE function over vLLM's response dict, unit
     tested without any network.
   - ``LocalLMClient`` -- a thin urllib client that reuses scorer.py's
     ``_post_json`` (loud RuntimeError on non-2xx/bad-JSON; no silent failure).
@@ -30,52 +41,45 @@ DEFAULT_ORACLE_URL = os.environ.get("ORACLE_URL", "http://localhost:8000")
 DEFAULT_ORACLE_MODEL = os.environ.get("ORACLE_MODEL", "Qwen2.5-1.5B-Instruct")
 
 
-def parse_prompt_logprobs(resp: dict) -> list[tuple[str, float]]:
-    """Extract ``[(decoded_token, logprob), ...]`` from a vLLM completions
-    response requested with ``prompt_logprobs``.
+def parse_echo_logprobs(resp: dict) -> list[tuple[str, float]]:
+    """Extract ``[(token, logprob), ...]`` of the ACTUAL prompt tokens from a
+    vLLM completions response requested on the echo path (``echo=True,
+    max_tokens=0, logprobs=0``).
 
-    ``resp["choices"][0]["prompt_logprobs"]`` is a list aligned to the prompt
-    tokens. Element 0 is ``null`` (no logprob for the first token -- nothing
-    precedes it). Each non-null element is a dict mapping token-id-string ->
-    ``{"logprob": float, "decoded_token": str, "rank": int}``, holding the
-    candidate entries the server returned for that position.
+    ``resp["choices"][0]["logprobs"]`` is the standard OpenAI logprobs object:
 
-    For each non-null position, pick the entry with ``rank == 1`` if present
-    (the token the model actually scored at that position), else fall back to
-    the max-logprob entry. Emit ``(decoded_token, logprob)`` in prompt order.
-    Null positions are skipped.
+      - ``tokens``          -- the prompt's decoded tokens, in order.
+      - ``token_logprobs``  -- each token's logprob under the model, aligned to
+        ``tokens``. Element 0 is ``null`` (no logprob for the first token --
+        nothing precedes it).
+
+    These are the actual prompt tokens' logprobs, so the surprisal of the real
+    text (``-logprob``) falls out directly -- no argmax/rank disambiguation.
+    Emit ``(token, logprob)`` in prompt order, skipping null positions.
     """
     choices = resp.get("choices") or []
     if not choices:
         return []
-    prompt_logprobs = choices[0].get("prompt_logprobs") or []
+    logprobs = choices[0].get("logprobs") or {}
+    tokens = logprobs.get("tokens") or []
+    token_logprobs = logprobs.get("token_logprobs") or []
 
     out: list[tuple[str, float]] = []
-    for entry in prompt_logprobs:
-        if entry is None:
+    for token, logprob in zip(tokens, token_logprobs):
+        if logprob is None:
             # Position 0 (and any null position): no logprob to emit.
             continue
-        # entry: {token_id_str: {"logprob", "decoded_token", "rank"}, ...}
-        candidates = list(entry.values())
-        if not candidates:
-            continue
-        chosen = next((c for c in candidates if c.get("rank") == 1), None)
-        if chosen is None:
-            # Fall back to the highest-logprob candidate when no rank==1 entry
-            # is present (rank 1 is the realized token, but be defensive). Use
-            # .get so a candidate missing "logprob" can't KeyError the fallback
-            # out from under a position that had a valid rank-1 entry.
-            chosen = max(candidates, key=lambda c: c.get("logprob", float("-inf")))
-        out.append((chosen["decoded_token"], float(chosen["logprob"])))
+        out.append((token, float(logprob)))
     return out
 
 
 class LocalLMClient:
     """Thin client for vLLM's ``/v1/completions`` prompt-logprob path.
 
-    ``token_logprobs(text)`` POSTs ``text`` as the prompt with ``echo=True,
-    max_tokens=0, prompt_logprobs=1`` and returns ``parse_prompt_logprobs`` of
-    the response: ``[(decoded_token, logprob), ...]`` over the prompt tokens.
+    ``token_logprobs(text)`` POSTs ``text`` as the prompt on the echo path
+    (``echo=True, max_tokens=0, logprobs=0``) and returns
+    ``parse_echo_logprobs`` of the response: ``[(token, logprob), ...]`` over the
+    ACTUAL prompt tokens.
     """
 
     def __init__(
@@ -94,7 +98,9 @@ class LocalLMClient:
             "prompt": text,
             "max_tokens": 0,
             "echo": True,
-            "prompt_logprobs": 1,
+            # Echo path: choices[0].logprobs.token_logprobs = ACTUAL prompt-token
+            # logprobs (not prompt_logprobs' rank==1 argmax). See module docstring.
+            "logprobs": 0,
         }
         resp = _post_json(self.base_url + "/v1/completions", body, self.timeout)
-        return parse_prompt_logprobs(resp)
+        return parse_echo_logprobs(resp)

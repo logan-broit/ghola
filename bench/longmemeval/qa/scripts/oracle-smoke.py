@@ -2,12 +2,12 @@
 """Manual smoke test for the local-LM logprob oracle (NOT part of CI).
 
 This exercises the live network path that the unit tests deliberately do not:
-a running vLLM OpenAI-compatible completions server with prompt_logprobs. It
-calls ``LocalLMClient().token_logprobs(...)`` against a real socket and prints
+a running vLLM OpenAI-compatible completions server with the echo logprobs path.
+It calls ``LocalLMClient().token_logprobs(...)`` against a real socket and prints
 the (token, surprisal) pairs, asserting the rare token ("9931") lands among the
 highest-surprisal tokens -- the property perplexity_prune relies on.
 
-Launch the oracle first (prompt_logprobs is requested per-call, not at launch):
+Launch the oracle first (echo logprobs are requested per-call, not at launch):
 
     vllm serve Qwen2.5-1.5B-Instruct --port 8000
 
@@ -46,7 +46,7 @@ def main() -> int:
     # negative logprob -- higher = more surprising / informative.
     pairs = client.token_logprobs(PROMPT)
     if not pairs:
-        print("FAIL: oracle returned no prompt_logprobs", file=sys.stderr)
+        print("FAIL: oracle returned no echo logprobs", file=sys.stderr)
         return 1
 
     scored = [(tok, -lp) for tok, lp in pairs]
