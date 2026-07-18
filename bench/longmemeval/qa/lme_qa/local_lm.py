@@ -93,6 +93,14 @@ class LocalLMClient:
         self.timeout = timeout
 
     def token_logprobs(self, text: str) -> list[tuple[str, float]]:
+        if not text:
+            # vLLM rejects an empty prompt (HTTP 400 "Either prompt or
+            # prompt_embeds must be provided and non-empty"), and LongMemEval-S
+            # has exactly-empty turn contents. No tokens -> no logprobs: [] is
+            # the same value a whitespace-only prompt yields via parse (single
+            # token with a null logprob), so the scorer's `if not lp` guard
+            # handles both identically (surprisal 0.0).
+            return []
         body = {
             "model": self.model,
             "prompt": text,

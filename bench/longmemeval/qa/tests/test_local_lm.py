@@ -99,3 +99,20 @@ def test_token_logprobs_uses_echo_path_and_returns_actual_logprobs(monkeypatch):
     assert body["logprobs"] == 0
     assert "prompt_logprobs" not in body
     assert body["prompt"] == "The capital of France is"
+
+
+def test_token_logprobs_empty_text_short_circuits_without_request(monkeypatch):
+    # vLLM rejects an empty prompt outright (HTTP 400 "Either prompt or
+    # prompt_embeds must be provided and non-empty"), and LongMemEval-S contains
+    # exactly-empty turn contents (12 in the cleaned dataset), so scoring a leaf
+    # crashed mid-build. An empty text has no tokens, hence no logprobs: return
+    # [] WITHOUT any HTTP call — the same value a whitespace-only prompt already
+    # yields via parse (single token, null logprob), and the scorer's existing
+    # `if not lp` guard maps it to surprisal 0.0.
+    def fake_post(url, body, timeout):  # pragma: no cover - must not be reached
+        raise AssertionError("empty text must not reach the oracle")
+
+    monkeypatch.setattr("lme_qa.local_lm._post_json", fake_post)
+
+    client = LocalLMClient(base_url="http://oracle:8000", model="m")
+    assert client.token_logprobs("") == []
