@@ -40,6 +40,21 @@ from .scorer import _post_json
 DEFAULT_ORACLE_URL = os.environ.get("ORACLE_URL", "http://localhost:8000")
 DEFAULT_ORACLE_MODEL = os.environ.get("ORACLE_MODEL", "Qwen2.5-1.5B-Instruct")
 
+# compress.py's _ORACLE_SCORE_MAX_CHARS caps the scored text by CHARS, but
+# vLLM's context limit is in TOKENS -- token-dense text (code, ids, URLs) can
+# run closer to ~2.2 chars/token than English prose's ~4, so the char cap
+# alone is not a hard guarantee. A live crash-loop showed the echo-path
+# request (echo=True, max_tokens=0) 400 with "maximum context length is 4096
+# tokens ... prompt contains at least 4097 input tokens" on exactly such a
+# turn, and the sweep driver misread the uncaught RuntimeError as a usage
+# window and retried the whole run every 30m into the same crash.
+#
+# Mirrors ghola_backend.py's record-path halve-retry (ghola_v2.record):  on a
+# context-length 400, halve the text and retry, bounded, rather than letting
+# it propagate and take down the whole sweep.
+_MAX_CONTEXT_HALVINGS = 6
+_CONTEXT_LENGTH_MARKER = "maximum context length"
+
 
 def parse_echo_logprobs(resp: dict) -> list[tuple[str, float]]:
     """Extract ``[(token, logprob), ...]`` of the ACTUAL prompt tokens from a
@@ -101,14 +116,37 @@ class LocalLMClient:
             # token with a null logprob), so the scorer's `if not lp` guard
             # handles both identically (surprisal 0.0).
             return []
-        body = {
-            "model": self.model,
-            "prompt": text,
-            "max_tokens": 0,
-            "echo": True,
-            # Echo path: choices[0].logprobs.token_logprobs = ACTUAL prompt-token
-            # logprobs (not prompt_logprobs' rank==1 argmax). See module docstring.
-            "logprobs": 0,
-        }
-        resp = _post_json(self.base_url + "/v1/completions", body, self.timeout)
-        return parse_echo_logprobs(resp)
+
+        prompt = text
+        for _ in range(_MAX_CONTEXT_HALVINGS + 1):
+            body = {
+                "model": self.model,
+                "prompt": prompt,
+                "max_tokens": 0,
+                "echo": True,
+                # Echo path: choices[0].logprobs.token_logprobs = ACTUAL
+                # prompt-token logprobs (not prompt_logprobs' rank==1 argmax).
+                # See module docstring.
+                "logprobs": 0,
+            }
+            try:
+                resp = _post_json(self.base_url + "/v1/completions", body, self.timeout)
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if _CONTEXT_LENGTH_MARKER not in msg:
+                    # Not a context-length 400 -- some other failure
+                    # (transport, auth, malformed request). Do not swallow
+                    # it; surface it exactly as before.
+                    raise
+                if len(prompt) <= 1:
+                    # Nothing left to halve; give up below.
+                    break
+                prompt = prompt[: max(1, len(prompt) // 2)]
+                continue
+            return parse_echo_logprobs(resp)
+
+        # Exhausted the halve-retries (or hit the 1-char floor) without a
+        # successful response. Return [] rather than crashing the whole
+        # sweep -- the scorer's existing `if not lp` guard already treats an
+        # empty result as a neutral surprisal of 0.0.
+        return []

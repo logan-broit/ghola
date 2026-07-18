@@ -13,6 +13,8 @@ standard OpenAI echo path (echo=True, max_tokens=0, logprobs=0), whose
 
 from __future__ import annotations
 
+import pytest
+
 from lme_qa.local_lm import LocalLMClient, parse_echo_logprobs
 
 
@@ -116,3 +118,112 @@ def test_token_logprobs_empty_text_short_circuits_without_request(monkeypatch):
 
     client = LocalLMClient(base_url="http://oracle:8000", model="m")
     assert client.token_logprobs("") == []
+
+
+# --- context-length 400: halve-and-retry (crash-loop regression) ---------
+#
+# Live incident: the echo-path request (echo=True, max_tokens=0) 400s with
+# "This model's maximum context length is 4096 tokens. However, you
+# requested 0 output tokens and your prompt contains at least 4097 input
+# tokens" on token-dense text (code/ids run closer to ~2 chars/token than
+# English prose's ~4), even under compress.py's proactive char cap. The
+# sweep driver misread the uncaught RuntimeError as a usage-window crash and
+# retried the whole run every 30m, hitting the identical crash each time.
+# Fix mirrors ghola_backend.py's record-path halve-retry: on an HTTP 400
+# whose body mentions "maximum context length", halve the text and retry,
+# bounded, and return [] (the scorer's existing `if not lp` guard -> 0.0)
+# if it still won't fit.
+
+
+def _context_length_error(prompt_tokens: int = 4097) -> RuntimeError:
+    """A RuntimeError shaped exactly like scorer.py's _post_json output for
+    the real vLLM context-length 400 body captured in the live crash log."""
+    return RuntimeError(
+        "scorer request to http://oracle:8000/v1/completions failed: "
+        "HTTP 400 b'{\"error\":{\"message\":\"This model\\'s maximum context "
+        "length is 4096 tokens. However, you requested 0 output tokens and "
+        f"your prompt contains at least {prompt_tokens} input tokens, for a "
+        "total of at least 4097 tokens\"}}'"
+    )
+
+
+def test_token_logprobs_halves_on_context_length_400_then_succeeds(monkeypatch):
+    calls = []
+
+    def fake_post(url, body, timeout):
+        calls.append(body["prompt"])
+        if len(calls) == 1:
+            raise _context_length_error()
+        return _ECHO_RESP
+
+    monkeypatch.setattr("lme_qa.local_lm._post_json", fake_post)
+
+    client = LocalLMClient(base_url="http://oracle:8000", model="m")
+    long_text = "token " * 2000
+    out = client.token_logprobs(long_text)
+
+    assert out == parse_echo_logprobs(_ECHO_RESP)
+    assert len(calls) == 2
+    # Second attempt is a shorter prefix of the first, halved.
+    assert long_text.startswith(calls[0])
+    assert calls[0].startswith(calls[1])
+    assert len(calls[1]) < len(calls[0])
+    assert len(calls[1]) <= len(calls[0]) // 2 + 1
+
+
+def test_token_logprobs_persistent_400_returns_empty_after_bounded_halvings(
+    monkeypatch,
+):
+    # A context-length 400 that never clears (pathological token density)
+    # must NOT retry forever -- bounded halvings, then [] rather than a
+    # crash. [] is exactly what the scorer's `if not lp` guard already
+    # treats as a neutral surprisal of 0.0.
+    calls = []
+
+    def fake_post(url, body, timeout):
+        calls.append(body["prompt"])
+        raise _context_length_error()
+
+    monkeypatch.setattr("lme_qa.local_lm._post_json", fake_post)
+
+    client = LocalLMClient(base_url="http://oracle:8000", model="m")
+    out = client.token_logprobs("x" * 256)
+
+    assert out == []
+    # Initial attempt + at most ~6 halvings -- bounded, not unbounded retry.
+    assert 1 < len(calls) <= 7
+
+
+def test_token_logprobs_non_context_length_400_still_raises(monkeypatch):
+    # A 400 for an unrelated reason must not be swallowed by the halving
+    # logic -- only context-length 400s get special handling.
+    def fake_post(url, body, timeout):
+        raise RuntimeError(
+            "scorer request to http://oracle:8000/v1/completions failed: "
+            "HTTP 400 b'{\"error\":{\"message\":\"invalid request: bad "
+            "param\"}}'"
+        )
+
+    monkeypatch.setattr("lme_qa.local_lm._post_json", fake_post)
+
+    client = LocalLMClient(base_url="http://oracle:8000", model="m")
+    with pytest.raises(RuntimeError, match="bad param"):
+        client.token_logprobs("normal text")
+
+
+def test_token_logprobs_normal_path_untouched(monkeypatch):
+    # No error: exactly one call, prompt unmodified -- existing behavior
+    # preserved precisely.
+    calls = []
+
+    def fake_post(url, body, timeout):
+        calls.append(body["prompt"])
+        return _ECHO_RESP
+
+    monkeypatch.setattr("lme_qa.local_lm._post_json", fake_post)
+
+    client = LocalLMClient(base_url="http://oracle:8000", model="m")
+    out = client.token_logprobs("The capital of France is")
+
+    assert out == parse_echo_logprobs(_ECHO_RESP)
+    assert calls == ["The capital of France is"]

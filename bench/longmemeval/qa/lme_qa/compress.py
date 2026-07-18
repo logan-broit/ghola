@@ -354,6 +354,16 @@ def _statistical_prune(
     return text
 
 
+# The oracle's context window is 4096 tokens. English prose runs ~4
+# chars/token, but token-dense text (code, ids, URLs) can run as low as
+# ~2.2 chars/token -- a live crash showed the echo-path request 400 on a
+# turn well under a 12,000-char cap once the tokenizer got that dense.
+# 9,000 chars stays safely above the directional-cross-entropy pilot's
+# 1,500-char regime while giving token-dense text more headroom before the
+# local_lm.py halve-retry has to kick in.
+_ORACLE_SCORE_MAX_CHARS = 9_000
+
+
 class _SurprisalScorer:
     """Scorer with the ``scorer(query, items) -> {id: float}`` shape that ranks
     items by LM surprisal -- the local-oracle twin of ``_SelfInfoScorer``.
@@ -382,6 +392,11 @@ class _SurprisalScorer:
         out: dict[str, float] = {}
         for sid, text in items:
             scored = f"{query}\n{text}" if self.query_mode == "aware" else text
+            # Cap the scored text to the oracle's context budget. In aware
+            # mode the query is prepended -- truncate the concatenated
+            # string so the query survives intact at the front and the
+            # turn's tail is what gets cut.
+            scored = scored[:_ORACLE_SCORE_MAX_CHARS]
             lp = self.lm_client.token_logprobs(scored)
             if not lp:
                 out[sid] = 0.0

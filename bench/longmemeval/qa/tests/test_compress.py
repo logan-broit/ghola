@@ -791,6 +791,93 @@ def test_perplexity_prune_no_budget_keeps_all():
     assert out == full_text
 
 
+def test_surprisal_scorer_long_turn_is_truncated_to_cap():
+    """A 50,000-char text must be truncated before the LM call: the received
+    prompt must be <= 9,000 chars (_ORACLE_SCORE_MAX_CHARS) and a prefix of
+    the original text. The cap was lowered 12,000 -> 9,000 after a live
+    crash: token-dense text (code/ids) can run closer to ~2.2 chars/token
+    than English prose's ~4, so 12,000 chars could still exceed the oracle's
+    4096-token context."""
+
+    class _RecordingFakeLM:
+        def __init__(self):
+            self.received = None
+
+        def token_logprobs(self, text):
+            if len(text) > 9000:
+                raise AssertionError(
+                    f"lm_client received prompt of length {len(text)} > 9000"
+                )
+            self.received = text
+            return [("x", -3.0)]
+
+    from lme_qa.compress import _SurprisalScorer
+
+    long_text = "a" * 50_000
+    fake_lm = _RecordingFakeLM()
+    scorer = _SurprisalScorer(fake_lm, query_mode="agnostic")
+    scores = scorer("the query", [("long", long_text)])
+
+    # Real score returned (not 0.0 -- this is NOT the empty-turn guard path)
+    assert scores["long"] == pytest.approx(3.0)
+    assert fake_lm.received is not None
+    assert len(fake_lm.received) <= 9_000
+    assert long_text.startswith(fake_lm.received)
+
+
+def test_surprisal_scorer_long_turn_aware_mode_truncated_query_survives():
+    """In aware mode, query + 50,000-char turn: the received prompt is
+    <= 9,000 chars AND starts with the query (the turn's tail is cut, not
+    the query)."""
+
+    class _RecordingFakeLM:
+        def __init__(self):
+            self.received = None
+
+        def token_logprobs(self, text):
+            if len(text) > 9000:
+                raise AssertionError(
+                    f"lm_client received prompt of length {len(text)} > 9000"
+                )
+            self.received = text
+            return [("x", -3.0)]
+
+    from lme_qa.compress import _SurprisalScorer
+
+    query = "what port does the database use"
+    long_text = "b" * 50_000
+    fake_lm = _RecordingFakeLM()
+    scorer = _SurprisalScorer(fake_lm, query_mode="aware")
+    scores = scorer(query, [("long", long_text)])
+
+    assert scores["long"] == pytest.approx(3.0)
+    assert fake_lm.received is not None
+    assert len(fake_lm.received) <= 9_000
+    assert fake_lm.received.startswith(query)
+
+
+def test_surprisal_scorer_normal_length_turn_sent_unmodified():
+    """A turn well under the cap must be sent to the LM unmodified (no
+    truncation side-effects for normal-length inputs)."""
+
+    class _RecordingFakeLM:
+        def __init__(self):
+            self.received = None
+
+        def token_logprobs(self, text):
+            self.received = text
+            return [("x", -3.0)]
+
+    from lme_qa.compress import _SurprisalScorer
+
+    short_text = "the database listens on port 9931"
+    fake_lm = _RecordingFakeLM()
+    scorer = _SurprisalScorer(fake_lm, query_mode="agnostic")
+    scorer("q", [("short", short_text)])
+
+    assert fake_lm.received == short_text
+
+
 # --- llm_distill (claude distiller, prose|structured, cached) ------------
 
 
