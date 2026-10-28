@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "ghola recall: parallel tiers, RRF, settle, rerank",
+    "output": "docs/architecture/recall.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": { "url": "git@github.com:logan-broit/ghola.git", "provider": "github", "link_mode": "local-only", "revision": "282043c7617b74a2270ede5d86875d0765defb8e" }
+  },
+  "stages": [
+    { "label": "Query" },
+    { "label": "Fan-out, parallel, 10s each" },
+    { "label": "Fuse + expand" },
+    { "label": "Rerank" },
+    { "label": "Return" }
+  ],
+  "nodes": [
+    { "id": "recall", "type": "backend", "label": "core.Recall", "sublabel": "cwd to workspace, embed query", "stage": 0, "row": 2, "tag": "MCP recall",
+      "sources": [{ "path": "internal/core/core.go", "line": 527, "end_line": 690 }] },
+    { "id": "working", "type": "database", "label": "working tier", "sublabel": "sietch vector + FTS5", "stage": 1, "row": 0, "tag": "local",
+      "sources": [{ "path": "internal/core/core.go", "line": 750, "end_line": 790 }, { "path": "internal/sietch/store.go", "line": 331, "end_line": 444 }] },
+    { "id": "dense", "type": "database", "label": "episodic dense", "sublabel": "pgvector cosine on events", "stage": 1, "row": 1, "tag": "/v1/episodic/query",
+      "sources": [{ "path": "internal/core/core.go", "line": 805, "end_line": 860 }, { "path": "chapterhouse/internal/handler/episodic.go", "line": 369, "end_line": 562 }] },
+    { "id": "keyword", "type": "database", "label": "keyword", "sublabel": "Postgres FTS ts_rank_cd", "stage": 1, "row": 2, "tag": "same call",
+      "sources": [{ "path": "chapterhouse/internal/handler/episodic.go", "line": 443, "end_line": 457 }] },
+    { "id": "sessvec", "type": "database", "label": "session vector", "sublabel": "cosine on session L1", "stage": 1, "row": 3, "tag": "same call",
+      "sources": [{ "path": "chapterhouse/internal/handler/episodic.go", "line": 459, "end_line": 474 }] },
+    { "id": "semantic", "type": "database", "label": "semantic mnemes", "sublabel": "cluster centroids", "stage": 1, "row": 4, "tag": "/v1/semantic/query",
+      "sources": [{ "path": "internal/core/core.go", "line": 865, "end_line": 885 }, { "path": "chapterhouse/internal/semantic/query.go", "line": 53, "end_line": 77 }] },
+    { "id": "fuse", "type": "backend", "label": "dedup + RRF", "sublabel": "per-session key, k = 60", "stage": 2, "row": 1, "tag": "FuseRRF",
+      "sources": [{ "path": "internal/core/rrf.go", "line": 24, "end_line": 54 }, { "path": "internal/core/core.go", "line": 980, "end_line": 995 }] },
+    { "id": "settle", "type": "backend", "label": "settle expansion", "sublabel": "spreading activation, Hebbian", "stage": 2, "row": 3, "tag": "GHOLA_SETTLE",
+      "sources": [{ "path": "chapterhouse/internal/handler/episodic.go", "line": 549, "end_line": 560 }, { "path": "internal/core/core.go", "line": 1046, "end_line": 1118 }] },
+    { "id": "rerank", "type": "cloud", "label": "truthsayer", "sublabel": "bge-reranker-v2-m3, top 50", "stage": 3, "row": 2, "tag": "GPU :8085",
+      "sources": [{ "path": "internal/core/core.go", "line": 1184, "end_line": 1241 }, { "path": "internal/truthsayer/client.go", "line": 82, "end_line": 99 }] },
+    { "id": "out", "type": "frontend", "label": "top Limit hits", "sublabel": "+ tier counts, degraded list", "stage": 4, "row": 2, "tag": "default 10",
+      "sources": [{ "path": "internal/core/score_fusion.go", "line": 48, "end_line": 67 }, { "path": "internal/core/core.go", "line": 1136, "end_line": 1162 }] }
+  ],
+  "flows": [
+    { "from": "recall", "to": "working", "label": "vector + text" },
+    { "from": "recall", "to": "dense", "label": "query vector", "variant": "emphasis" },
+    { "from": "recall", "to": "keyword", "label": "query text" },
+    { "from": "recall", "to": "sessvec", "label": "query vector" },
+    { "from": "recall", "to": "semantic", "label": "query vector" },
+    { "from": "working", "to": "fuse", "label": "ranked list" },
+    { "from": "dense", "to": "fuse", "label": "ranked list", "variant": "emphasis" },
+    { "from": "keyword", "to": "fuse", "label": "ranked list" },
+    { "from": "sessvec", "to": "fuse", "label": "ranked list" },
+    { "from": "semantic", "to": "fuse", "label": "ranked list" },
+    { "from": "dense", "to": "settle", "label": "seed hits", "variant": "dashed" },
+    { "from": "fuse", "to": "rerank", "label": "fused pool", "variant": "emphasis" },
+    { "from": "settle", "to": "rerank", "label": "expansion", "variant": "dashed" },
+    { "from": "rerank", "to": "out", "label": "3-channel blend", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Final score", "items": [
+      "0.5 rerank + 0.4 activation + 0.1 RRF (score_fusion.go)",
+      "No rerank score (mnemes, reranker down): RRF prior + activation",
+      "GHOLA_SETTLE=off drops activation and restores the pre-P4 path"
+    ] },
+    { "dot": "cyan", "title": "Degrade, don't fail", "items": [
+      "Query embed fails: lexical tiers only, 'embed' added to degraded",
+      "A tier errors or times out: dropped, the rest still fuse",
+      "Error only when every attempted tier failed"
+    ] },
+    { "dot": "amber", "title": "Settle", "items": [
+      "Computed inside the same /v1/episodic/query call, seeded from its hits",
+      "Expansion joins the pool after RRF, before rerank",
+      "Activation weight GHOLA_ACTIVATION_WEIGHT, default 0.40"
+    ] }
+  ]
+}

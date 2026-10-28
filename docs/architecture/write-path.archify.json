@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "ghola write path: record to semantic",
+    "output": "docs/architecture/write-path.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": { "url": "git@github.com:logan-broit/ghola.git", "provider": "github", "link_mode": "local-only", "revision": "282043c7617b74a2270ede5d86875d0765defb8e" }
+  },
+  "stages": [
+    { "label": "Caller" },
+    { "label": "ghola daemon" },
+    { "label": "Working tier" },
+    { "label": "Episodic (chapterhouse)" },
+    { "label": "Semantic (ch-worker)" }
+  ],
+  "nodes": [
+    { "id": "agent", "type": "external", "label": "Agent", "sublabel": "MCP record via ghola-mcp", "stage": 0, "row": 0, "tag": "HTTP :7421",
+      "sources": [{ "path": "internal/mcp/server.go", "line": 85, "end_line": 100 }] },
+    { "id": "record", "type": "backend", "label": "core.Record", "sublabel": "resolve session from cwd", "stage": 1, "row": 0, "tag": "sync",
+      "sources": [{ "path": "internal/core/core.go", "line": 400, "end_line": 448 }] },
+    { "id": "guild", "type": "cloud", "label": "guild embedder", "sublabel": "Qwen3-Embedding 0.6B", "stage": 1, "row": 1, "tag": "vLLM :8082",
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 30, "end_line": 70 }] },
+    { "id": "sietch", "type": "database", "label": "sietch SQLite", "sublabel": "1 file per session, FTS5 + vectors", "stage": 2, "row": 0, "tag": "working",
+      "sources": [{ "path": "internal/sietch/store.go", "line": 229, "end_line": 292 }] },
+    { "id": "encoder", "type": "backend", "label": "encoding worker", "sublabel": "backfill, flush, GC", "stage": 2, "row": 1, "tag": "every 5m",
+      "sources": [{ "path": "internal/encoding/worker.go", "line": 121, "end_line": 175 }, { "path": "internal/core/core.go", "line": 1387, "end_line": 1410 }] },
+    { "id": "ingest", "type": "backend", "label": "episodic ingest", "sublabel": "ch-api POST /v1/episodic/ingest", "stage": 3, "row": 0, "tag": "idempotent",
+      "sources": [{ "path": "chapterhouse/internal/handler/episodic.go", "line": 130, "end_line": 238 }, { "path": "internal/chapterhouse/client.go", "line": 360, "end_line": 366 }] },
+    { "id": "episodic", "type": "database", "label": "episodic events", "sublabel": "Postgres pgvector + tsvector", "stage": 3, "row": 1, "tag": "lossless" },
+    { "id": "queue", "type": "messagebus", "label": "co-activation queue", "sublabel": "pairs from one session", "stage": 3, "row": 2, "tag": "durable",
+      "sources": [{ "path": "chapterhouse/internal/repository/associations.go", "line": 77, "end_line": 123 }] },
+    { "id": "mentat", "type": "backend", "label": "mentat", "sublabel": "stateless pool + HDBSCAN", "stage": 3, "row": 3, "tag": "Python :8084",
+      "sources": [{ "path": "mentat/mentat/app.py", "line": 83, "end_line": 95 }, { "path": "mentat/mentat/clustering.py", "line": 1, "end_line": 90 }] },
+    { "id": "l1", "type": "database", "label": "session L1 vectors", "sublabel": "pooled per closed session", "stage": 4, "row": 0, "tag": "reconciler 30s",
+      "sources": [{ "path": "chapterhouse/internal/semantic/writer.go", "line": 45, "end_line": 85 }, { "path": "chapterhouse/cmd/ch-api/main.go", "line": 103, "end_line": 104 }] },
+    { "id": "consolidate", "type": "backend", "label": "nightly consolidation", "sublabel": "cluster, apply, enrich, label", "stage": 4, "row": 1, "tag": "02:00",
+      "sources": [{ "path": "chapterhouse/internal/consolidation/pipeline.go", "line": 76, "end_line": 182 }, { "path": "chapterhouse/cmd/ch-worker/main.go", "line": 186, "end_line": 205 }] },
+    { "id": "mnemes", "type": "database", "label": "semantic.mnemes", "sublabel": "level-1 + verbatim excerpts", "stage": 4, "row": 2, "tag": "worker writes",
+      "sources": [{ "path": "chapterhouse/internal/consolidation/apply.go", "line": 50, "end_line": 97 }, { "path": "chapterhouse/internal/consolidation/enrich.go", "line": 28, "end_line": 72 }] },
+    { "id": "drain", "type": "backend", "label": "co-activation drain", "sublabel": "ch-worker", "stage": 4, "row": 3, "tag": "tick 30s",
+      "sources": [{ "path": "chapterhouse/cmd/ch-worker/main.go", "line": 98, "end_line": 115 }, { "path": "chapterhouse/internal/consolidation/drain.go", "line": 1, "end_line": 76 }] },
+    { "id": "assoc", "type": "database", "label": "associations", "sublabel": "Hebbian links, feed settle", "stage": 4, "row": 4, "tag": "primitives" }
+  ],
+  "flows": [
+    { "from": "agent", "to": "record", "label": "record event", "variant": "emphasis" },
+    { "from": "record", "to": "guild", "label": "text to vector" },
+    { "from": "record", "to": "sietch", "label": "append + current", "variant": "emphasis" },
+    { "from": "sietch", "to": "encoder", "label": "after watermark" },
+    { "from": "encoder", "to": "guild", "label": "backfill vectors", "variant": "dashed" },
+    { "from": "encoder", "to": "ingest", "label": "embedded prefix", "variant": "emphasis" },
+    { "from": "ingest", "to": "episodic", "label": "insert events", "variant": "emphasis" },
+    { "from": "ingest", "to": "queue", "label": "co-activations", "variant": "dashed" },
+    { "from": "episodic", "to": "l1", "label": "closed sessions", "variant": "dashed" },
+    { "from": "l1", "to": "consolidate", "label": "session L1s", "variant": "dashed" },
+    { "from": "consolidate", "to": "mentat", "label": "cluster request", "variant": "dashed" },
+    { "from": "consolidate", "to": "mnemes", "label": "upsert + excerpts", "variant": "dashed" },
+    { "from": "queue", "to": "drain", "label": "drain batch", "variant": "dashed" },
+    { "from": "drain", "to": "assoc", "label": "strengthen pairs", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Never lose a write", "items": [
+      "Embed fails: event lands in sietch without a vector",
+      "Worker backfills vectors, then ships only the contiguous embedded prefix",
+      "Watermark advances after ingest; ingest is safe to repeat"
+    ] },
+    { "dot": "cyan", "title": "Timers", "items": [
+      "ENCODING_INTERVAL 5m: sietch to episodic, then GC ended + drained files",
+      "ch-api reconciler 30s: closed sessions pooled to L1 through mentat",
+      "CONSOLIDATE_HOUR 2: nightly per CONSOLIDATE_WORKSPACES, or POST /v1/semantic/consolidate"
+    ] },
+    { "dot": "amber", "title": "Who writes what", "items": [
+      "ghola daemon: sietch files and the ingest call",
+      "ch-api: episodic rows, queue rows, L1 columns",
+      "ch-worker: mnemes and associations; mentat only computes; LLM labels optional"
+    ] }
+  ]
+}

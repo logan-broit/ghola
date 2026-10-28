@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ghola build: 1 Go module, 2 images",
+    "output": "docs/architecture/build.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": { "url": "git@github.com:logan-broit/ghola.git", "provider": "github", "link_mode": "local-only", "revision": "282043c7617b74a2270ede5d86875d0765defb8e" }
+  },
+  "components": [
+    { "id": "mod", "type": "backend", "label": "go module: ghola", "sublabel": "cmd/ + chapterhouse/cmd/", "pos": [40, 192], "size": [230, 72],
+      "sources": [{ "path": "go.mod", "line": 1, "end_line": 5 }] },
+    { "id": "pysrc", "type": "backend", "label": "mentat/ + truthsayer/", "sublabel": "two pyprojects, kept apart", "pos": [40, 506], "size": [230, 72],
+      "sources": [{ "path": "mentat/pyproject.toml", "line": 1, "end_line": 20 }, { "path": "truthsayer/pyproject.toml", "line": 1, "end_line": 20 }] },
+
+    { "id": "img_go", "type": "cloud", "label": "ghola/ghola", "sublabel": "every Go binary, one Dockerfile", "pos": [430, 158], "size": [210, 140],
+      "sources": [{ "path": "deploy/docker-compose/Dockerfile.golang", "line": 1, "end_line": 21 }] },
+    { "id": "img_py", "type": "cloud", "label": "ghola/py", "sublabel": "both sidecars, one torch layer", "pos": [430, 476], "size": [210, 132],
+      "sources": [{ "path": "deploy/docker-compose/Dockerfile.python", "line": 1, "end_line": 14 }] },
+
+    { "id": "s_ghola", "type": "backend", "label": "ghola :7421", "sublabel": "+ ghola-mcp on host", "pos": [810, 40], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 254, "end_line": 285 }] },
+    { "id": "s_api", "type": "backend", "label": "chapterhouse :8080", "sublabel": "ch-api", "pos": [810, 120], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 183, "end_line": 225 }] },
+    { "id": "s_init", "type": "backend", "label": "ch-init", "sublabel": "one-shot migrations", "pos": [810, 200], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 163, "end_line": 182 }] },
+    { "id": "s_worker", "type": "backend", "label": "chapterhouse-worker", "sublabel": "ch-worker", "pos": [810, 280], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 226, "end_line": 253 }] },
+    { "id": "s_web", "type": "frontend", "label": "ch-web :8090", "sublabel": "admin console, profile web", "pos": [810, 360], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 286, "end_line": 299 }] },
+    { "id": "s_mentat", "type": "backend", "label": "mentat :8084", "sublabel": "CPU", "pos": [810, 470], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 89, "end_line": 114 }] },
+    { "id": "s_truth", "type": "backend", "label": "truthsayer :8085", "sublabel": "GPU", "pos": [810, 558], "size": [200, 56],
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 115, "end_line": 141 }] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "source", "wraps": ["mod", "pysrc"], "pad": 16 },
+    { "kind": "region", "label": "2 images", "wraps": ["img_go", "img_py"], "pad": 16 },
+    { "kind": "region", "label": "compose services, split by entrypoint", "wraps": ["s_ghola", "s_api", "s_init", "s_worker", "s_web", "s_mentat", "s_truth"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "mod", "to": "img_go", "label": "go build ./cmd/...", "variant": "emphasis" },
+    { "from": "pysrc", "to": "img_py", "label": "pip install both", "variant": "emphasis" },
+    { "from": "img_go", "to": "s_ghola", "label": "ghola" },
+    { "from": "img_go", "to": "s_api", "label": "ch-api" },
+    { "from": "img_go", "to": "s_init", "label": "ch-init" },
+    { "from": "img_go", "to": "s_worker", "label": "ch-worker" },
+    { "from": "img_go", "to": "s_web", "label": "ch-web", "variant": "dashed" },
+    { "from": "img_py", "to": "s_mentat", "label": "uvicorn mentat" },
+    { "from": "img_py", "to": "s_truth", "label": "uvicorn truthsayer" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "One of each", "items": [
+      "One go.mod; chapterhouse/internal stays private to chapterhouse/",
+      "Binaries named after their cmd/ folder; compose picks one by entrypoint",
+      "CI: go, python, python-qa; Go version from go.mod"
+    ] },
+    { "dot": "cyan", "title": "Split later", "items": [
+      "Each binary keeps its own main and env config",
+      "Copy the Dockerfile with a narrower go build target to ship one service alone"
+    ] },
+    { "dot": "amber", "title": "Pulled, not built", "items": [
+      "pgvector pg17, vLLM embedder (guild), python hash stub",
+      "deploy/cnpg-pg18 builds the homelab Postgres image separately"
+    ] }
+  ]
+}

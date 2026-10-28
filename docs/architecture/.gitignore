@@ -1,0 +1,4 @@
+# Rendered archify output and its receipts (sources are the *.archify.json files)
+*.html
+*.json
+!*.archify.json
