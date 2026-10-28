@@ -1,0 +1,19 @@
+# Build context for deploy/docker-compose/Dockerfile.{golang,python}.
+# Both build from the repo root; keep everything the images don't read out.
+.git
+.github
+.archify
+.claude
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/*.db
+**/*.sqlite
+attic
+bench
+bootstrap-data
+docs
+seeding-eval
+deploy/docker-compose/.env
+/ghola
+/ghola-mcp

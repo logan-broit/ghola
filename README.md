@@ -8,7 +8,7 @@ current task.
 
 ## Install
 
-Build from source. Requires Go 1.22+ and Docker. A GPU is
+Build from source. Requires Go 1.25+ and Docker. A GPU is
 **recommended** for the embedder + reranker:
 
 - **CUDA** — the dev stack ships vLLM for the embedder, which is
@@ -42,18 +42,19 @@ targets, the dev stack, and env knobs.
 
 ## Launch
 
-Full local stack — Postgres + chapterhouse + ghola + mentat +
-truthsayer + GPU embedder, all built locally on first run:
+Local stack — Postgres + chapterhouse + mentat + truthsayer + GPU
+embedder, images built locally on first run (`make dev-up`). Add the
+ghola daemon with the compose `all` profile:
 
 ```sh
-make dev-up
+scripts/dev-up.sh --with-ghola   # compose up + health checks
 ```
 
 Just the ghola HTTP daemon (assumes a reachable chapterhouse via
 `CHAPTERHOUSE_URL`):
 
 ```sh
-./ghola serve
+./ghola
 ```
 
 ## Connect
@@ -67,8 +68,8 @@ Just the ghola HTTP daemon (assumes a reachable chapterhouse via
 }
 ```
 
-MCP tools surfaced (5 agent-facing): `record`, `recall`, `bookmark`,
-`navigate`, `forget`. `record` accepts an optional `cwd` — when
+MCP tools surfaced (6 agent-facing): `record`, `recall`, `bookmark`,
+`navigate`, `forget`, `consolidate_workspace`. `record` accepts an optional `cwd` — when
 `session_id` is omitted the service derives a workspace from `cwd`
 and reuses or provisions a session inline (no `session_start`
 bookkeeping for the model). Lifecycle and admin operations

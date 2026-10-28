@@ -1,8 +1,9 @@
 // Package apierror provides a structured HTTP error type for the ghola
-// daemon. Mirror of _chapterhouse/ch-server/pkg/apierror so both halves
+// daemon. Mirror of chapterhouse/pkg/apierror so both halves
 // of the system speak the same JSON error shape: {code, message,
 // details}. Both packages stay in lockstep — change one, change both
-// (or extract to a shared module via go.work later).
+// (or dedupe now that both share one go.mod, at the cost of coupling
+// chapterhouse to the root tree).
 package apierror
 
 import (

@@ -18,21 +18,19 @@ SMOKE_COMPOSE = cd deploy/docker-compose && \
     docker compose -p $(SMOKE_PROJECT) \
         -f docker-compose.yml -f docker-compose.smoke.yml
 
-SERVER_DIR  := _chapterhouse/ch-server
 SERVICE_BIN := ghola
 MCP_BIN     := ghola-mcp
 
 all: server service
 
 server:
-	cd $(SERVER_DIR) && go build ./...
+	go build ./chapterhouse/...
 
 service:
 	go build -o $(SERVICE_BIN) ./cmd/ghola
 	go build -o $(MCP_BIN) ./cmd/ghola-mcp
 
 test:
-	cd $(SERVER_DIR) && go test ./...
 	go test ./...
 
 dev-up:
@@ -43,7 +41,6 @@ dev-down:
 
 clean:
 	rm -f $(SERVICE_BIN) $(MCP_BIN)
-	cd $(SERVER_DIR) && go clean
 
 # Full-stack smoke for the predictive-replay v1a vertical slice.
 # Brings up an isolated Compose project (postgres + guild-stub +
@@ -75,12 +72,11 @@ smoke-predictive:
 	fi
 	@set -e; \
 	rc=0; \
-	( cd $(SERVER_DIR) && \
-	  GHOLA_URL=http://localhost:$(SMOKE_GHOLA_PORT) \
+	( GHOLA_URL=http://localhost:$(SMOKE_GHOLA_PORT) \
 	  CHAPTERHOUSE_URL=http://localhost:$(SMOKE_CH_PORT) \
 	  MENTAT_URL=http://localhost:$(SMOKE_MENTAT_PORT) \
 	  POSTGRES_PORT=$(SMOKE_POSTGRES_PORT) \
-	  go test -tags=e2e ./test/e2e/ -run TestPredictiveReplayVerticalSlice -v -count=1 -timeout=180s ) || rc=$$?; \
+	  go test -tags=e2e ./chapterhouse/test/e2e/ -run TestPredictiveReplayVerticalSlice -v -count=1 -timeout=180s ) || rc=$$?; \
 	$(SMOKE_COMPOSE) down -v; \
 	exit $$rc
 

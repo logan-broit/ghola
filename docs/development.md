@@ -5,7 +5,7 @@
 The root `Makefile` orchestrates per-component:
 
 ```sh
-make server        # go build for _chapterhouse/ch-server
+make server        # go build ./chapterhouse/...
 make service       # go build for cmd/ghola + cmd/ghola-mcp
 make all           # everything
 make test          # run Go tests
@@ -19,22 +19,28 @@ The original Rust extension is retired to `attic/extension/` (algorithm
 reference, not in the build graph). Build it by hand with `cargo` if you
 need to mine it.
 
-`make server` `cd`s into `_chapterhouse/ch-server/` because that
-subproject has its own `go.mod`.
-
 ## Dev stack
 
-`make dev-up` brings up: postgres (pgvector/pg17), ch-init (migration
-runner), chapterhouse, ghola, mentat, truthsayer, and guild (or
-guild-stub for deterministic-vector testing — `docker compose
---profile stub up -d`).
+`make dev-up` (`docker compose up -d` in `deploy/docker-compose/`)
+brings up: postgres (pgvector/pg17), ch-init (migration runner),
+chapterhouse, chapterhouse-worker, mentat, truthsayer and guild.
+Optional profiles: `all` adds the ghola daemon
+(`scripts/dev-up.sh --with-ghola` does this and waits for health),
+`web` adds the ch-web admin UI.
+
+Two images, both built from the repo root on first `up`:
+`Dockerfile.golang` → `ghola/ghola:dev` (every Go binary; each service
+picks one via `entrypoint:`) and `Dockerfile.python` → `ghola/py:dev`
+(mentat + truthsayer; picked via `command:`). Rebuild after code
+changes with `docker compose build`.
 
 Service defaults:
 
 | Service | Port | What |
 |---|---|---|
-| ghola | `:7421` | local HTTP daemon |
+| ghola | `:7421` | local HTTP daemon (profile `all`) |
 | chapterhouse | `:8080` | recall backend |
+| ch-web | `:8090` | admin UI (profile `web`) |
 | guild | `:8082` | vLLM Qwen3-Embedding-0.6B |
 | mentat | `:8084` | HDBSCAN clustering sidecar |
 | truthsayer | `:8085` | cross-encoder reranker (bge-reranker-v2-m3 fp16) |
@@ -74,9 +80,11 @@ M-series; bge-reranker-v2-m3 at ~50ms/pair on CPU). Replace the
 Keep `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM` env vars
 unchanged across the swap so ghola + chapterhouse don't need to know.
 
-The `guild-stub` profile (`docker compose --profile stub up -d`) swaps
-in a deterministic hash stub for tests where you don't care about
-embedding quality.
+For tests where embedding quality doesn't matter,
+`docker-compose.smoke.yml` replaces `guild` with a deterministic hash
+stub (`guild-stub/stub.py`); `make smoke-predictive` uses it. The `stub`
+profile only adds `guild-stub` next to `guild` (same host port), so it
+isn't a swap.
 
 **fp16 caveat.** Truthsayer's `dtype` knob only applies on CUDA
 (see `truthsayer/truthsayer/scorer.py`). On MPS / CPU the model
@@ -94,14 +102,16 @@ recall-tuning ones are listed in
 ## Tests
 
 ```sh
-make test           # Go
-go test ./...       # root module only
-(cd _chapterhouse/ch-server && go test ./...)
+make test           # Go (one module: ghola + chapterhouse)
+go test ./...       # same; chapterhouse Postgres tests use testcontainers (Docker)
 (cd attic/extension && cargo test)   # retired extension, not in the build graph
 ```
 
-Integration tests live under `test/` (cross-binary, acceptance-criteria
-flavor) and per-package `*_test.go` files.
+Chapterhouse's Postgres tests start `pgvector/pgvector:pg17` through
+testcontainers. End-to-end tests are build-tagged and need a running
+stack: `GHOLA_E2E_URL=http://localhost:7421 go test -tags=e2e ./test/e2e/`
+(skipped without the URL), and
+`make smoke-predictive` for `chapterhouse/test/e2e/`.
 
 ## Layout reference
 

@@ -170,7 +170,7 @@ func TestImport_BootstrapCorpus(t *testing.T) {
 // clean skip.
 //
 // workspace_id is required by validateIngest (see
-// _chapterhouse/ch-server/internal/handler/episodic.go); the ping
+// chapterhouse/internal/handler/episodic.go); the ping
 // uses a fixed sentinel UUID so this canary row is upserted-once and
 // doesn't accumulate per workspace. Real test runs use per-run
 // workspace UUIDs separately.

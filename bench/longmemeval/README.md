@@ -29,7 +29,8 @@ cp /path/to/ghola/bench/longmemeval/ghola_backend.py backends/ghola_v2.py
 ## Run
 
 ghola must be reachable at `GHOLA_URL` (default `http://localhost:7421`).
-Bring it up with `make dev-up` in the ghola repo first.
+Bring it up with `scripts/dev-up.sh --with-ghola` in the ghola repo first
+(`make dev-up` alone does not start the ghola daemon).
 
 ```sh
 cd ~/longmemeval

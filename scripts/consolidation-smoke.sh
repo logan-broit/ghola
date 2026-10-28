@@ -17,7 +17,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="$SCRIPT_DIR/../deploy/docker-compose"
-CH_SERVER_DIR="$SCRIPT_DIR/../_chapterhouse/ch-server"
+CH_SERVER_DIR="$SCRIPT_DIR/../chapterhouse"
 
 cd "$COMPOSE_DIR"
 echo "==> docker compose up -d postgres ch-init mentat guild"

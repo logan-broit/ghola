@@ -12,10 +12,10 @@ is welcome — let me know if you have a timeline.
 ## In scope
 
 - The ghola daemon (`cmd/ghola`, `cmd/ghola-mcp`, `internal/`)
-- The chapterhouse server (`_chapterhouse/ch-server/`) and admin
-  console (`_chapterhouse/ch-web/`)
+- The chapterhouse server (`chapterhouse/`) and admin
+  console (`cmd/ch-web/`)
 - The Python sidecars (`mentat/`, `truthsayer/`)
-- The published Docker images and Helm charts in the repo
+- The Dockerfiles under `deploy/`
 
 ## Out of scope
 
@@ -29,9 +29,12 @@ is welcome — let me know if you have a timeline.
 - ghola defaults to **loopback-only** (`GHOLA_LOOPBACK_ONLY=true`).
   Disabling it without an auth layer in front exposes the recall
   pipeline to the local network.
-- chapterhouse requires `Authorization: Bearer <api-key>` on every
-  request; the local dev stack ships a default `POSTGRES_PASSWORD=dev`
-  which is documented as dev-only.
+- chapterhouse's `/v1` routes accept `Authorization: Bearer ch_k1_...`
+  API keys, but under `AUTH_PROVIDER=default` (the default, and what
+  the compose stack uses) any request without a valid key is served as
+  `AUTH_DEFAULT_USER`. Keep it on loopback or a trusted network, or run
+  `AUTH_PROVIDER=jwt`. The dev stack's `POSTGRES_PASSWORD=dev` is
+  dev-only.
 - Bearer tokens flow through `internal/chapterhouse/client.go` and are
   never logged (verified during the consistency-sweep audit).
 - The Python sidecars (mentat, truthsayer) have no auth layer; they

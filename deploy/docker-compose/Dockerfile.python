@@ -1,0 +1,14 @@
+# One image for both Python services; each keeps its own pyproject.
+# Build context is the ghola monorepo root. Compose selects the service
+# via command: (uvicorn mentat.app:app on :8084, truthsayer.app:app on
+# :8085).
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY mentat/pyproject.toml ./mentat/
+COPY mentat/mentat ./mentat/mentat
+COPY truthsayer/pyproject.toml ./truthsayer/
+COPY truthsayer/truthsayer ./truthsayer/truthsayer
+RUN pip install --no-cache-dir -e ./mentat -e ./truthsayer
+EXPOSE 8084 8085

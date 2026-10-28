@@ -36,8 +36,8 @@ services:
   ch-init:
     build:
       context: ../..
-      dockerfile: deploy/docker-compose/Dockerfile.chapterhouse
-    image: ghola/chapterhouse:dev
+      dockerfile: deploy/docker-compose/Dockerfile.golang
+    image: ghola/ghola:dev
     entrypoint: ["/usr/local/bin/ch-init"]
     depends_on:
       postgres:
@@ -54,7 +54,8 @@ services:
     restart: "no"
 
   chapterhouse:
-    image: ghola/chapterhouse:dev
+    image: ghola/ghola:dev
+    entrypoint: ["/usr/local/bin/ch-api"]
     restart: unless-stopped
     depends_on:
       ch-init:
@@ -87,7 +88,7 @@ services:
       start_period: 20s
 
   chapterhouse-worker:
-    image: ghola/chapterhouse:dev
+    image: ghola/ghola:dev
     entrypoint: ["/usr/local/bin/ch-worker"]
     restart: unless-stopped
     depends_on:
@@ -102,9 +103,10 @@ services:
 
   mentat:
     build:
-      context: ../../mentat
-      dockerfile: Dockerfile
-    image: ghola/mentat:dev
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.python
+    image: ghola/py:dev
+    command: ["uvicorn", "mentat.app:app", "--host", "0.0.0.0", "--port", "8084"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -130,10 +132,8 @@ services:
       start_period: 30s
 
   ghola:
-    build:
-      context: ../..
-      dockerfile: deploy/docker-compose/Dockerfile.ghola
     image: ghola/ghola:dev
+    entrypoint: ["/usr/local/bin/ghola"]
     restart: unless-stopped
     depends_on:
       chapterhouse:

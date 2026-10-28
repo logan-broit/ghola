@@ -3,6 +3,7 @@
 #   docker compose up -d                   # full stack (postgres, embedder,
 #                                            ch-init, chapterhouse)
 #   docker compose --profile all up -d     # also start the ghola daemon
+#   docker compose --profile web up -d     # also start the ch-web admin UI
 #   docker compose --profile stub up -d    # swap real embedder for the
 #                                            Python hash-stub (fast but
 #                                            noisy; for deterministic
@@ -19,6 +20,11 @@
 #   chapterhouse-worker
 #                   ch-worker; drains co-activation queue every 30s
 #   ghola           ghola local daemon (:7421) — profile "all"
+#   ch-web          chapterhouse admin UI (:8090) — profile "web"
+#
+# Images: every Go service runs ghola/ghola:dev (Dockerfile.golang) with
+# entrypoint: selecting the binary; mentat and truthsayer run
+# ghola/py:dev (Dockerfile.python) with command: selecting the app.
 #
 services:
   guild:
@@ -82,9 +88,10 @@ services:
 
   mentat:
     build:
-      context: ../../mentat
-      dockerfile: Dockerfile
-    image: ghola/mentat:dev
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.python
+    image: ghola/py:dev
+    command: ["uvicorn", "mentat.app:app", "--host", "0.0.0.0", "--port", "8084"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -106,10 +113,8 @@ services:
       start_period: 30s
 
   truthsayer:
-    build:
-      context: ../../truthsayer
-      dockerfile: Dockerfile
-    image: ghola/truthsayer:dev
+    image: ghola/py:dev
+    command: ["uvicorn", "truthsayer.app:app", "--host", "0.0.0.0", "--port", "8085"]
     restart: unless-stopped
     environment:
       TRUTHSAYER_MODEL: ${TRUTHSAYER_MODEL:-BAAI/bge-reranker-v2-m3}
@@ -158,8 +163,8 @@ services:
   ch-init:
     build:
       context: ../..
-      dockerfile: deploy/docker-compose/Dockerfile.chapterhouse
-    image: ghola/chapterhouse:dev
+      dockerfile: deploy/docker-compose/Dockerfile.golang
+    image: ghola/ghola:dev
     entrypoint: ["/usr/local/bin/ch-init"]
     depends_on:
       postgres:
@@ -176,7 +181,8 @@ services:
     restart: "no"
 
   chapterhouse:
-    image: ghola/chapterhouse:dev
+    image: ghola/ghola:dev
+    entrypoint: ["/usr/local/bin/ch-api"]
     restart: unless-stopped
     depends_on:
       ch-init:
@@ -196,8 +202,8 @@ services:
       AUTH_PROVIDER: default
       AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
-      # cmd/api reads EMBEDDING_DIMENSIONS (internal/config), not
-      # EMBEDDING_DIM (that's cmd/init's migration-time var, kept above
+      # cmd/ch-api reads EMBEDDING_DIMENSIONS (internal/config), not
+      # EMBEDDING_DIM (that's cmd/ch-init's migration-time var, kept above
       # for that reason) — without this the digest embedder used by the
       # manual /v1/semantic/consolidate trigger defaulted to 768 and
       # mismatched the worker's 1024-dim vectors.
@@ -218,7 +224,7 @@ services:
       retries: 20
 
   chapterhouse-worker:
-    image: ghola/chapterhouse:dev
+    image: ghola/ghola:dev
     entrypoint: ["/usr/local/bin/ch-worker"]
     restart: unless-stopped
     depends_on:
@@ -247,10 +253,8 @@ services:
 
   ghola:
     profiles: ["all"]
-    build:
-      context: ../..
-      dockerfile: deploy/docker-compose/Dockerfile.ghola
     image: ghola/ghola:dev
+    entrypoint: ["/usr/local/bin/ghola"]
     restart: unless-stopped
     depends_on:
       chapterhouse:
@@ -278,6 +282,20 @@ services:
       # Without it the per-session SQLite files (the working memory
       # not yet consolidated to chapterhouse) die on every redeploy.
       - ghola-sessions:/root/.ghola/sessions
+
+  ch-web:
+    profiles: ["web"]
+    image: ghola/ghola:dev
+    entrypoint: ["/usr/local/bin/ch-web"]
+    restart: unless-stopped
+    depends_on:
+      chapterhouse:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      API_URL: http://chapterhouse:8080
+    ports:
+      - "${CH_WEB_PORT:-8090}:8080"
 
 volumes:
   postgres-data:

@@ -298,7 +298,7 @@ clone's `backends/` dir per
 [`bench/longmemeval/README.md`](../bench/longmemeval/README.md), then:
 
 ```sh
-# from your LongMemEval clone, with ghola running (make dev-up):
+# from your LongMemEval clone, with ghola running (scripts/dev-up.sh --with-ghola):
 GHOLA_V2_DELEGATE=1 .venv/bin/python run.py retrieve \
   --backend ghola_v2 --dataset s
 .venv/bin/python run.py evaluate --run results/ghola_v2_s_<ts>.jsonl
@@ -313,5 +313,5 @@ falls back to a local cross-encoder rerank for comparison.
 `seeding-eval/` in this repo is a smaller, faster harness used to
 sweep recall tuning (RRF_K, RERANK_TOPK, RERANK_WEIGHT) before
 escalating a change to the full LongMemEval-S run. See
-`seeding-eval/README.md` (if present) or `seeding-eval/pyproject.toml`
-for entry points.
+`seeding-eval/pyproject.toml` for entry points (`seeding-extract`,
+`seeding-eval-run`).

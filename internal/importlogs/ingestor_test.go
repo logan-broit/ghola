@@ -31,7 +31,7 @@ import (
 // /v1/episodic/ingest carries session.workspace_id matching cfg.Workspace.
 // Without this, chapterhouse rejects the request with 400
 // "session.workspace_id is required" (see
-// _chapterhouse/ch-server/internal/handler/episodic.go validateIngest).
+// chapterhouse/internal/handler/episodic.go validateIngest).
 func TestIngestSession_PlumbsWorkspaceID(t *testing.T) {
 	workspace := uuid.MustParse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 	user := uuid.MustParse("11111111-2222-4333-8444-555555555555")

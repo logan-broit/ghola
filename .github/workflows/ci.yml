@@ -10,77 +10,39 @@ on:
 # ubuntu-latest is the safe default for the public repo today.
 
 jobs:
-  go-root:
-    name: go (root module)
+  go:
+    name: go
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
       - run: go vet ./...
       - run: go build ./...
-      - run: go test -race ./...
-
-  go-chapterhouse:
-    name: go (chapterhouse)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: _chapterhouse/ch-server
-    env:
-      GOWORK: 'off'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-          cache-dependency-path: _chapterhouse/ch-server/go.sum
-      - run: go vet ./...
-      - run: go build ./...
-      # Postgres-dependent packages (handler, repository, consolidation,
-      # semantic) self-provision pgvector/pgvector:pg17 via
-      # testcontainers — the runner's Docker daemon is all they need.
+      # Postgres-dependent chapterhouse packages (handler, repository,
+      # consolidation, semantic) self-provision pgvector/pgvector:pg17
+      # via testcontainers — the runner's Docker daemon is all they need.
       - run: go test -race -timeout 20m ./...
 
-  go-chweb:
-    name: go (ch-web)
+  python:
+    name: pytest (mentat + truthsayer)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: _chapterhouse/ch-web
-    env:
-      GOWORK: 'off'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-          cache-dependency-path: _chapterhouse/ch-web/go.sum
-      - run: go vet ./...
-      - run: go build ./...
-
-  python-mentat:
-    name: pytest (mentat)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: mentat
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # torch is a hard dep (pooler.py). Pull the CPU-only wheel first so
-      # the editable install below doesn't drag in the ~2GB CUDA build.
+      # torch is a hard dep of both. Pull the CPU-only wheel first so
+      # the editable installs below don't drag in the ~2GB CUDA build.
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e '.[dev]'
+      - run: pip install -e './mentat[dev]' -e './truthsayer[dev]'
       # Skip the integration test (test_cluster_endpoint.py); it needs a
       # live Postgres with the chapterhouse schemas — out of scope here.
+      # truthsayer has no tests yet; the install above is its check.
       - run: pytest tests -q -m "not integration"
+        working-directory: mentat
 
   python-qa:
     name: pytest (lme-qa)

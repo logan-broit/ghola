@@ -1,7 +1,7 @@
 # Consolidation
 
 The episodic→semantic consolidation pipeline
-(`_chapterhouse/ch-server/internal/consolidation`, `RunWorkspace`) turns a
+(`chapterhouse/internal/consolidation`, `RunWorkspace`) turns a
 workspace's closed sessions into semantic-tier mnemes: reconcile any
 session missing an L1 embedding, cluster via mentat's HDBSCAN, match each
 cluster against existing mnemes and insert/reinforce
@@ -59,7 +59,7 @@ with a 10-minute proxy timeout headroom above the HTTP client's normal
 
 ## Nightly schedule
 
-`cmd/worker` reads `CONSOLIDATE_WORKSPACES`; if it's non-empty (and
+`chapterhouse/cmd/ch-worker` reads `CONSOLIDATE_WORKSPACES`; if it's non-empty (and
 `MENTAT_URL` is set) it starts a loop that sleeps until the next
 `CONSOLIDATE_HOUR:00` local time, runs `RunWorkspace` for each configured
 workspace in turn, and repeats. A workspace whose lock is already held

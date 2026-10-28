@@ -160,7 +160,7 @@ type ingestResp struct {
 //
 // Mirrors chapterhouse's MultiRankingRequest / MultiRankingResponse /
 // MultiRankingHit / ScoreBreakdown shapes (see
-// _chapterhouse/ch-server/internal/handler/episodic.go) one-for-one so
+// chapterhouse/internal/handler/episodic.go) one-for-one so
 // the ghola client can talk to /v1/episodic/query without importing
 // across the multi-module worktree boundary. Field-by-field with
 // matching JSON tags; deviations would silently drop fields on the
@@ -327,7 +327,7 @@ type semanticQueryReq struct {
 
 // consolidateWorkspaceReq is the wire shape for the manual
 // consolidation trigger, mirroring chapterhouse's consolidateRequest
-// (_chapterhouse/ch-server/internal/handler/semantic.go).
+// (chapterhouse/internal/handler/semantic.go).
 type consolidateWorkspaceReq struct {
 	Workspace string `json:"workspace"`
 }
@@ -337,7 +337,7 @@ type semanticHitsResp struct {
 }
 
 // semanticHitRow mirrors the chapterhouse mnemeHit shape (see
-// _chapterhouse/ch-server/internal/handler/semantic.go: mnemeHit).
+// chapterhouse/internal/handler/semantic.go: mnemeHit).
 // Label + Content are the consolidation-era content surface: chapterhouse
 // hydrates them from semantic.mnemes.label + the first representative's
 // excerpt, so a semantic hit finally carries readable text. Both are

@@ -82,7 +82,7 @@ cd deploy/docker-compose
 docker compose -f docker-compose.mac.yml up -d
 ```
 
-First run builds the `chapterhouse`, `ghola`, and `mentat` images for arm64.
+First run builds `ghola/ghola:dev` and `ghola/py:dev` for arm64.
 Wait for chapterhouse to go healthy:
 
 ```bash
@@ -125,6 +125,5 @@ docker compose -f docker-compose.mac.yml down -v    # also wipe the store (postg
   (falls back to RRF) and does not appear in `degraded`.
 - **First recall slow / reranker downloading** — bge-reranker-v2-m3 (~600 MB) and
   the GGUF download on first use; subsequent runs are cached.
-- **arm64 build issues** — the compose stack builds from `Dockerfile.chapterhouse`
-  and `Dockerfile.ghola` (multi-arch). The `--platform=linux/amd64`-locked
-  `_chapterhouse/ch-server/Dockerfile` is NOT used by this compose file.
+- **arm64 build issues** — the compose stack builds from `Dockerfile.golang`
+  and `Dockerfile.python` (multi-arch base images, no platform pin).
