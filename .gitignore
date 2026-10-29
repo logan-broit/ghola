@@ -43,6 +43,10 @@ __pycache__/
 # for /docs/plans/; later removals carry their own SHA).
 **/docs/plans/
 **/docs/status/
+# Research notes and paper drafts: unpublished, live in the private
+# ghola-research repo, never in this public one.
+**/docs/research/
+**/docs/paper/
 **/docs/issues/
 **/docs/archive/
 **/docs/notes/
