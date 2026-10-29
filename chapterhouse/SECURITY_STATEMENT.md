@@ -52,24 +52,12 @@ dictionary attacks.
 - **Source**: `chapterhouse/internal/auth/session_provider.go`,
   `chapterhouse/cmd/ch-api/main.go`
 
-### JWT (OpenID Connect)
+### Authentication for `/v1`
 
-- RS256/RS384/RS512 against a JWKS endpoint, keys cached
-  (`JWKS_CACHE_TTL`, default 15 minutes)
-- Claims: `sub`, `preferred_username`, `email`, `realm_access.roles`
-- **Source**: `chapterhouse/internal/auth/provider.go`
-
-### Authentication Chain for `/v1`
-
-A composite provider tries the **API key** first, then the provider
-selected by `AUTH_PROVIDER`:
-
-- `jwt`: a valid JWT is required.
-- `default` (the default, and what the compose stack uses): every
-  request without a valid API key is authenticated as
-  `AUTH_DEFAULT_USER`. This is single-user mode. Run it only on
-  loopback or a trusted network. ch-api logs a warning when
-  `ENVIRONMENT=production` and `AUTH_PROVIDER=default`.
+`/v1` requires a valid API key. With `AUTH_DISABLED=true` (what the
+compose stack sets for local dev) ch-api skips the key check and
+serves every request as `AUTH_DEFAULT_USER`. ch-api refuses to start
+with `AUTH_DISABLED=true` and `ENVIRONMENT=production`.
 
 `/health` and `/ready` need no auth. `/api/v1/*` uses session cookies
 only.
@@ -164,7 +152,7 @@ duration, response size, user ID, remote address).
 
 The repo ships a local docker compose stack (`deploy/docker-compose/`).
 It isn't production-shaped: no TLS, default `POSTGRES_PASSWORD=dev`,
-`AUTH_PROVIDER=default`, and secrets come from env vars. Published
+`AUTH_DISABLED=true`, and secrets come from env vars. Published
 ports bind to all interfaces in `docker-compose.yml` and to `127.0.0.1`
 in `docker-compose.mac.yml`. The `ghola/ghola:dev` runtime image is
 `alpine:3.20` and runs as root.
@@ -196,8 +184,7 @@ ch-api. No npm dependencies or build toolchain.
 
 ## Known Limitations
 
-- **Single-user default**: `AUTH_PROVIDER=default` turns off
-  authentication for requests without a key.
+- **Dev stack runs without auth**: compose sets `AUTH_DISABLED=true`.
 - **No `/v1` request body limit or rate limit**: the API trusts its
   caller (the local ghola daemon).
 - **Semantic tier has no per-user ACL**: any authenticated caller can

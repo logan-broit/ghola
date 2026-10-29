@@ -29,11 +29,11 @@ is welcome — let me know if you have a timeline.
 - ghola defaults to **loopback-only** (`GHOLA_LOOPBACK_ONLY=true`).
   Disabling it without an auth layer in front exposes the recall
   pipeline to the local network.
-- chapterhouse's `/v1` routes accept `Authorization: Bearer ch_k1_...`
-  API keys, but under `AUTH_PROVIDER=default` (the default, and what
-  the compose stack uses) any request without a valid key is served as
-  `AUTH_DEFAULT_USER`. Keep it on loopback or a trusted network, or run
-  `AUTH_PROVIDER=jwt`. The dev stack's `POSTGRES_PASSWORD=dev` is
+- chapterhouse's `/v1` routes require an `Authorization: Bearer ch_k1_...`
+  API key. The compose stack sets `AUTH_DISABLED=true` for local dev,
+  which serves every request as `AUTH_DEFAULT_USER`; ch-api refuses to
+  start with it under `ENVIRONMENT=production`. Keep a stack with auth
+  disabled on loopback or a trusted network. The dev stack's `POSTGRES_PASSWORD=dev` is
   dev-only.
 - Bearer tokens flow through `internal/chapterhouse/client.go` and are
   never logged (verified during the consistency-sweep audit).

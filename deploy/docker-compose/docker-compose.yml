@@ -199,7 +199,7 @@ services:
       DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-dev}
       DATABASE_NAME: ${POSTGRES_DB:-memories}
       DATABASE_SSL_MODE: disable
-      AUTH_PROVIDER: default
+      AUTH_DISABLED: "true"
       AUTH_DEFAULT_USER: ${DEFAULT_USER_UUID:-00000000-0000-0000-0000-000000000001}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
       # cmd/ch-api reads EMBEDDING_DIMENSIONS (internal/config), not

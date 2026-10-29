@@ -181,7 +181,7 @@ CHAPTERHOUSE_API_KEY=$(docker inspect docker-compose-ghola-1 \
     --format '{{range .Config.Env}}{{println .}}{{end}}' \
     | grep '^CHAPTERHOUSE_API_KEY=' | cut -d= -f2-)
 if [ -z "${CHAPTERHOUSE_API_KEY}" ]; then
-    # Local stack runs AUTH_PROVIDER=default + CHAPTERHOUSE_REQUIRE_KEY=false:
+    # Local stack runs AUTH_DISABLED=true + CHAPTERHOUSE_REQUIRE_KEY=false:
     # the server ignores the Bearer key; import-logs only requires non-empty.
     CHAPTERHOUSE_API_KEY="local-dev-noauth"
     log "container key empty; using local-dev placeholder (server auth is off)"

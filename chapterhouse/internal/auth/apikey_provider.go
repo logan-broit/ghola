@@ -112,7 +112,7 @@ func extractAPIKey(r *http.Request) (string, error) {
 		if strings.HasPrefix(token, APIKeyPrefix) {
 			return token, nil
 		}
-		// Not an API key, return missing token so composite provider can try next
+		// Not an API key
 		return "", ErrMissingToken
 	}
 

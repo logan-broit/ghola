@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -83,12 +82,10 @@ type EmbeddingConfig struct {
 
 // AuthConfig holds authentication configuration.
 type AuthConfig struct {
-	Provider     string // "default" or "jwt"
-	DefaultUser  string // UUID for default user in single-user mode
-	JWTIssuer    string
-	JWTAudience  string
-	JWKSURL      string
-	JWKSCacheTTL time.Duration
+	// Disabled skips API-key auth on /v1: every request acts as
+	// DefaultUser. Local dev only; refused when ENVIRONMENT=production.
+	Disabled    bool
+	DefaultUser string
 }
 
 // Load reads configuration from environment variables.
@@ -124,12 +121,8 @@ func Load() (*Config, error) {
 			Timeout:     envcfg.Duration("EMBEDDING_TIMEOUT", 30*time.Second),
 		},
 		Auth: AuthConfig{
-			Provider:     envcfg.String("AUTH_PROVIDER", "default"),
-			DefaultUser:  envcfg.String("AUTH_DEFAULT_USER", "00000000-0000-0000-0000-000000000000"),
-			JWTIssuer:    envcfg.String("JWT_ISSUER", ""),
-			JWTAudience:  envcfg.String("JWT_AUDIENCE", ""),
-			JWKSURL:      envcfg.String("JWKS_URL", ""),
-			JWKSCacheTTL: envcfg.Duration("JWKS_CACHE_TTL", 15*time.Minute),
+			Disabled:    envcfg.Bool("AUTH_DISABLED", false),
+			DefaultUser: envcfg.String("AUTH_DEFAULT_USER", "00000000-0000-0000-0000-000000000000"),
 		},
 		CORSOrigins: parseCORSOrigins(envcfg.String("CORS_ORIGINS", "")),
 		MentatURL:   envcfg.String("MENTAT_URL", ""),
@@ -148,17 +141,8 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if c.Auth.Provider == "jwt" {
-		if c.Auth.JWKSURL == "" {
-			return fmt.Errorf("JWKS_URL is required when AUTH_PROVIDER is jwt")
-		}
-		if c.Auth.JWTIssuer == "" {
-			return fmt.Errorf("JWT_ISSUER is required when AUTH_PROVIDER is jwt")
-		}
-	}
-
-	if c.IsProduction() && c.Auth.Provider == "default" {
-		slog.Warn("AUTH_PROVIDER is 'default' in production — all API requests will bypass authentication. Set AUTH_PROVIDER to 'jwt' or ensure MCP endpoints use API key auth.")
+	if c.IsProduction() && c.Auth.Disabled {
+		return fmt.Errorf("AUTH_DISABLED=true is not allowed with ENVIRONMENT=production")
 	}
 
 	return nil

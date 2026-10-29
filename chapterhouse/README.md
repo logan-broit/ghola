@@ -33,7 +33,7 @@ ch-web (admin UI) ──/api proxy──▶ ch-api
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /health`, `GET /ready` | none | Liveness / DB readiness |
-| `POST /v1/episodic/{ingest,query,share,forget,session_workspace}` | API key or `AUTH_PROVIDER` | Episodic tier, called by ghola |
+| `POST /v1/episodic/{ingest,query,share,forget}` | API key (none if `AUTH_DISABLED`) | Episodic tier, called by ghola |
 | `POST /v1/semantic/query` | same | Semantic recall |
 | `POST /v1/semantic/consolidate` | same | Manual episodic→semantic batch (needs `MENTAT_URL`) |
 | `/api/v1/user/*`, `/api/v1/admin/*` | session cookie (+ admin role) | ch-web: users, API keys, audit log |
@@ -68,10 +68,10 @@ See [RUNBOOK.md](RUNBOOK.md) for operations.
 | Variable | Default | Description |
 |---|---|---|
 | `SERVER_HOST` / `SERVER_PORT` | `0.0.0.0` / `8080` | Listen address |
-| `ENVIRONMENT` | `local` | `local`/`development` disable secure cookies; `production` warns if `AUTH_PROVIDER=default` |
+| `ENVIRONMENT` | `local` | `local`/`development` disable secure cookies; `production` refuses `AUTH_DISABLED=true` |
 | `DATABASE_HOST`, `_PORT`, `_NAME`, `_USER`, `_PASSWORD`, `_SSL_MODE` | `localhost`, `5432`, `memories`, `memory_api`, empty, `prefer` | Postgres |
-| `AUTH_PROVIDER` | `default` | `default` (unauthenticated requests act as `AUTH_DEFAULT_USER`) or `jwt` (`JWKS_URL`, `JWT_ISSUER` required) |
-| `AUTH_DEFAULT_USER` | `00000000-0000-0000-0000-000000000000` | User for the default provider |
+| `AUTH_DISABLED` | `false` | Local dev: skip API keys on `/v1`; every request acts as `AUTH_DEFAULT_USER` |
+| `AUTH_DEFAULT_USER` | `00000000-0000-0000-0000-000000000000` | User when `AUTH_DISABLED=true` |
 | `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY` | `https://api.openai.com`, `text-embedding-3-small`, empty | OpenAI-compatible embedder (ingest backstop, digests) |
 | `EMBEDDING_DIMENSIONS` | `768` | Must match `EMBEDDING_DIM` used by `ch-init` |
 | `MENTAT_URL` | empty | Enables semantic recall, the L1 reconciler and manual consolidation |
@@ -94,7 +94,7 @@ chapterhouse/
 │   ├── semantic/             # mneme persistence + L1 reconciler
 │   ├── consolidation/        # co-activation drain + nightly pipeline
 │   ├── primitives/           # ACT-R, decay, Hebbian, Bayesian, contradiction
-│   ├── auth/, middleware/    # API key, session, JWT auth
+│   ├── auth/, middleware/    # API key, session auth
 │   └── config/               # env config
 ├── db/migrations/            # admin schema + sqlc input (applied by ch-init)
 ├── encoding-eval/            # encoding strategy eval harness

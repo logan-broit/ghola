@@ -125,29 +125,6 @@ func run() error {
 		logger.Info("semantic recall disabled — MENTAT_URL unset; queries return 0 hits")
 	}
 
-	var authProvider auth.Provider
-	switch cfg.Auth.Provider {
-	case "jwt":
-		authProvider = auth.NewJWTProvider(
-			cfg.Auth.JWKSURL,
-			cfg.Auth.JWTIssuer,
-			cfg.Auth.JWTAudience,
-			cfg.Auth.JWKSCacheTTL,
-		)
-		logger.Info("using JWT authentication")
-	default:
-		authProvider, err = auth.NewDefaultProvider(
-			cfg.Auth.DefaultUser,
-			"default",
-			"user@localhost",
-		)
-		if err != nil {
-			return fmt.Errorf("create default auth provider: %w", err)
-		}
-		logger.Info("using default authentication",
-			slog.String("default_user", cfg.Auth.DefaultUser),
-		)
-	}
 
 	healthHandler := handler.NewHealthHandler(pool)
 	sessionProvider := auth.NewSessionProviderWithAdapter(auth.SessionProviderConfig{
@@ -158,8 +135,17 @@ func run() error {
 
 	adminHandler := handler.NewAdminHandler(queries, sessionProvider)
 
-	apiKeyProvider := auth.NewAPIKeyProviderWithAdapter(queries)
-	apiAuthProvider := auth.NewCompositeProvider(apiKeyProvider, authProvider)
+	// /v1 requires an API key unless AUTH_DISABLED (local dev), where
+	// every request acts as AUTH_DEFAULT_USER.
+	var apiAuthProvider auth.Provider = auth.NewAPIKeyProviderWithAdapter(queries)
+	if cfg.Auth.Disabled {
+		apiAuthProvider, err = auth.NewDefaultProvider(cfg.Auth.DefaultUser, "default", "user@localhost")
+		if err != nil {
+			return fmt.Errorf("create default auth provider: %w", err)
+		}
+		logger.Warn("AUTH_DISABLED=true: /v1 accepts every request as the default user",
+			slog.String("default_user", cfg.Auth.DefaultUser))
+	}
 
 	// Server-side embedding backstop on /v1/episodic/ingest. When
 	// EMBEDDING_URL is set, /v1/episodic/ingest fills in any event with

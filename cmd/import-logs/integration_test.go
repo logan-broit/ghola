@@ -46,7 +46,7 @@ import (
 
 const (
 	defaultChapterhouseURL = "http://localhost:8080"
-	defaultAPIKey          = "dev-token" // compose stack runs AUTH_PROVIDER=default
+	defaultAPIKey          = "dev-token" // compose stack runs AUTH_DISABLED=true
 	// userID is a fixed dev UUID — chapterhouse rejects non-UUID user
 	// fields. The fixed value keeps test output predictable when
 	// inspecting the stack manually.
@@ -85,7 +85,7 @@ func TestImport_BootstrapCorpus(t *testing.T) {
 	}
 
 	// Honor any operator-set CHAPTERHOUSE_API_KEY so this test works
-	// against a non-dev stack (where AUTH_PROVIDER=default would 401 on
+	// against a non-dev stack (where API keys are enforced and would 401 on
 	// the literal "dev-token"). The subsequent t.Setenv re-asserts the
 	// resolved value so the binary's env lookup sees exactly what the
 	// ping used — preserving the operator's choice while keeping the
