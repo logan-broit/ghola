@@ -3,7 +3,6 @@
 #   docker compose up -d                   # full stack (postgres, embedder,
 #                                            ch-init, chapterhouse)
 #   docker compose --profile all up -d     # also start the ghola daemon
-#   docker compose --profile web up -d     # also start the ch-web admin UI
 #   docker compose --profile stub up -d    # swap real embedder for the
 #                                            Python hash-stub (fast but
 #                                            noisy; for deterministic
@@ -15,12 +14,11 @@
 #   guild-stub      hash-seeded python stub — profile "stub" only
 #   mentat          predictive-replay service (pool/predict, :8084)
 #   truthsayer      cross-encoder reranker (BAAI/bge-reranker-base, :8085)
-#   ch-init         one-shot; applies episodic migrations then exits
+#   ch-init         one-shot; applies episodic + admin migrations then exits
 #   chapterhouse    ch-server HTTP API (:8080)
 #   chapterhouse-worker
 #                   ch-worker; drains co-activation queue every 30s
 #   ghola           ghola local daemon (:7421) — profile "all"
-#   ch-web          chapterhouse admin UI (:8090) — profile "web"
 #
 # Images: every Go service runs ghola/ghola:dev (Dockerfile.golang) with
 # entrypoint: selecting the binary; mentat and truthsayer run
@@ -282,20 +280,6 @@ services:
       # Without it the per-session SQLite files (the working memory
       # not yet consolidated to chapterhouse) die on every redeploy.
       - ghola-sessions:/root/.ghola/sessions
-
-  ch-web:
-    profiles: ["web"]
-    image: ghola/ghola:dev
-    entrypoint: ["/usr/local/bin/ch-web"]
-    restart: unless-stopped
-    depends_on:
-      chapterhouse:
-        condition: service_healthy
-    environment:
-      PORT: "8080"
-      API_URL: http://chapterhouse:8080
-    ports:
-      - "${CH_WEB_PORT:-8090}:8080"
 
 volumes:
   postgres-data:

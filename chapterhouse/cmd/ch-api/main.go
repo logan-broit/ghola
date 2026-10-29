@@ -127,17 +127,13 @@ func run() error {
 
 
 	healthHandler := handler.NewHealthHandler(pool)
-	sessionProvider := auth.NewSessionProviderWithAdapter(auth.SessionProviderConfig{
-		Queries:         queries,
-		SessionDuration: 8 * time.Hour,
-		SecureCookies:   !cfg.IsDevelopment(),
-	})
+	adminHandler := handler.NewAdminHandler(queries)
 
-	adminHandler := handler.NewAdminHandler(queries, sessionProvider)
-
-	// /v1 requires an API key unless AUTH_DISABLED (local dev), where
-	// every request acts as AUTH_DEFAULT_USER.
-	var apiAuthProvider auth.Provider = auth.NewAPIKeyProviderWithAdapter(queries)
+	// Memory routes require an API key unless AUTH_DISABLED (local dev),
+	// where every request acts as AUTH_DEFAULT_USER. Account and admin
+	// routes always require a key.
+	keyAuthProvider := auth.NewAPIKeyProviderWithAdapter(queries)
+	var apiAuthProvider auth.Provider = keyAuthProvider
 	if cfg.Auth.Disabled {
 		apiAuthProvider, err = auth.NewDefaultProvider(cfg.Auth.DefaultUser, "default", "user@localhost")
 		if err != nil {
@@ -211,17 +207,11 @@ func run() error {
 	// REST surface. The legacy stdio MCP server and frozen
 	// internal/mcp_legacy package were deleted pre-v0.1.0.
 
-	// Rate limiter for the admin login path only (MCP limiter dropped
-	// with the MCP route).
-	loginLimiter := middleware.NewRateLimiter(5.0/60.0, 5)
-	defer loginLimiter.Close()
-
 	router := buildRouter(
 		cfg, logger,
-		sessionProvider, apiAuthProvider,
+		keyAuthProvider, apiAuthProvider,
 		healthHandler, adminHandler,
 		episodicHandler, semanticHandler,
-		loginLimiter,
 	)
 
 	server := &http.Server{
@@ -274,13 +264,12 @@ func run() error {
 func buildRouter(
 	cfg *config.Config,
 	logger *slog.Logger,
-	sessionProvider *auth.SessionProvider,
+	keyAuthProvider auth.Provider,
 	apiAuthProvider auth.Provider,
 	healthHandler *handler.HealthHandler,
 	adminHandler *handler.AdminHandler,
 	episodicHandler *handler.EpisodicHandler,
 	semanticHandler *handler.SemanticHandler,
-	loginLimiter *middleware.RateLimiter,
 ) *chi.Mux {
 	r := chi.NewRouter()
 
@@ -296,69 +285,46 @@ func buildRouter(
 	r.Get("/health", healthHandler.Health)
 	r.Get("/ready", healthHandler.Ready)
 
-	// v2 internal API — called only by the ghola local service.
-	// Bearer API key required; middleware populates auth.Context which
-	// the handlers read via auth.UserIDFromContext.
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(middleware.AuthMiddleware(apiAuthProvider))
 		r.Use(middleware.ContentTypeJSON)
 
-		r.Route("/episodic", func(r chi.Router) {
-			r.Post("/ingest", episodicHandler.Ingest)
-			r.Post("/query", episodicHandler.Query)
-			r.Post("/share", episodicHandler.Share)
-			r.Post("/forget", episodicHandler.Forget)
+		// Memory API, called by the ghola daemon.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(apiAuthProvider))
+
+			r.Route("/episodic", func(r chi.Router) {
+				r.Post("/ingest", episodicHandler.Ingest)
+				r.Post("/query", episodicHandler.Query)
+				r.Post("/share", episodicHandler.Share)
+				r.Post("/forget", episodicHandler.Forget)
+			})
+
+			r.Route("/semantic", func(r chi.Router) {
+				// v0.3 narrows the read surface to /query only. The v0.2
+				// /feedback and /list paths are dropped: feedback is
+				// replaced by the dogfooding-tags mechanism in PR7, and
+				// /list returned mnemes with concept/content fields that
+				// no longer exist on the v0.3 schema.
+				r.Post("/query", semanticHandler.Query)
+				// Manual trigger for the episodic->semantic consolidation
+				// batch (cluster + enrich + label/digest). Distinct from
+				// ghola's own /v1/flush {session_id}
+				// verb — see internal/handler/semantic.go doc comment.
+				r.Post("/consolidate", semanticHandler.Consolidate)
+			})
 		})
 
-		r.Route("/semantic", func(r chi.Router) {
-			// v0.3 narrows the read surface to /query only. The v0.2
-			// /feedback and /list paths are dropped: feedback is
-			// replaced by the dogfooding-tags mechanism in PR7, and
-			// /list returned mnemes with concept/content fields that
-			// no longer exist on the v0.3 schema.
-			r.Post("/query", semanticHandler.Query)
-			// Manual trigger for the episodic->semantic consolidation
-			// batch (cluster + enrich + label/digest). Distinct from
-			// ghola's own /v1/flush {session_id}
-			// verb — see internal/handler/semantic.go doc comment.
-			r.Post("/consolidate", semanticHandler.Consolidate)
-		})
-	})
+		// Account and admin API, used by ch-admin. Always API-key auth.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.AuthMiddleware(keyAuthProvider))
 
-	// API routes
-	r.Route("/api/v1", func(r chi.Router) {
-		// User self-service routes (session auth only - for web UI)
-		r.Route("/user", func(r chi.Router) {
-			r.Use(middleware.ContentTypeJSON)
-			r.Use(middleware.AuthMiddleware(sessionProvider))
-
+			r.Get("/me", adminHandler.GetCurrentUser)
 			r.Get("/audit", adminHandler.ListUserAuditLogs)
-
 			r.Get("/keys", adminHandler.ListUserAPIKeys)
 			r.Post("/keys", adminHandler.CreateUserAPIKey)
 			r.Delete("/keys/{id}", adminHandler.RevokeUserAPIKey)
 
-			r.Post("/password", adminHandler.ChangePassword)
-		})
-
-		// Admin routes (session auth only - for web UI)
-		r.Route("/admin", func(r chi.Router) {
-			r.Use(middleware.ContentTypeJSON)
-
-			// Login endpoint (no auth required, IP rate-limited)
-			r.With(middleware.IPRateLimitMiddleware(loginLimiter)).Post("/login", adminHandler.Login)
-
-			// Authenticated routes (any logged-in user)
-			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(sessionProvider))
-
-				r.Post("/logout", adminHandler.Logout)
-				r.Get("/me", adminHandler.GetCurrentUser)
-			})
-
-			// Admin-only routes (session auth + admin role required)
-			r.Group(func(r chi.Router) {
-				r.Use(middleware.AuthMiddleware(sessionProvider))
+			r.Route("/admin", func(r chi.Router) {
 				r.Use(middleware.RequireAdmin)
 
 				r.Get("/stats", adminHandler.GetStats)

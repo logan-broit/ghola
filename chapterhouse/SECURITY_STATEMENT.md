@@ -1,7 +1,7 @@
 # Chapterhouse Security Statement
 
 Security posture of the chapterhouse API (`chapterhouse/cmd/ch-api`)
-and admin console (`cmd/ch-web`). Chapterhouse stores agents'
+and its admin CLI (`chapterhouse/cmd/ch-admin`). Chapterhouse stores agents'
 conversation history (episodic tier) and distilled memories (semantic
 tier), so confidentiality between users and workspaces is the main
 concern.
@@ -36,41 +36,35 @@ protect.
 SHA-256 is fine for 256-bit random keys; they aren't open to
 dictionary attacks.
 
-### Passwords
+### Authentication
 
-- bcrypt, Go default cost (10)
-- Hashes load only through `GetUserByUsernameForAuth()`, not the general
-  user queries
-- **Source**: `chapterhouse/internal/handler/admin.go`
+API keys are the only credential. There are no passwords or cookie
+sessions.
 
-### Sessions (ch-web)
+- `/v1/episodic/*` and `/v1/semantic/*` (the memory API ghola calls)
+  require a key. With `AUTH_DISABLED=true` (what the compose stack sets
+  for local dev) ch-api skips the check and serves every request as
+  `AUTH_DEFAULT_USER`. ch-api refuses to start with `AUTH_DISABLED=true`
+  and `ENVIRONMENT=production`.
+- `/v1/me`, `/v1/keys`, `/v1/audit` always require a key and act on the
+  key's own user.
+- `/v1/admin/*` always requires a key whose user has `is_admin`.
+- `/health` and `/ready` need no auth.
 
-- 32 bytes from `crypto/rand`, stored as a SHA-256 hash
-- 8-hour lifetime
-- Cookies: `HttpOnly`, `SameSite=Lax`, `Secure` unless `ENVIRONMENT` is
-  `local` or `development` (unknown values count as production)
-- **Source**: `chapterhouse/internal/auth/session_provider.go`,
-  `chapterhouse/cmd/ch-api/main.go`
+The first admin key comes from `ch-admin bootstrap`, which writes to
+Postgres directly and so needs database credentials, not a key.
 
-### Authentication for `/v1`
-
-`/v1` requires a valid API key. With `AUTH_DISABLED=true` (what the
-compose stack sets for local dev) ch-api skips the key check and
-serves every request as `AUTH_DEFAULT_USER`. ch-api refuses to start
-with `AUTH_DISABLED=true` and `ENVIRONMENT=production`.
-
-`/health` and `/ready` need no auth. `/api/v1/*` uses session cookies
-only.
-
-**Source**: `chapterhouse/internal/auth/composite_provider.go`,
-`chapterhouse/internal/config/config.go`
+**Source**: `chapterhouse/cmd/ch-api/main.go`,
+`chapterhouse/internal/middleware/middleware.go` (`RequireAdmin`),
+`chapterhouse/internal/config/config.go`,
+`chapterhouse/cmd/ch-admin/main.go`
 
 ---
 
 ## 2. Data Access Control
 
-- **Episodic tier**: rows carry `user_id`. Query, ingest, share and
-  session-workspace handlers require the request's `user_id` to match
+- **Episodic tier**: rows carry `user_id`. Query, ingest and share
+  handlers require the request's `user_id` to match
   the authenticated caller (400 or 403 otherwise). Forget deletes only rows
   `WHERE user_id = caller`. Queries are also scoped by `workspace_id`
   through `episodic.session_workspaces`. The isolation invariant is
@@ -91,11 +85,7 @@ only.
 
 ### Rate Limiting
 
-Only admin login is rate-limited: 5 requests/minute per client IP
-(token bucket). `/v1` has no limiter.
-
-**Source**: `chapterhouse/internal/middleware/ratelimit.go`,
-`chapterhouse/cmd/ch-api/main.go`
+None. `/v1` has no limiter.
 
 ### Input Validation
 
@@ -113,9 +103,9 @@ by default, which allows no cross-origin requests.
 
 ### Admin Authorization
 
-Stats, audit logs and user and key management need a session plus the
-admin role (`RequireAdmin`). Other users get only self-service routes
-for their own keys, password and audit history.
+Stats, audit logs and user and key management (`/v1/admin/*`) need a
+key whose user is an admin (`RequireAdmin`). Other users get only
+`/v1/me`, `/v1/keys` and `/v1/audit` for their own account.
 
 ---
 
@@ -136,9 +126,9 @@ for their own keys, password and audit history.
 
 ## 5. Audit Logging
 
-Admin actions go to the `audit_log` table: login and logout (IP, user
-agent), user create/update/deactivate/reactivate, and API key
-create/revoke. `/v1` memory operations aren't audited. Every HTTP request
+Admin actions go to the `audit_log` table (IP, user agent): user
+create/update/deactivate/reactivate and API key create/revoke,
+including keys minted by `ch-admin bootstrap`. `/v1` memory operations aren't audited. Every HTTP request
 is logged as structured JSON (request ID, method, path, status,
 duration, response size, user ID, remote address).
 
@@ -159,29 +149,6 @@ in `docker-compose.mac.yml`. The `ghola/ghola:dev` runtime image is
 
 ---
 
-## 7. Admin Console (ch-web)
-
-A Go binary that serves embedded static files and proxies `/api` to
-ch-api. No npm dependencies or build toolchain.
-
-### Security Headers
-
-- `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'`
-- `X-Frame-Options: DENY`
-- `X-Content-Type-Options: nosniff`
-- `Referrer-Policy: strict-origin-when-cross-origin`
-
-### Proxy Hardening
-
-- Proxied URLs are parsed and checked to stay on the API host
-- Forwards only the `Content-Type`, `Accept`, `Cookie` and
-  `Authorization` headers
-- Shared HTTP client with a 30-second timeout
-
-**Source**: `cmd/ch-web/main.go`
-
----
-
 ## Known Limitations
 
 - **Dev stack runs without auth**: compose sets `AUTH_DISABLED=true`.
@@ -189,8 +156,8 @@ ch-api. No npm dependencies or build toolchain.
   caller (the local ghola daemon).
 - **Semantic tier has no per-user ACL**: any authenticated caller can
   query or consolidate any workspace ID it knows.
-- **In-memory login limiter**: per instance only.
-- **No account lockout**: failed logins are IP-rate-limited only.
+- **No rate limit on failed key lookups**: keys are 256-bit random, so
+  guessing isn't practical, but failures aren't throttled.
 
 ---
 

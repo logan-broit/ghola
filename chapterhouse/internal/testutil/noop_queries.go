@@ -13,13 +13,13 @@ import (
 
 type NoopQueries struct{}
 
-func (NoopQueries) CleanupExpiredAdminSessions(context.Context) error { return nil }
 func (NoopQueries) CountActiveAPIKeysByUser(context.Context, uuid.UUID) (int64, error) {
 	return 0, nil
 }
-func (NoopQueries) CountActiveAdminSessions(context.Context) (int64, error)                 { return 0, nil }
-func (NoopQueries) CountAuditLogs(context.Context, sqlc.CountAuditLogsParams) (int64, error) { return 0, nil }
-func (NoopQueries) CountGitCommits(context.Context, uuid.UUID) (int32, error)                { return 0, nil }
+func (NoopQueries) CountAuditLogs(context.Context, sqlc.CountAuditLogsParams) (int64, error) {
+	return 0, nil
+}
+func (NoopQueries) CountGitCommits(context.Context, uuid.UUID) (int32, error) { return 0, nil }
 func (NoopQueries) CountJournalEntriesByType(context.Context, sqlc.CountJournalEntriesByTypeParams) (int32, error) {
 	return 0, nil
 }
@@ -32,9 +32,6 @@ func (NoopQueries) CountUsers(context.Context) (sqlc.CountUsersRow, error) {
 }
 func (NoopQueries) CreateAPIKey(context.Context, sqlc.CreateAPIKeyParams) (sqlc.ApiKey, error) {
 	return sqlc.ApiKey{}, nil
-}
-func (NoopQueries) CreateAdminSession(context.Context, sqlc.CreateAdminSessionParams) (sqlc.AdminSession, error) {
-	return sqlc.AdminSession{}, nil
 }
 func (NoopQueries) CreateAuditLog(context.Context, sqlc.CreateAuditLogParams) (sqlc.AuditLog, error) {
 	return sqlc.AuditLog{}, nil
@@ -54,12 +51,12 @@ func (NoopQueries) CreateUser(context.Context, sqlc.CreateUserParams) (sqlc.User
 func (NoopQueries) CreateUserWithPassword(context.Context, sqlc.CreateUserWithPasswordParams) (sqlc.User, error) {
 	return sqlc.User{}, nil
 }
-func (NoopQueries) DeactivateUser(context.Context, uuid.UUID) error   { return nil }
-func (NoopQueries) DeleteExpiredMemories(context.Context) error              { return nil }
+func (NoopQueries) DeactivateUser(context.Context, uuid.UUID) error { return nil }
+func (NoopQueries) DeleteExpiredMemories(context.Context) error     { return nil }
 func (NoopQueries) IncrementRecallCount(context.Context, sqlc.IncrementRecallCountParams) error {
 	return nil
 }
-func (NoopQueries) PruneOldVersions(context.Context, int32) error            { return nil }
+func (NoopQueries) PruneOldVersions(context.Context, int32) error { return nil }
 func (NoopQueries) DeleteJournalEntry(context.Context, sqlc.DeleteJournalEntryParams) error {
 	return nil
 }
@@ -81,9 +78,6 @@ func (NoopQueries) GetAccessibleMemoryBlocks(context.Context, uuid.UUID) ([]sqlc
 }
 func (NoopQueries) GetAccessibleMemoryBlocksByType(context.Context, sqlc.GetAccessibleMemoryBlocksByTypeParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
-}
-func (NoopQueries) GetAdminSessionByToken(context.Context, string) (sqlc.GetAdminSessionByTokenRow, error) {
-	return sqlc.GetAdminSessionByTokenRow{}, nil
 }
 func (NoopQueries) GetAdminStats(context.Context) (sqlc.GetAdminStatsRow, error) {
 	return sqlc.GetAdminStatsRow{}, nil
@@ -179,9 +173,6 @@ func (NoopQueries) GetUserByUsernameForAuth(context.Context, string) (sqlc.User,
 func (NoopQueries) ListAPIKeysByUser(context.Context, uuid.UUID) ([]sqlc.ListAPIKeysByUserRow, error) {
 	return nil, nil
 }
-func (NoopQueries) ListActiveAdminSessions(context.Context) ([]sqlc.ListActiveAdminSessionsRow, error) {
-	return nil, nil
-}
 func (NoopQueries) ListAllAPIKeys(context.Context, sqlc.ListAllAPIKeysParams) ([]sqlc.ListAllAPIKeysRow, error) {
 	return nil, nil
 }
@@ -212,12 +203,9 @@ func (NoopQueries) ListUsers(context.Context, sqlc.ListUsersParams) ([]sqlc.User
 func (NoopQueries) ListUsersAdmin(context.Context, sqlc.ListUsersAdminParams) ([]sqlc.User, error) {
 	return nil, nil
 }
-func (NoopQueries) ReactivateUser(context.Context, uuid.UUID) error          { return nil }
-func (NoopQueries) RevokeAPIKey(context.Context, uuid.UUID) error            { return nil }
-func (NoopQueries) RevokeAdminSession(context.Context, uuid.UUID) error      { return nil }
-func (NoopQueries) RevokeAdminSessionByToken(context.Context, string) error  { return nil }
-func (NoopQueries) RevokeAllAPIKeysByUser(context.Context, uuid.UUID) error  { return nil }
-func (NoopQueries) RevokeAllAdminSessionsByUser(context.Context, uuid.UUID) error { return nil }
+func (NoopQueries) ReactivateUser(context.Context, uuid.UUID) error         { return nil }
+func (NoopQueries) RevokeAPIKey(context.Context, uuid.UUID) error           { return nil }
+func (NoopQueries) RevokeAllAPIKeysByUser(context.Context, uuid.UUID) error { return nil }
 func (NoopQueries) SearchAccessibleMemoryBlocks(context.Context, sqlc.SearchAccessibleMemoryBlocksParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
 }
@@ -236,7 +224,7 @@ func (NoopQueries) SearchJournalFullText(context.Context, sqlc.SearchJournalFull
 func (NoopQueries) SetJournalVectorID(context.Context, sqlc.SetJournalVectorIDParams) error {
 	return nil
 }
-func (NoopQueries) SetUserAdmin(context.Context, sqlc.SetUserAdminParams) error    { return nil }
+func (NoopQueries) SetUserAdmin(context.Context, sqlc.SetUserAdminParams) error       { return nil }
 func (NoopQueries) SetUserPassword(context.Context, sqlc.SetUserPasswordParams) error { return nil }
 func (NoopQueries) SupersedeJournalEntry(context.Context, sqlc.SupersedeJournalEntryParams) error {
 	return nil

@@ -200,10 +200,6 @@ func (m *MockQueries) CreateAPIKey(ctx context.Context, arg sqlc.CreateAPIKeyPar
 	return sqlc.ApiKey{ID: uuid.New(), UserID: arg.UserID, KeyHash: arg.KeyHash, KeyPrefix: arg.KeyPrefix, Name: arg.Name}, nil
 }
 
-func (m *MockQueries) CreateAdminSession(ctx context.Context, arg sqlc.CreateAdminSessionParams) (sqlc.AdminSession, error) {
-	return sqlc.AdminSession{ID: uuid.New(), UserID: arg.UserID}, nil
-}
-
 func (m *MockQueries) CreateUserWithPassword(ctx context.Context, arg sqlc.CreateUserWithPasswordParams) (sqlc.User, error) {
 	return sqlc.User{ID: arg.ID, Username: arg.Username, IsAdmin: arg.IsAdmin}, nil
 }

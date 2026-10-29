@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/logan-broit/ghola/chapterhouse/internal/auth"
 	"github.com/logan-broit/ghola/chapterhouse/internal/repository/sqlc"
 
 	"github.com/go-chi/chi/v5"
@@ -18,36 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/bcrypt"
 )
-
-// mockSessionCreator implements SessionCreator for testing
-type mockSessionCreator struct {
-	createSessionFn func(ctx context.Context, userID uuid.UUID, ipAddress, userAgent string) (*http.Cookie, error)
-	revokeSessionFn func(ctx context.Context, token string) error
-	clearCookieFn   func() *http.Cookie
-}
-
-func (m *mockSessionCreator) CreateSession(ctx context.Context, userID uuid.UUID, ipAddress, userAgent string) (*http.Cookie, error) {
-	if m.createSessionFn != nil {
-		return m.createSessionFn(ctx, userID, ipAddress, userAgent)
-	}
-	return &http.Cookie{Name: auth.SessionCookieName, Value: "test-token"}, nil
-}
-
-func (m *mockSessionCreator) RevokeSession(ctx context.Context, token string) error {
-	if m.revokeSessionFn != nil {
-		return m.revokeSessionFn(ctx, token)
-	}
-	return nil
-}
-
-func (m *mockSessionCreator) ClearSessionCookie() *http.Cookie {
-	if m.clearCookieFn != nil {
-		return m.clearCookieFn()
-	}
-	return &http.Cookie{Name: auth.SessionCookieName, Value: "", MaxAge: -1}
-}
 
 func TestParseDuration(t *testing.T) {
 	tests := []struct {
@@ -247,52 +217,6 @@ func TestToAPIKeyResponse(t *testing.T) {
 		require.NotNil(t, resp.RevokedAt)
 		assert.Equal(t, revokedAt, *resp.RevokedAt)
 	})
-}
-
-func TestLoginRequest_Validation(t *testing.T) {
-	tests := []struct {
-		name    string
-		req     LoginRequest
-		wantErr bool
-	}{
-		{
-			name:    "valid request",
-			req:     LoginRequest{Username: "admin", Password: "secret"},
-			wantErr: false,
-		},
-		{
-			name:    "empty username",
-			req:     LoginRequest{Username: "", Password: "secret"},
-			wantErr: true,
-		},
-		{
-			name:    "empty password",
-			req:     LoginRequest{Username: "admin", Password: ""},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			hasErr := tc.req.Username == "" || tc.req.Password == ""
-			assert.Equal(t, tc.wantErr, hasErr)
-		})
-	}
-}
-
-func TestBcryptPasswordHashing(t *testing.T) {
-	password := "testpassword123"
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	require.NoError(t, err)
-
-	// Correct password should match
-	err = bcrypt.CompareHashAndPassword(hash, []byte(password))
-	assert.NoError(t, err)
-
-	// Wrong password should not match
-	err = bcrypt.CompareHashAndPassword(hash, []byte("wrongpassword"))
-	assert.Error(t, err)
 }
 
 // Helper function to create a test request with JSON body
@@ -495,12 +419,9 @@ func (m *adminMockQueries) ListAPIKeysByUser(ctx context.Context, userID uuid.UU
 	return result, nil
 }
 
-// Stub implementations for other Querier methods
-func (m *adminMockQueries) CleanupExpiredAdminSessions(ctx context.Context) error { return nil }
 func (m *adminMockQueries) CountActiveAPIKeysByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
 	return 0, nil
 }
-func (m *adminMockQueries) CountActiveAdminSessions(ctx context.Context) (int64, error) { return 0, nil }
 func (m *adminMockQueries) CountAuditLogs(ctx context.Context, arg sqlc.CountAuditLogsParams) (int64, error) {
 	return 0, nil
 }
@@ -518,9 +439,6 @@ func (m *adminMockQueries) CountMemoryBlocksByUser(ctx context.Context, userID u
 }
 func (m *adminMockQueries) CountUsers(ctx context.Context) (sqlc.CountUsersRow, error) {
 	return sqlc.CountUsersRow{Total: int64(len(m.users)), Active: int64(len(m.users))}, nil
-}
-func (m *adminMockQueries) CreateAdminSession(ctx context.Context, arg sqlc.CreateAdminSessionParams) (sqlc.AdminSession, error) {
-	return sqlc.AdminSession{}, nil
 }
 func (m *adminMockQueries) CreateAuditLog(ctx context.Context, arg sqlc.CreateAuditLogParams) (sqlc.AuditLog, error) {
 	return sqlc.AuditLog{}, nil
@@ -569,15 +487,11 @@ func (m *adminMockQueries) SearchAccessibleMemoryBlocksByType(ctx context.Contex
 func (m *adminMockQueries) SearchAccessibleMemoryBlocksByTypeAndTags(ctx context.Context, arg sqlc.SearchAccessibleMemoryBlocksByTypeAndTagsParams) ([]sqlc.CurrentMemoryBlock, error) {
 	return nil, nil
 }
-func (m *adminMockQueries) GetAdminSessionByToken(ctx context.Context, tokenHash string) (sqlc.GetAdminSessionByTokenRow, error) {
-	return sqlc.GetAdminSessionByTokenRow{}, nil
-}
 func (m *adminMockQueries) GetAdminStats(ctx context.Context) (sqlc.GetAdminStatsRow, error) {
 	return sqlc.GetAdminStatsRow{
-		ActiveUsers:    int64(len(m.users)),
-		AdminUsers:     0,
-		ActiveApiKeys:  int64(len(m.apiKeys)),
-		ActiveSessions: 0,
+		ActiveUsers:   int64(len(m.users)),
+		AdminUsers:    0,
+		ActiveApiKeys: int64(len(m.apiKeys)),
 	}, nil
 }
 func (m *adminMockQueries) GetAuditLogsByResource(ctx context.Context, arg sqlc.GetAuditLogsByResourceParams) ([]sqlc.AuditLog, error) {
@@ -652,9 +566,6 @@ func (m *adminMockQueries) GetRecentSolutions(ctx context.Context, arg sqlc.GetR
 func (m *adminMockQueries) GetTopTags(ctx context.Context, limit int32) ([]sqlc.GetTopTagsRow, error) {
 	return nil, nil
 }
-func (m *adminMockQueries) ListActiveAdminSessions(ctx context.Context) ([]sqlc.ListActiveAdminSessionsRow, error) {
-	return nil, nil
-}
 func (m *adminMockQueries) ListAllAPIKeys(ctx context.Context, arg sqlc.ListAllAPIKeysParams) ([]sqlc.ListAllAPIKeysRow, error) {
 	return nil, nil
 }
@@ -686,14 +597,7 @@ func (m *adminMockQueries) ListUsersAdmin(ctx context.Context, arg sqlc.ListUser
 	}
 	return users, nil
 }
-func (m *adminMockQueries) RevokeAdminSession(ctx context.Context, id uuid.UUID) error { return nil }
-func (m *adminMockQueries) RevokeAdminSessionByToken(ctx context.Context, tokenHash string) error {
-	return nil
-}
 func (m *adminMockQueries) RevokeAllAPIKeysByUser(ctx context.Context, userID uuid.UUID) error {
-	return nil
-}
-func (m *adminMockQueries) RevokeAllAdminSessionsByUser(ctx context.Context, userID uuid.UUID) error {
 	return nil
 }
 func (m *adminMockQueries) SearchJournalFullText(ctx context.Context, arg sqlc.SearchJournalFullTextParams) ([]sqlc.SearchJournalFullTextRow, error) {
@@ -754,139 +658,18 @@ var _ sqlc.Querier = (*adminMockQueries)(nil)
 // Login Handler Tests
 // ============================================================================
 
-func TestAdminHandler_Login_Success(t *testing.T) {
-	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-
-	// Create an admin user with hashed password
-	userID := uuid.New()
-	passwordHash, _ := bcrypt.GenerateFromPassword([]byte("correctpassword"), bcrypt.DefaultCost)
-	mockQueries.users[userID] = sqlc.User{
-		ID:           userID,
-		Username:     "admin",
-		Email:        pgtype.Text{String: "admin@example.com", Valid: true},
-		PasswordHash: pgtype.Text{String: string(passwordHash), Valid: true},
-		IsAdmin:      true,
-	}
-
-	handler := NewAdminHandler(mockQueries, mockSession)
-
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/login", LoginRequest{
-		Username: "admin",
-		Password: "correctpassword",
-	})
-	rec := httptest.NewRecorder()
-
-	handler.Login(rec, req)
-
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	var resp LoginResponse
-	err := json.Unmarshal(rec.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Equal(t, "admin", resp.Username)
-	assert.True(t, resp.IsAdmin)
-}
-
-func TestAdminHandler_Login_InvalidCredentials(t *testing.T) {
-	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-
-	userID := uuid.New()
-	passwordHash, _ := bcrypt.GenerateFromPassword([]byte("correctpassword"), bcrypt.DefaultCost)
-	mockQueries.users[userID] = sqlc.User{
-		ID:           userID,
-		Username:     "admin",
-		PasswordHash: pgtype.Text{String: string(passwordHash), Valid: true},
-		IsAdmin:      true,
-	}
-
-	handler := NewAdminHandler(mockQueries, mockSession)
-
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/login", LoginRequest{
-		Username: "admin",
-		Password: "wrongpassword",
-	})
-	rec := httptest.NewRecorder()
-
-	handler.Login(rec, req)
-
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-}
-
-func TestAdminHandler_Login_UserNotFound(t *testing.T) {
-	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
-
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/login", LoginRequest{
-		Username: "nonexistent",
-		Password: "password",
-	})
-	rec := httptest.NewRecorder()
-
-	handler.Login(rec, req)
-
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-}
-
-func TestAdminHandler_Login_NotAdmin(t *testing.T) {
-	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-
-	userID := uuid.New()
-	passwordHash, _ := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.DefaultCost)
-	mockQueries.users[userID] = sqlc.User{
-		ID:           userID,
-		Username:     "regularuser",
-		PasswordHash: pgtype.Text{String: string(passwordHash), Valid: true},
-		IsAdmin:      false, // Not an admin
-	}
-
-	handler := NewAdminHandler(mockQueries, mockSession)
-
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/login", LoginRequest{
-		Username: "regularuser",
-		Password: "password",
-	})
-	rec := httptest.NewRecorder()
-
-	handler.Login(rec, req)
-
-	// Non-admin users can still log in (for user-facing pages like my-keys, settings)
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
-func TestAdminHandler_Login_EmptyCredentials(t *testing.T) {
-	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
-
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/login", LoginRequest{
-		Username: "",
-		Password: "",
-	})
-	rec := httptest.NewRecorder()
-
-	handler.Login(rec, req)
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
 // ============================================================================
 // CreateUser Handler Tests
 // ============================================================================
 
 func TestAdminHandler_CreateUser_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users", CreateUserRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users", CreateUserRequest{
 		Username:    "newuser",
 		Email:       "newuser@example.com",
 		DisplayName: "New User",
-		Password:    "securepassword",
 		IsAdmin:     false,
 	})
 	rec := httptest.NewRecorder()
@@ -905,7 +688,6 @@ func TestAdminHandler_CreateUser_Success(t *testing.T) {
 
 func TestAdminHandler_CreateUser_DuplicateUsername(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	// Pre-create user
 	userID := uuid.New()
@@ -914,11 +696,10 @@ func TestAdminHandler_CreateUser_DuplicateUsername(t *testing.T) {
 		Username: "existinguser",
 	}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users", CreateUserRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users", CreateUserRequest{
 		Username: "existinguser",
-		Password: "password",
 	})
 	rec := httptest.NewRecorder()
 
@@ -929,12 +710,10 @@ func TestAdminHandler_CreateUser_DuplicateUsername(t *testing.T) {
 
 func TestAdminHandler_CreateUser_EmptyUsername(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users", CreateUserRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users", CreateUserRequest{
 		Username: "",
-		Password: "password",
 	})
 	rec := httptest.NewRecorder()
 
@@ -945,12 +724,10 @@ func TestAdminHandler_CreateUser_EmptyUsername(t *testing.T) {
 
 func TestAdminHandler_CreateUser_WithAdminRole(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users", CreateUserRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users", CreateUserRequest{
 		Username: "newadmin",
-		Password: "adminpassword",
 		IsAdmin:  true,
 	})
 	rec := httptest.NewRecorder()
@@ -971,7 +748,6 @@ func TestAdminHandler_CreateUser_WithAdminRole(t *testing.T) {
 
 func TestAdminHandler_UpdateUser_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	userID := uuid.New()
 	mockQueries.users[userID] = sqlc.User{
@@ -980,10 +756,10 @@ func TestAdminHandler_UpdateUser_Success(t *testing.T) {
 		IsAdmin:  false,
 	}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
 	isAdmin := true
-	req := newJSONRequest(http.MethodPut, "/api/v1/admin/users/"+userID.String(), UpdateUserRequest{
+	req := newJSONRequest(http.MethodPut, "/v1/admin/users/"+userID.String(), UpdateUserRequest{
 		IsAdmin: &isAdmin,
 	})
 	req = withURLParam(req, "id", userID.String())
@@ -996,11 +772,10 @@ func TestAdminHandler_UpdateUser_Success(t *testing.T) {
 
 func TestAdminHandler_UpdateUser_NotFound(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
 	nonexistentID := uuid.New()
-	req := newJSONRequest(http.MethodPut, "/api/v1/admin/users/"+nonexistentID.String(), UpdateUserRequest{})
+	req := newJSONRequest(http.MethodPut, "/v1/admin/users/"+nonexistentID.String(), UpdateUserRequest{})
 	req = withURLParam(req, "id", nonexistentID.String())
 	rec := httptest.NewRecorder()
 
@@ -1011,10 +786,9 @@ func TestAdminHandler_UpdateUser_NotFound(t *testing.T) {
 
 func TestAdminHandler_UpdateUser_InvalidID(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPut, "/api/v1/admin/users/invalid-id", UpdateUserRequest{})
+	req := newJSONRequest(http.MethodPut, "/v1/admin/users/invalid-id", UpdateUserRequest{})
 	req = withURLParam(req, "id", "invalid-id")
 	rec := httptest.NewRecorder()
 
@@ -1029,7 +803,6 @@ func TestAdminHandler_UpdateUser_InvalidID(t *testing.T) {
 
 func TestAdminHandler_DeactivateUser_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	userID := uuid.New()
 	mockQueries.users[userID] = sqlc.User{
@@ -1037,9 +810,9 @@ func TestAdminHandler_DeactivateUser_Success(t *testing.T) {
 		Username: "userToDeactivate",
 	}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/users/"+userID.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/admin/users/"+userID.String(), nil)
 	req = withURLParam(req, "id", userID.String())
 	rec := httptest.NewRecorder()
 
@@ -1050,11 +823,10 @@ func TestAdminHandler_DeactivateUser_Success(t *testing.T) {
 
 func TestAdminHandler_DeactivateUser_NotFound(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
 	nonexistentID := uuid.New()
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/users/"+nonexistentID.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/admin/users/"+nonexistentID.String(), nil)
 	req = withURLParam(req, "id", nonexistentID.String())
 	rec := httptest.NewRecorder()
 
@@ -1069,7 +841,6 @@ func TestAdminHandler_DeactivateUser_NotFound(t *testing.T) {
 
 func TestAdminHandler_ReactivateUser_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	userID := uuid.New()
 	mockQueries.users[userID] = sqlc.User{
@@ -1078,9 +849,9 @@ func TestAdminHandler_ReactivateUser_Success(t *testing.T) {
 		DeactivatedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/"+userID.String()+"/reactivate", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/users/"+userID.String()+"/reactivate", nil)
 	req = withURLParam(req, "id", userID.String())
 	rec := httptest.NewRecorder()
 
@@ -1095,7 +866,6 @@ func TestAdminHandler_ReactivateUser_Success(t *testing.T) {
 
 func TestAdminHandler_CreateAPIKey_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	userID := uuid.New()
 	mockQueries.users[userID] = sqlc.User{
@@ -1103,9 +873,9 @@ func TestAdminHandler_CreateAPIKey_Success(t *testing.T) {
 		Username: "testuser",
 	}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users/"+userID.String()+"/keys", CreateAPIKeyRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users/"+userID.String()+"/keys", CreateAPIKeyRequest{
 		Name: "Test Key",
 	})
 	req = withURLParam(req, "id", userID.String())
@@ -1125,11 +895,10 @@ func TestAdminHandler_CreateAPIKey_Success(t *testing.T) {
 
 func TestAdminHandler_CreateAPIKey_UserNotFound(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
 	nonexistentID := uuid.New()
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users/"+nonexistentID.String()+"/keys", CreateAPIKeyRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users/"+nonexistentID.String()+"/keys", CreateAPIKeyRequest{
 		Name: "Test Key",
 	})
 	req = withURLParam(req, "id", nonexistentID.String())
@@ -1142,14 +911,13 @@ func TestAdminHandler_CreateAPIKey_UserNotFound(t *testing.T) {
 
 func TestAdminHandler_CreateAPIKey_EmptyName(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	userID := uuid.New()
 	mockQueries.users[userID] = sqlc.User{ID: userID, Username: "testuser"}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users/"+userID.String()+"/keys", CreateAPIKeyRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users/"+userID.String()+"/keys", CreateAPIKeyRequest{
 		Name: "",
 	})
 	req = withURLParam(req, "id", userID.String())
@@ -1162,14 +930,13 @@ func TestAdminHandler_CreateAPIKey_EmptyName(t *testing.T) {
 
 func TestAdminHandler_CreateAPIKey_WithExpiration(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	userID := uuid.New()
 	mockQueries.users[userID] = sqlc.User{ID: userID, Username: "testuser"}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := newJSONRequest(http.MethodPost, "/api/v1/admin/users/"+userID.String()+"/keys", CreateAPIKeyRequest{
+	req := newJSONRequest(http.MethodPost, "/v1/admin/users/"+userID.String()+"/keys", CreateAPIKeyRequest{
 		Name:      "Expiring Key",
 		ExpiresIn: "30d",
 	})
@@ -1187,7 +954,6 @@ func TestAdminHandler_CreateAPIKey_WithExpiration(t *testing.T) {
 
 func TestAdminHandler_RevokeAPIKey_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	keyID := uuid.New()
 	userID := uuid.New()
@@ -1197,9 +963,9 @@ func TestAdminHandler_RevokeAPIKey_Success(t *testing.T) {
 		Name:   "Key to revoke",
 	}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/keys/"+keyID.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/admin/keys/"+keyID.String(), nil)
 	req = withURLParam(req, "id", keyID.String())
 	rec := httptest.NewRecorder()
 
@@ -1210,11 +976,10 @@ func TestAdminHandler_RevokeAPIKey_Success(t *testing.T) {
 
 func TestAdminHandler_RevokeAPIKey_NotFound(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
 	nonexistentID := uuid.New()
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/keys/"+nonexistentID.String(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/admin/keys/"+nonexistentID.String(), nil)
 	req = withURLParam(req, "id", nonexistentID.String())
 	rec := httptest.NewRecorder()
 
@@ -1229,15 +994,14 @@ func TestAdminHandler_RevokeAPIKey_NotFound(t *testing.T) {
 
 func TestAdminHandler_GetStats_Success(t *testing.T) {
 	mockQueries := newAdminMockQueries()
-	mockSession := &mockSessionCreator{}
 
 	// Add some users
 	mockQueries.users[uuid.New()] = sqlc.User{Username: "user1"}
 	mockQueries.users[uuid.New()] = sqlc.User{Username: "user2"}
 
-	handler := NewAdminHandler(mockQueries, mockSession)
+	handler := NewAdminHandler(mockQueries)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.GetStats(rec, req)

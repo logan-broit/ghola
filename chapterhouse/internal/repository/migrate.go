@@ -37,7 +37,7 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 // ApplyAdminMigrations applies the legacy admin schema (chapterhouse/db/
-// migrations) that ch-web and API-key auth read. Names are recorded in
+// migrations) that API-key auth and ch-admin read. Names are recorded in
 // _migrations with an "admin/" prefix. A database where the schema was
 // applied by hand (api_keys exists, nothing recorded) is baselined: every
 // file is marked applied without running it.

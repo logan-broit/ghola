@@ -12,9 +12,6 @@ at a single SHA, from one Go module (`go.mod` at the root).
 - `cmd/import-logs/` — one-shot tool that ingests existing JSONL
   conversation logs (Claude Code, pi-mono) into ghola via the same
   pipeline as live recording.
-- `cmd/ch-web/` — chapterhouse admin UI (static files embedded via
-  `embed.FS`, proxies `/api` to chapterhouse). Optional compose
-  profile `web`.
 - `attic/` — retired code kept for context and mining, not built or
   shipped. See `attic/README.md`.
 - `attic/extension/` — `ghola` Rust extension (pgrx). Was the original
@@ -67,11 +64,12 @@ at a single SHA, from one Go module (`go.mod` at the root).
 
 - `cmd/ch-api/`, `cmd/ch-init/`, `cmd/ch-worker/` — HTTP API,
   one-shot migrator, co-activation/consolidation worker.
-- `db/migrations/` + `db/queries/` — legacy admin schema (users, API
-  keys, admin sessions, audit log) and its sqlc inputs, embedded and
+- `cmd/ch-admin/` — CLI for users, API keys and the audit log.
+- `db/migrations/` + `db/queries/` — admin schema (users, API keys,
+  audit log) and its sqlc inputs, embedded and
   applied by `ch-init` after the episodic migrations.
 
-- `internal/handler/` — REST handlers (episodic + semantic).
+- `internal/handler/` — REST handlers (episodic, semantic, account/admin).
 - `internal/repository/` — Postgres layer (pgx), migrations under
   `internal/repository/migrations/`.
 - `internal/semantic/` — mneme persistence + reconciler (computes
@@ -112,7 +110,7 @@ history if you need the old code.
 
 - `deploy/docker-compose/` — local dev stack: postgres + ch-init +
   chapterhouse + chapterhouse-worker + mentat + truthsayer + guild (or
-  guild-stub), plus ghola (profile `all`) and ch-web (profile `web`).
+  guild-stub), plus ghola (profile `all`).
   `docker-compose.mac.yml` is the Apple Silicon variant
   ([deploy-mac.md](deploy-mac.md)); `docker-compose.smoke.yml` is the
   `make smoke-predictive` overlay.

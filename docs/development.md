@@ -24,9 +24,10 @@ need to mine it.
 `make dev-up` (`docker compose up -d` in `deploy/docker-compose/`)
 brings up: postgres (pgvector/pg17), ch-init (migration runner),
 chapterhouse, chapterhouse-worker, mentat, truthsayer and guild.
-Optional profiles: `all` adds the ghola daemon
-(`scripts/dev-up.sh --with-ghola` does this and waits for health),
-`web` adds the ch-web admin UI.
+The `all` profile adds the ghola daemon
+(`scripts/dev-up.sh --with-ghola` does this and waits for health).
+Users and API keys are managed with `ch-admin`; see
+[RUNBOOK](../chapterhouse/RUNBOOK.md#users-and-api-keys).
 
 Two images, both built from the repo root on first `up`:
 `Dockerfile.golang` → `ghola/ghola:dev` (every Go binary; each service
@@ -40,7 +41,6 @@ Service defaults:
 |---|---|---|
 | ghola | `:7421` | local HTTP daemon (profile `all`) |
 | chapterhouse | `:8080` | recall backend |
-| ch-web | `:8090` | admin UI (profile `web`) |
 | guild | `:8082` | vLLM Qwen3-Embedding-0.6B |
 | mentat | `:8084` | HDBSCAN clustering sidecar |
 | truthsayer | `:8085` | cross-encoder reranker (bge-reranker-v2-m3 fp16) |

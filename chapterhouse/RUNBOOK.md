@@ -13,7 +13,7 @@ Compose builds two images from the repo root on first `up`:
 
 | Image | Dockerfile | Services |
 |---|---|---|
-| `ghola/ghola:dev` | `Dockerfile.golang` | `ch-init`, `chapterhouse` (ch-api), `chapterhouse-worker`, `ghola`, `ch-web`; binary picked via `entrypoint:` |
+| `ghola/ghola:dev` | `Dockerfile.golang` | `ch-init`, `chapterhouse` (ch-api), `chapterhouse-worker`, `ghola`; binary picked via `entrypoint:`. Also carries `ch-admin` |
 | `ghola/py:dev` | `Dockerfile.python` | `mentat`, `truthsayer`; app picked via `command:` |
 
 Rebuild after code changes:
@@ -30,7 +30,6 @@ Postgres is `pgvector/pgvector:pg17`.
 ```bash
 make dev-up                       # from repo root: core stack, no ghola daemon
 scripts/dev-up.sh --with-ghola    # from repo root: + ghola, waits for /health
-docker compose --profile web up -d ch-web   # admin UI on :8090
 make dev-down                     # stop, keep volumes
 docker compose down -v            # stop and wipe postgres + sietch volumes
 ```
@@ -76,30 +75,39 @@ later needs a fresh database (`docker compose down -v`).
 `seed.sql` runs only when the postgres volume is first created. It
 enables `pgcrypto` and `vector` and stubs the `semantic` schema.
 
-## Admin console and API keys
+## Users and API keys
 
-ch-web and API keys use the admin schema (`users`, `api_keys`,
-`admin_sessions`, `audit_log`) from `chapterhouse/db/migrations/`.
-`ch-init` applies it after the episodic migrations, recorded in
-`_migrations` as `admin/<file>`. A database where it was applied by hand
-is detected (`api_keys` exists, nothing recorded) and only marked
-applied. There is no default admin user, so create one:
+`ch-init` applies the admin schema (`users`, `api_keys`, `audit_log`)
+from `chapterhouse/db/migrations/` after the episodic migrations,
+recorded in `_migrations` as `admin/<file>`. A database where it was
+applied by hand is detected (`api_keys` exists, nothing recorded) and
+only marked applied.
+
+`ch-admin` manages users and keys. Every key is `ch_k1_` + 64 hex
+chars and is shown once. Create the first admin and its key straight
+in Postgres (rerun it to mint a replacement if the key is lost):
 
 ```bash
-docker compose exec -T postgres psql -U memory_api -d memories -c "
-  INSERT INTO users (id, username, email, display_name, password_hash, is_admin)
-  VALUES ('00000000-0000-0000-0000-000000000001', 'admin', 'admin@localhost',
-          'Administrator', crypt('CHANGE_ME', gen_salt('bf', 10)), true)
-  ON CONFLICT (username) DO UPDATE SET
-    password_hash = EXCLUDED.password_hash, is_admin = true;"
+docker compose run --rm --entrypoint /usr/local/bin/ch-admin ch-init \
+  bootstrap --username admin
 ```
 
-`chapterhouse/db/seed_admin.sql` does the same with a fixed dev
-password (`admin123`). Don't use it outside local dev.
+Everything else goes through ch-api with a key. From the host:
 
-Then log into ch-web (`http://localhost:8090`) and create API keys
-(`ch_k1_` + 64 hex chars, shown once). Pass one to ghola as
-`CHAPTERHOUSE_API_KEY`.
+```bash
+go install ./chapterhouse/cmd/ch-admin
+export CHAPTERHOUSE_API_KEY=ch_k1_...      # from bootstrap
+ch-admin me
+ch-admin users create --username alice --email alice@example.com
+ch-admin keys create --user <alice-id> --name laptop --expires 90d
+ch-admin keys list --all
+ch-admin keys revoke <key-id> --admin
+ch-admin audit --all limit=20
+```
+
+Output is the API's JSON. Give ghola a key as `CHAPTERHOUSE_API_KEY`
+and set `CHAPTERHOUSE_REQUIRE_KEY=true`; on ch-api, drop
+`AUTH_DISABLED` so `/v1` checks it.
 
 ## Backfill over-long sessions
 
@@ -157,10 +165,6 @@ set `GHOLA_EXTENSION_OPTIONAL=true`.
 match the embedder (1024 for Qwen3-Embedding-0.6B). Compose sets both
 from `EMBEDDING_DIM`.
 
-**ch-web login returns 401 or 500.** No admin user exists (see above),
-or the session cookie was dropped. Cookies are `Secure`
-unless `ENVIRONMENT` is `local` or `development`, so a browser discards
-them over plain HTTP or a self-signed cert. Compose sets `local`.
-
-**Clipboard copy fails in ch-web.** `navigator.clipboard` needs a
-secure context. Same cause as the cookie issue.
+**ch-admin returns 401.** The key is missing, revoked, expired, or
+belongs to a deactivated user. `/v1/admin/*` returns 403 for a key
+whose user isn't an admin.

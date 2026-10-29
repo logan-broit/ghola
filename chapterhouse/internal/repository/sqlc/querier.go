@@ -11,9 +11,7 @@ import (
 )
 
 type Querier interface {
-	CleanupExpiredAdminSessions(ctx context.Context) error
 	CountActiveAPIKeysByUser(ctx context.Context, userID uuid.UUID) (int64, error)
-	CountActiveAdminSessions(ctx context.Context) (int64, error)
 	CountAuditLogs(ctx context.Context, arg CountAuditLogsParams) (int64, error)
 	CountGitCommits(ctx context.Context, userID uuid.UUID) (int32, error)
 	CountJournalEntriesByType(ctx context.Context, arg CountJournalEntriesByTypeParams) (int32, error)
@@ -21,7 +19,6 @@ type Querier interface {
 	CountMemoryBlocksByUser(ctx context.Context, userID uuid.UUID) (int32, error)
 	CountUsers(ctx context.Context) (CountUsersRow, error)
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
-	CreateAdminSession(ctx context.Context, arg CreateAdminSessionParams) (AdminSession, error)
 	CreateAuditLog(ctx context.Context, arg CreateAuditLogParams) (AuditLog, error)
 	CreateGitCommit(ctx context.Context, arg CreateGitCommitParams) (GitCommit, error)
 	CreateJournalEntry(ctx context.Context, arg CreateJournalEntryParams) (Journal, error)
@@ -45,7 +42,6 @@ type Querier interface {
 	// Get accessible memory blocks filtered by type
 	GetAccessibleMemoryBlocksByType(ctx context.Context, arg GetAccessibleMemoryBlocksByTypeParams) ([]CurrentMemoryBlock, error)
 	// Note: Despite the name, this query is used for all user sessions (admin and non-admin)
-	GetAdminSessionByToken(ctx context.Context, tokenHash string) (GetAdminSessionByTokenRow, error)
 	GetAdminStats(ctx context.Context) (GetAdminStatsRow, error)
 	// Get all current memory blocks for reindexing
 	GetAllCurrentMemoryBlocks(ctx context.Context) ([]CurrentMemoryBlock, error)
@@ -94,7 +90,6 @@ type Querier interface {
 	// from ownership-filtered search results.
 	IncrementRecallCount(ctx context.Context, arg IncrementRecallCountParams) error
 	ListAPIKeysByUser(ctx context.Context, userID uuid.UUID) ([]ListAPIKeysByUserRow, error)
-	ListActiveAdminSessions(ctx context.Context) ([]ListActiveAdminSessionsRow, error)
 	ListAllAPIKeys(ctx context.Context, arg ListAllAPIKeysParams) ([]ListAllAPIKeysRow, error)
 	ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([]AuditLog, error)
 	ListAuditLogsByDateRange(ctx context.Context, arg ListAuditLogsByDateRangeParams) ([]AuditLog, error)
@@ -114,10 +109,7 @@ type Querier interface {
 	PruneOldVersions(ctx context.Context, limit int32) error
 	ReactivateUser(ctx context.Context, id uuid.UUID) error
 	RevokeAPIKey(ctx context.Context, id uuid.UUID) error
-	RevokeAdminSession(ctx context.Context, id uuid.UUID) error
-	RevokeAdminSessionByToken(ctx context.Context, tokenHash string) error
 	RevokeAllAPIKeysByUser(ctx context.Context, userID uuid.UUID) error
-	RevokeAllAdminSessionsByUser(ctx context.Context, userID uuid.UUID) error
 	// Search accessible memory blocks by keyword using ILIKE (name) and full-text search (value).
 	SearchAccessibleMemoryBlocks(ctx context.Context, arg SearchAccessibleMemoryBlocksParams) ([]CurrentMemoryBlock, error)
 	// Search accessible memory blocks by keyword filtered by tags (AND logic).

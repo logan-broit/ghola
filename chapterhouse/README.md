@@ -17,7 +17,7 @@ agent ──MCP/HTTP──▶ ghola daemon ──HTTP──▶ ch-api ──▶ 
                                              │                                 │
                                              └──▶ guild (embeddings) ◀─────────┤
                                              └──▶ mentat (pool, cluster) ◀─────┘
-ch-web (admin UI) ──/api proxy──▶ ch-api
+ch-admin (CLI) ──HTTP, API key──▶ ch-api
 ```
 
 | Binary | Path | Role |
@@ -26,7 +26,7 @@ ch-web (admin UI) ──/api proxy──▶ ch-api
 | `ch-init` | `chapterhouse/cmd/ch-init` | One-shot: applies embedded migrations, then exits |
 | `ch-worker` | `chapterhouse/cmd/ch-worker` | Drains the co-activation queue every `WORKER_TICK_SECONDS`; runs nightly consolidation when `CONSOLIDATE_WORKSPACES` and `MENTAT_URL` are set |
 | `ch-backfill-sessions` | `chapterhouse/cmd/ch-backfill-sessions` | Operator tool: splits an over-long session into idle-gap segments |
-| `ch-web` | `cmd/ch-web` | Admin console (embedded static files + `/api` proxy) |
+| `ch-admin` | `chapterhouse/cmd/ch-admin` | CLI for users, API keys and audit log; `bootstrap` creates the first admin straight in Postgres |
 
 ## HTTP surface
 
@@ -36,7 +36,8 @@ ch-web (admin UI) ──/api proxy──▶ ch-api
 | `POST /v1/episodic/{ingest,query,share,forget}` | API key (none if `AUTH_DISABLED`) | Episodic tier, called by ghola |
 | `POST /v1/semantic/query` | same | Semantic recall |
 | `POST /v1/semantic/consolidate` | same | Manual episodic→semantic batch (needs `MENTAT_URL`) |
-| `/api/v1/user/*`, `/api/v1/admin/*` | session cookie (+ admin role) | ch-web: users, API keys, audit log |
+| `GET /v1/me`, `GET /v1/audit`, `GET\|POST /v1/keys`, `DELETE /v1/keys/{id}` | API key, always | Caller's own account and keys |
+| `/v1/admin/{stats,audit,users,keys}` | API key of an admin user | Users, any user's keys, audit log |
 
 The `/v1` contract is specified in
 [`docs/api/v1-chapterhouse.yaml`](../docs/api/v1-chapterhouse.yaml).
@@ -80,14 +81,15 @@ See [RUNBOOK.md](RUNBOOK.md) for operations.
 
 `ch-init` reads the same `DATABASE_*` variables plus `EMBEDDING_DIM`
 (required; substituted into the vector column width). `ch-worker`
-reads `DATABASE_URL`. ch-web reads `PORT` (`8080`) and `API_URL`
-(`http://ch-server:8080`; compose sets `http://chapterhouse:8080`).
+reads `DATABASE_URL`. `ch-admin` reads `CHAPTERHOUSE_URL` (default
+`http://localhost:8080`) and `CHAPTERHOUSE_API_KEY`; `ch-admin bootstrap`
+reads the `DATABASE_*` variables instead.
 
 ## Layout
 
 ```
 chapterhouse/
-├── cmd/{ch-api,ch-init,ch-worker,ch-backfill-sessions}/
+├── cmd/{ch-api,ch-init,ch-worker,ch-admin,ch-backfill-sessions}/
 ├── internal/
 │   ├── handler/              # REST handlers
 │   ├── repository/           # pgx store; migrations/ embedded, applied by ch-init

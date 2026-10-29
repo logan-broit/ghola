@@ -12,8 +12,7 @@ is welcome — let me know if you have a timeline.
 ## In scope
 
 - The ghola daemon (`cmd/ghola`, `cmd/ghola-mcp`, `internal/`)
-- The chapterhouse server (`chapterhouse/`) and admin
-  console (`cmd/ch-web/`)
+- The chapterhouse server and its admin CLI (`chapterhouse/`)
 - The Python sidecars (`mentat/`, `truthsayer/`)
 - The Dockerfiles under `deploy/`
 

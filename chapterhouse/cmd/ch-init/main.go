@@ -77,7 +77,7 @@ func run() error {
 	}
 	logger.Info("episodic migrations applied")
 
-	// Admin schema for ch-web login and API keys.
+	// Admin schema: users, API keys, audit log.
 	if err := repository.ApplyAdminMigrations(ctx, pool); err != nil {
 		return fmt.Errorf("apply admin migrations: %w", err)
 	}

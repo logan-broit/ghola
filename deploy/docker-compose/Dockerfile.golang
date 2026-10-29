@@ -1,6 +1,6 @@
 # Multi-stage build for every Go binary in the monorepo: ghola,
-# ghola-mcp, import-logs, ch-web (cmd/...) and ch-api, ch-init,
-# ch-worker, ch-backfill-sessions (chapterhouse/cmd/...).
+# ghola-mcp, import-logs (cmd/...) and ch-api, ch-init, ch-worker,
+# ch-admin, ch-backfill-sessions (chapterhouse/cmd/...).
 # Build context is the ghola monorepo root. Compose selects the binary
 # per service via entrypoint:. Migrations are embedded (go:embed in
 # chapterhouse/internal/repository), so nothing else ships on disk.

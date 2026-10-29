@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -17,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // getIPAddress extracts the IP address from a request, stripping the port.
@@ -44,132 +42,18 @@ func getIPAddress(r *http.Request) string {
 	return host
 }
 
-// AdminHandler handles admin console operations.
+// AdminHandler serves account (/v1/me, /v1/keys, /v1/audit) and admin
+// (/v1/admin/*) routes. Callers authenticate with an API key.
 type AdminHandler struct {
-	queries         sqlc.Querier
-	sessionProvider SessionCreator
-}
-
-// SessionCreator creates admin sessions.
-type SessionCreator interface {
-	CreateSession(ctx context.Context, userID uuid.UUID, ipAddress, userAgent string) (*http.Cookie, error)
-	RevokeSession(ctx context.Context, token string) error
-	ClearSessionCookie() *http.Cookie
+	queries sqlc.Querier
 }
 
 // NewAdminHandler creates a new admin handler.
-func NewAdminHandler(queries sqlc.Querier, sessionProvider SessionCreator) *AdminHandler {
-	return &AdminHandler{
-		queries:         queries,
-		sessionProvider: sessionProvider,
-	}
+func NewAdminHandler(queries sqlc.Querier) *AdminHandler {
+	return &AdminHandler{queries: queries}
 }
 
-// LoginRequest represents a login request.
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// LoginResponse represents a successful login response.
-type LoginResponse struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
-	Email    string `json:"email,omitempty"`
-	IsAdmin  bool   `json:"is_admin"`
-}
-
-// Login handles POST /api/v1/admin/login
-func (h *AdminHandler) Login(w http.ResponseWriter, r *http.Request) {
-	var req LoginRequest
-	if err := DecodeJSON(r, &req); err != nil {
-		Error(w, r, err)
-		return
-	}
-
-	if req.Username == "" || req.Password == "" {
-		Error(w, r, apierror.BadRequest("Username and password are required"))
-		return
-	}
-
-	user, err := h.queries.GetUserByUsernameForAuth(r.Context(), req.Username)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			Error(w, r, apierror.Unauthorized("Invalid credentials"))
-			return
-		}
-		Error(w, r, apierror.InternalError("Failed to authenticate").WithError(err))
-		return
-	}
-
-	if !user.PasswordHash.Valid || user.PasswordHash.String == "" {
-		Error(w, r, apierror.Unauthorized("Password not set for this user"))
-		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(req.Password)); err != nil {
-		Error(w, r, apierror.Unauthorized("Invalid credentials"))
-		return
-	}
-
-	cookie, err := h.sessionProvider.CreateSession(
-		r.Context(),
-		user.ID,
-		getIPAddress(r),
-		r.UserAgent(),
-	)
-	if err != nil {
-		Error(w, r, apierror.InternalError("Failed to create session").WithError(err))
-		return
-	}
-
-	http.SetCookie(w, cookie)
-
-	_, _ = h.queries.CreateAuditLog(r.Context(), sqlc.CreateAuditLogParams{
-		UserID:       pgtype.UUID{Bytes: user.ID, Valid: true},
-		Action:       "login",
-		ResourceType: "session",
-		ResourceID:   pgtype.Text{Valid: false},
-		Details:      nil,
-		IpAddress:    pgtype.Text{String: getIPAddress(r), Valid: true},
-		UserAgent:    pgtype.Text{String: r.UserAgent(), Valid: true},
-	})
-
-	OK(w, LoginResponse{
-		UserID:   user.ID.String(),
-		Username: user.Username,
-		Email:    user.Email.String,
-		IsAdmin:  user.IsAdmin,
-	})
-}
-
-// Logout handles POST /api/v1/admin/logout
-func (h *AdminHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	authCtx := auth.FromContext(r.Context())
-
-	cookie, err := r.Cookie(auth.SessionCookieName)
-	if err == nil && cookie.Value != "" {
-		_ = h.sessionProvider.RevokeSession(r.Context(), cookie.Value)
-	}
-
-	if authCtx != nil {
-		_, _ = h.queries.CreateAuditLog(r.Context(), sqlc.CreateAuditLogParams{
-			UserID:       pgtype.UUID{Bytes: authCtx.UserID, Valid: true},
-			Action:       "logout",
-			ResourceType: "session",
-			ResourceID:   pgtype.Text{Valid: false},
-			Details:      nil,
-			IpAddress:    pgtype.Text{String: getIPAddress(r), Valid: true},
-			UserAgent:    pgtype.Text{String: r.UserAgent(), Valid: true},
-		})
-	}
-
-	http.SetCookie(w, h.sessionProvider.ClearSessionCookie())
-
-	NoContent(w)
-}
-
-// GetCurrentUser handles GET /api/v1/admin/me
+// GetCurrentUser handles GET /v1/me
 // Returns the currently authenticated user's information.
 func (h *AdminHandler) GetCurrentUser(w http.ResponseWriter, r *http.Request) {
 	authCtx := auth.FromContext(r.Context())
@@ -215,7 +99,7 @@ func toUserResponse(u sqlc.User) UserResponse {
 	return resp
 }
 
-// ListUsers handles GET /api/v1/admin/users
+// ListUsers handles GET /v1/admin/users
 func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseAdminPagination(r, 50, 1000)
 	activeOnly := r.URL.Query().Get("active") == "true"
@@ -241,7 +125,7 @@ func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	OK(w, NewPaginatedResponse(result, int(offset), int(limit), int(counts.Total)))
 }
 
-// GetUser handles GET /api/v1/admin/users/{id}
+// GetUser handles GET /v1/admin/users/{id}
 func (h *AdminHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -263,11 +147,10 @@ type CreateUserRequest struct {
 	Username    string `json:"username"`
 	Email       string `json:"email,omitempty"`
 	DisplayName string `json:"display_name,omitempty"`
-	Password    string `json:"password,omitempty"`
 	IsAdmin     bool   `json:"is_admin"`
 }
 
-// CreateUser handles POST /api/v1/admin/users
+// CreateUser handles POST /v1/admin/users
 func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var req CreateUserRequest
 	if err := DecodeJSON(r, &req); err != nil {
@@ -290,22 +173,12 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var passwordHash pgtype.Text
-	if req.Password != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			Error(w, r, apierror.InternalError("Failed to hash password").WithError(err))
-			return
-		}
-		passwordHash = pgtype.Text{String: string(hash), Valid: true}
-	}
-
 	user, err := h.queries.CreateUserWithPassword(r.Context(), sqlc.CreateUserWithPasswordParams{
 		ID:           uuid.New(),
 		Username:     req.Username,
 		Email:        pgtype.Text{String: req.Email, Valid: req.Email != ""},
 		DisplayName:  pgtype.Text{String: req.DisplayName, Valid: req.DisplayName != ""},
-		PasswordHash: passwordHash,
+		PasswordHash: pgtype.Text{},
 		IsAdmin:      req.IsAdmin,
 		Metadata:     []byte("{}"),
 	})
@@ -337,10 +210,9 @@ type UpdateUserRequest struct {
 	Email       *string `json:"email,omitempty"`
 	DisplayName *string `json:"display_name,omitempty"`
 	IsAdmin     *bool   `json:"is_admin,omitempty"`
-	Password    string  `json:"password,omitempty"`
 }
 
-// UpdateUser handles PUT /api/v1/admin/users/{id}
+// UpdateUser handles PUT /v1/admin/users/{id}
 func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -358,23 +230,6 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		Error(w, r, dbError(err, "User", "get user"))
 		return
-	}
-
-	// Update password if provided
-	if req.Password != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			Error(w, r, apierror.InternalError("Failed to hash password").WithError(err))
-			return
-		}
-		err = h.queries.SetUserPassword(r.Context(), sqlc.SetUserPasswordParams{
-			ID:           userID,
-			PasswordHash: pgtype.Text{String: string(hash), Valid: true},
-		})
-		if err != nil {
-			Error(w, r, apierror.InternalError("Failed to update password").WithError(err))
-			return
-		}
 	}
 
 	username := existing.Username
@@ -427,7 +282,7 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	OK(w, toUserResponse(user))
 }
 
-// DeactivateUser handles DELETE /api/v1/admin/users/{id}
+// DeactivateUser handles DELETE /v1/admin/users/{id}
 func (h *AdminHandler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -446,7 +301,6 @@ func (h *AdminHandler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = h.queries.RevokeAllAdminSessionsByUser(r.Context(), userID)
 	_ = h.queries.RevokeAllAPIKeysByUser(r.Context(), userID)
 
 	// Log audit event
@@ -466,7 +320,7 @@ func (h *AdminHandler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 	NoContent(w)
 }
 
-// ReactivateUser handles POST /api/v1/admin/users/{id}/reactivate
+// ReactivateUser handles POST /v1/admin/users/{id}/reactivate
 func (h *AdminHandler) ReactivateUser(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -535,7 +389,7 @@ func toAPIKeyResponse(k sqlc.ApiKey) APIKeyResponse {
 	return newAPIKeyResponse(k.ID, k.UserID, "", k.KeyPrefix, k.Name, k.CreatedAt, k.LastUsedAt, k.ExpiresAt, k.RevokedAt)
 }
 
-// ListAPIKeys handles GET /api/v1/admin/users/{id}/keys
+// ListAPIKeys handles GET /v1/admin/users/{id}/keys
 func (h *AdminHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -559,7 +413,7 @@ func (h *AdminHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListAllAPIKeys handles GET /api/v1/admin/keys
+// ListAllAPIKeys handles GET /v1/admin/keys
 func (h *AdminHandler) ListAllAPIKeys(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseAdminPagination(r, 100, 1000)
 
@@ -594,7 +448,7 @@ type CreateAPIKeyResponse struct {
 	Key string `json:"key"` // The plaintext key - shown only once!
 }
 
-// CreateAPIKey handles POST /api/v1/admin/users/{id}/keys
+// CreateAPIKey handles POST /v1/admin/users/{id}/keys
 func (h *AdminHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -673,7 +527,7 @@ func (h *AdminHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	Created(w, resp)
 }
 
-// RevokeAPIKey handles DELETE /api/v1/admin/keys/{id}
+// RevokeAPIKey handles DELETE /v1/admin/keys/{id}
 func (h *AdminHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	keyID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
@@ -711,13 +565,12 @@ func (h *AdminHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 
 // StatsResponse represents admin statistics.
 type StatsResponse struct {
-	ActiveUsers    int64 `json:"active_users"`
-	AdminUsers     int64 `json:"admin_users"`
-	ActiveAPIKeys  int64 `json:"active_api_keys"`
-	ActiveSessions int64 `json:"active_sessions"`
+	ActiveUsers   int64 `json:"active_users"`
+	AdminUsers    int64 `json:"admin_users"`
+	ActiveAPIKeys int64 `json:"active_api_keys"`
 }
 
-// GetStats handles GET /api/v1/admin/stats
+// GetStats handles GET /v1/admin/stats
 func (h *AdminHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.queries.GetAdminStats(r.Context())
 	if err != nil {
@@ -726,10 +579,9 @@ func (h *AdminHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	OK(w, StatsResponse{
-		ActiveUsers:    stats.ActiveUsers,
-		AdminUsers:     stats.AdminUsers,
-		ActiveAPIKeys:  stats.ActiveApiKeys,
-		ActiveSessions: stats.ActiveSessions,
+		ActiveUsers:   stats.ActiveUsers,
+		AdminUsers:    stats.AdminUsers,
+		ActiveAPIKeys: stats.ActiveApiKeys,
 	})
 }
 
@@ -754,7 +606,7 @@ type AuditListResponse struct {
 	Total   int                `json:"total"`
 }
 
-// ListAuditLogs handles GET /api/v1/admin/audit
+// ListAuditLogs handles GET /v1/admin/audit
 func (h *AdminHandler) ListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parseAdminPagination(r, 50, 1000)
 
@@ -870,7 +722,7 @@ func (h *AdminHandler) ListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListUserAPIKeys handles GET /api/v1/user/keys
+// ListUserAPIKeys handles GET /v1/keys
 // Returns only API keys for the authenticated user.
 func (h *AdminHandler) ListUserAPIKeys(w http.ResponseWriter, r *http.Request) {
 	authCtx := auth.FromContext(r.Context())
@@ -895,7 +747,7 @@ func (h *AdminHandler) ListUserAPIKeys(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// CreateUserAPIKey handles POST /api/v1/user/keys
+// CreateUserAPIKey handles POST /v1/keys
 // Creates an API key for the authenticated user.
 func (h *AdminHandler) CreateUserAPIKey(w http.ResponseWriter, r *http.Request) {
 	authCtx := auth.FromContext(r.Context())
@@ -965,7 +817,7 @@ func (h *AdminHandler) CreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	Created(w, resp)
 }
 
-// RevokeUserAPIKey handles DELETE /api/v1/user/keys/{id}
+// RevokeUserAPIKey handles DELETE /v1/keys/{id}
 // Revokes an API key owned by the authenticated user.
 func (h *AdminHandler) RevokeUserAPIKey(w http.ResponseWriter, r *http.Request) {
 	authCtx := auth.FromContext(r.Context())
@@ -1010,89 +862,7 @@ func (h *AdminHandler) RevokeUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	NoContent(w)
 }
 
-// ChangePasswordRequest represents a password change request.
-type ChangePasswordRequest struct {
-	CurrentPassword string `json:"current_password"`
-	NewPassword     string `json:"new_password"`
-}
-
-// ChangePassword handles POST /api/v1/user/password
-// Allows authenticated users to change their own password.
-func (h *AdminHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
-	authCtx := auth.FromContext(r.Context())
-	if authCtx == nil {
-		Error(w, r, apierror.Unauthorized("Authentication required"))
-		return
-	}
-
-	var req ChangePasswordRequest
-	if err := DecodeJSON(r, &req); err != nil {
-		Error(w, r, err)
-		return
-	}
-
-	if req.CurrentPassword == "" {
-		Error(w, r, apierror.BadRequest("Current password is required"))
-		return
-	}
-	if req.NewPassword == "" {
-		Error(w, r, apierror.BadRequest("New password is required"))
-		return
-	}
-	if len(req.NewPassword) < 8 {
-		Error(w, r, apierror.BadRequest("New password must be at least 8 characters"))
-		return
-	}
-
-	// Get the user to verify current password
-	user, err := h.queries.GetUserByUsernameForAuth(r.Context(), authCtx.Username)
-	if err != nil {
-		Error(w, r, apierror.InternalError("Failed to get user").WithError(err))
-		return
-	}
-
-	if !user.PasswordHash.Valid || user.PasswordHash.String == "" {
-		Error(w, r, apierror.BadRequest("No password is set for this account"))
-		return
-	}
-
-	// Verify current password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(req.CurrentPassword)); err != nil {
-		Error(w, r, apierror.Unauthorized("Current password is incorrect"))
-		return
-	}
-
-	// Hash the new password
-	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
-	if err != nil {
-		Error(w, r, apierror.InternalError("Failed to hash password").WithError(err))
-		return
-	}
-
-	// Update the password
-	err = h.queries.SetUserPassword(r.Context(), sqlc.SetUserPasswordParams{
-		ID:           authCtx.UserID,
-		PasswordHash: pgtype.Text{String: string(newHash), Valid: true},
-	})
-	if err != nil {
-		Error(w, r, apierror.InternalError("Failed to update password").WithError(err))
-		return
-	}
-
-	_, _ = h.queries.CreateAuditLog(r.Context(), sqlc.CreateAuditLogParams{
-		UserID:       pgtype.UUID{Bytes: authCtx.UserID, Valid: true},
-		Action:       "change_password",
-		ResourceType: "user",
-		ResourceID:   pgtype.Text{String: authCtx.UserID.String(), Valid: true},
-		Details:      nil,
-		IpAddress:    pgtype.Text{String: getIPAddress(r), Valid: true},
-		UserAgent:    pgtype.Text{String: r.UserAgent(), Valid: true},
-	})
-
-	NoContent(w)
-}
-
-// ListUserAuditLogs handles GET /api/v1/user/audit
+// ListUserAuditLogs handles GET /v1/audit
 // Returns only audit log entries for the authenticated user (no user_id filter allowed)
 func (h *AdminHandler) ListUserAuditLogs(w http.ResponseWriter, r *http.Request) {
 	// Get the authenticated user from context
