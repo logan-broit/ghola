@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/logan-broit/ghola/chapterhouse/db"
 )
 
 //go:embed migrations/*.sql
@@ -31,11 +33,66 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
-	if err != nil {
-		return fmt.Errorf("read migrations dir: %w", err)
-	}
+	return applyAll(ctx, pool, migrationsFS, "migrations", "", dim)
+}
 
+// ApplyAdminMigrations applies the legacy admin schema (chapterhouse/db/
+// migrations) that ch-web and API-key auth read. Names are recorded in
+// _migrations with an "admin/" prefix. A database where the schema was
+// applied by hand (api_keys exists, nothing recorded) is baselined: every
+// file is marked applied without running it.
+func ApplyAdminMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	if err := ensureTracking(ctx, pool); err != nil {
+		return err
+	}
+	var manual bool
+	if err := pool.QueryRow(ctx, `
+		SELECT to_regclass('public.api_keys') IS NOT NULL
+		   AND NOT EXISTS (SELECT 1 FROM _migrations WHERE applied LIKE 'admin/%')
+	`).Scan(&manual); err != nil {
+		return fmt.Errorf("check admin schema: %w", err)
+	}
+	if manual {
+		names, err := sqlNames(db.Migrations, "migrations")
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO _migrations (applied) VALUES ($1) ON CONFLICT DO NOTHING`,
+				"admin/"+name,
+			); err != nil {
+				return fmt.Errorf("baseline %s: %w", name, err)
+			}
+		}
+		return nil
+	}
+	return applyAll(ctx, pool, db.Migrations, "migrations", "admin/", 0)
+}
+
+func applyAll(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, dir, prefix string, dim int) error {
+	names, err := sqlNames(fsys, dir)
+	if err != nil {
+		return err
+	}
+	// Bootstrap the tracking table outside the per-migration
+	// transaction so the CREATE TABLE survives retries.
+	if err := ensureTracking(ctx, pool); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := applyOne(ctx, pool, fsys, dir, prefix, name, dim); err != nil {
+			return fmt.Errorf("migration %s%s: %w", prefix, name, err)
+		}
+	}
+	return nil
+}
+
+func sqlNames(fsys fs.FS, dir string) ([]string, error) {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return nil, fmt.Errorf("read migrations dir: %w", err)
+	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
@@ -44,9 +101,10 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		names = append(names, e.Name())
 	}
 	sort.Strings(names)
+	return names, nil
+}
 
-	// Bootstrap the tracking table outside the per-migration
-	// transaction so the CREATE TABLE survives retries.
+func ensureTracking(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS _migrations (
 			applied text PRIMARY KEY,
@@ -55,22 +113,20 @@ func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	`); err != nil {
 		return fmt.Errorf("create _migrations table: %w", err)
 	}
-
-	for _, name := range names {
-		if err := applyOne(ctx, pool, name, dim); err != nil {
-			return fmt.Errorf("migration %s: %w", name, err)
-		}
-	}
 	return nil
 }
 
-func applyOne(ctx context.Context, pool *pgxpool.Pool, name string, dim int) error {
-	raw, err := migrationsFS.ReadFile("migrations/" + name)
+func applyOne(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, dir, prefix, name string, dim int) error {
+	raw, err := fs.ReadFile(fsys, dir+"/"+name)
 	if err != nil {
 		return fmt.Errorf("read: %w", err)
 	}
 
-	sql := strings.ReplaceAll(string(raw), "${EMBEDDING_DIM}", strconv.Itoa(dim))
+	sql := string(raw)
+	if dim > 0 {
+		sql = strings.ReplaceAll(sql, "${EMBEDDING_DIM}", strconv.Itoa(dim))
+	}
+	name = prefix + name
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {

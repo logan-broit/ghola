@@ -23,7 +23,7 @@
       "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 254, "end_line": 285 }] },
     { "id": "s_api", "type": "backend", "label": "chapterhouse :8080", "sublabel": "ch-api", "pos": [810, 120], "size": [200, 56],
       "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 183, "end_line": 225 }] },
-    { "id": "s_init", "type": "backend", "label": "ch-init", "sublabel": "one-shot migrations", "pos": [810, 200], "size": [200, 56],
+    { "id": "s_init", "type": "backend", "label": "ch-init", "sublabel": "episodic + admin migrations", "pos": [810, 200], "size": [200, 56],
       "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 163, "end_line": 182 }] },
     { "id": "s_worker", "type": "backend", "label": "chapterhouse-worker", "sublabel": "ch-worker", "pos": [810, 280], "size": [200, 56],
       "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 226, "end_line": 253 }] },
@@ -61,8 +61,7 @@
       "Copy the Dockerfile with a narrower go build target to ship one service alone"
     ] },
     { "dot": "amber", "title": "Pulled, not built", "items": [
-      "pgvector pg17, vLLM embedder (guild), python hash stub",
-      "deploy/cnpg-pg18 builds the homelab Postgres image separately"
+      "pgvector pg17, vLLM embedder (guild), python hash stub"
     ] }
   ]
 }

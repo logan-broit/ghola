@@ -96,7 +96,7 @@ chapterhouse/
 │   ├── primitives/           # ACT-R, decay, Hebbian, Bayesian, contradiction
 │   ├── auth/, middleware/    # API key, session, JWT auth
 │   └── config/               # env config
-├── db/migrations/            # legacy admin schema + sqlc input (not applied by ch-init)
+├── db/migrations/            # admin schema + sqlc input (applied by ch-init)
 ├── encoding-eval/            # encoding strategy eval harness
 ├── RUNBOOK.md
 └── SECURITY_STATEMENT.md

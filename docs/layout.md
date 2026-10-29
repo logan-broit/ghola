@@ -69,8 +69,8 @@ at a single SHA, from one Go module (`go.mod` at the root).
 - `cmd/ch-api/`, `cmd/ch-init/`, `cmd/ch-worker/` — HTTP API,
   one-shot migrator, co-activation/consolidation worker.
 - `db/migrations/` + `db/queries/` — legacy admin schema (users, API
-  keys, admin sessions, audit log) and its sqlc inputs. Not applied by
-  `ch-init`; see `chapterhouse/RUNBOOK.md`.
+  keys, admin sessions, audit log) and its sqlc inputs, embedded and
+  applied by `ch-init` after the episodic migrations.
 
 - `internal/handler/` — REST handlers (episodic + semantic).
 - `internal/repository/` — Postgres layer (pgx), migrations under
@@ -120,10 +120,7 @@ history if you need the old code.
   Two images: `Dockerfile.golang` (`ghola/ghola:dev`, every Go binary;
   compose picks one per service via `entrypoint:`) and `Dockerfile.python`
   (`ghola/py:dev`, mentat + truthsayer; picked via `command:`).
-- `deploy/cnpg-pg18/` — legacy CNPG PostgreSQL 18 + pg_recall image
-  build, kept for reference; not used by the compose stack or by any
-  current code path. Homelab cluster manifests live outside this repo
-  (`homelab-k3s`).
+- Homelab cluster manifests live outside this repo (`homelab-k3s`).
 - `docs/` — durable references only: this layout map, the chapterhouse
   OpenAPI spec, and any subproject status writeups that survive a
   cleanup pass. Process-artifact subtrees — `docs/plans/`,

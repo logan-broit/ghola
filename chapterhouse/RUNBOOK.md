@@ -23,10 +23,7 @@ docker compose build
 docker compose up -d
 ```
 
-Postgres is `pgvector/pgvector:pg17`. `deploy/cnpg-pg18/Dockerfile`
-builds a CloudNativePG PostgreSQL 18 image with the pg_recall
-extension; nothing in the current code uses pg_recall, and the compose
-stack doesn't use that image.
+Postgres is `pgvector/pgvector:pg17`.
 
 ## Start and stop
 
@@ -81,19 +78,12 @@ enables `pgcrypto` and `vector` and stubs the `semantic` schema.
 
 ## Admin console and API keys
 
-ch-web and API keys need the legacy admin schema (`users`, `api_keys`,
+ch-web and API keys use the admin schema (`users`, `api_keys`,
 `admin_sessions`, `audit_log`) from `chapterhouse/db/migrations/`.
-`ch-init` does **not** apply it. Until it's applied, ch-web login fails
-and ghola must run without a key (`CHAPTERHOUSE_REQUIRE_KEY=false`, the
-compose default). Apply it once:
-
-```bash
-for f in ../../chapterhouse/db/migrations/*.sql; do
-  docker compose exec -T postgres psql -U memory_api -d memories -v ON_ERROR_STOP=1 < "$f"
-done
-```
-
-Create an admin user:
+`ch-init` applies it after the episodic migrations, recorded in
+`_migrations` as `admin/<file>`. A database where it was applied by hand
+is detected (`api_keys` exists, nothing recorded) and only marked
+applied. There is no default admin user, so create one:
 
 ```bash
 docker compose exec -T postgres psql -U memory_api -d memories -c "
@@ -167,8 +157,8 @@ set `GHOLA_EXTENSION_OPTIONAL=true`.
 match the embedder (1024 for Qwen3-Embedding-0.6B). Compose sets both
 from `EMBEDDING_DIM`.
 
-**ch-web login returns 401 or 500.** The admin schema isn't applied
-(see above), or the session cookie was dropped. Cookies are `Secure`
+**ch-web login returns 401 or 500.** No admin user exists (see above),
+or the session cookie was dropped. Cookies are `Secure`
 unless `ENVIRONMENT` is `local` or `development`, so a browser discards
 them over plain HTTP or a self-signed cert. Compose sets `local`.
 

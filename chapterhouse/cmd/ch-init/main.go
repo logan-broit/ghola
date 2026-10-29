@@ -63,7 +63,7 @@ func run() error {
 		if os.Getenv("GHOLA_EXTENSION_OPTIONAL") == "true" {
 			logger.Warn("ghola extension not installed; continuing because GHOLA_EXTENSION_OPTIONAL=true")
 		} else {
-			return fmt.Errorf("ghola extension not found — ensure the custom CNPG image includes ghola: %w", err)
+			return fmt.Errorf("ghola extension not found — install it or set GHOLA_EXTENSION_OPTIONAL=true: %w", err)
 		}
 	} else {
 		logger.Info("ghola extension verified", slog.String("version", extVersion))
@@ -76,6 +76,12 @@ func run() error {
 		return fmt.Errorf("apply episodic migrations: %w", err)
 	}
 	logger.Info("episodic migrations applied")
+
+	// Admin schema for ch-web login and API keys.
+	if err := repository.ApplyAdminMigrations(ctx, pool); err != nil {
+		return fmt.Errorf("apply admin migrations: %w", err)
+	}
+	logger.Info("admin migrations applied")
 
 	logger.Info("init complete")
 	return nil

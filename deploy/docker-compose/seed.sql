@@ -1,5 +1,5 @@
--- Dev-only bootstrap. Production uses the real pg_ghola extension
--- (installed in the CNPG image) which creates semantic.* itself.
+-- Dev-only bootstrap. The retired ghola extension (attic/extension)
+-- created semantic.* itself.
 -- Here we stub enough of the semantic schema for the replay worker
 -- to run end-to-end without a pgrx build.
 --
