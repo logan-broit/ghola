@@ -341,50 +341,6 @@ var ErrSessionNotFound = errors.New("session not found")
 // forget/share.
 var ErrSessionNotOwned = errors.New("session not owned by caller")
 
-// AddSessionWorkspaceParams carries the validated inputs for tagging
-// an existing session into an additional workspace.
-type AddSessionWorkspaceParams struct {
-	UserID      uuid.UUID
-	SessionID   uuid.UUID
-	WorkspaceID uuid.UUID
-}
-
-// AddSessionWorkspace tags an existing session into an additional
-// workspace. Two preconditions:
-//  1. The session exists in episodic.sessions (FK requirement;
-//     enforced ahead of the INSERT so we return the typed
-//     ErrSessionNotFound rather than a Postgres FK error).
-//  2. The session belongs to the caller — same per-user ACL the
-//     existing /forget and /share endpoints enforce.
-//
-// Returns added=true when the row was newly written, added=false
-// when an identical row already existed (ON CONFLICT DO NOTHING).
-func (r *Repository) AddSessionWorkspace(ctx context.Context, p AddSessionWorkspaceParams) (bool, error) {
-	var ownerID uuid.UUID
-	err := r.pool.QueryRow(ctx, `
-		SELECT user_id FROM episodic.sessions WHERE id = $1
-	`, p.SessionID).Scan(&ownerID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrSessionNotFound
-	}
-	if err != nil {
-		return false, fmt.Errorf("session lookup: %w", err)
-	}
-	if ownerID != p.UserID {
-		return false, ErrSessionNotOwned
-	}
-
-	tag, err := r.pool.Exec(ctx, `
-		INSERT INTO episodic.session_workspaces (session_id, workspace_id)
-		VALUES ($1, $2)
-		ON CONFLICT (session_id, workspace_id) DO NOTHING
-	`, p.SessionID, p.WorkspaceID)
-	if err != nil {
-		return false, fmt.Errorf("session_workspaces insert: %w", err)
-	}
-	return tag.RowsAffected() == 1, nil
-}
-
 // ---------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------

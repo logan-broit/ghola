@@ -57,8 +57,8 @@ func TestGoldenPath(t *testing.T) {
 
 	// Force both sietch files past the encoding watermark. We don't
 	// want to wait 5 minutes for the tick.
-	c.consolidate(agentA.ID)
-	c.consolidate(agentB.ID)
+	c.flush(agentA.ID)
+	c.flush(agentB.ID)
 
 	// Query terms distinctive to each turn; each should surface the
 	// matching event from the episodic tier (working tier alone

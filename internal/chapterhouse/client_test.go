@@ -681,51 +681,6 @@ func TestClient_NonSuccessSurfacesError(t *testing.T) {
 // workspace
 // ---------------------------------------------------------------------
 
-func TestAddSessionWorkspace_Happy(t *testing.T) {
-	srv := newServer(t, map[string]http.HandlerFunc{
-		"/v1/episodic/session_workspace": func(w http.ResponseWriter, r *http.Request) {
-			assertAuthHeader(t, r)
-			var body map[string]any
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			assert.Equal(t, "u1", body["user_id"])
-			assert.Equal(t, "s1", body["session_id"])
-			assert.Equal(t, "w1", body["workspace_id"])
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"added":true}`))
-		},
-	})
-	c := newClient(t, srv)
-
-	added, err := c.AddSessionWorkspace(context.Background(),
-		core.AddSessionWorkspaceInput{UserID: "u1", SessionID: "s1", WorkspaceID: "w1"})
-	require.NoError(t, err)
-	assert.True(t, added)
-}
-
-// 409 from chapterhouse — "session not yet persisted" — must surface
-// as *chapterhouse.StatusError so the ghola HTTP layer can re-emit
-// the status verbatim. Pinning the contract here prevents a future
-// refactor from silently swallowing the 409 into a generic error and
-// stealing the "consolidate first" guidance from the agent caller.
-func TestAddSessionWorkspace_Surface409(t *testing.T) {
-	srv := newServer(t, map[string]http.HandlerFunc{
-		"/v1/episodic/session_workspace": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"code":"CONFLICT","message":"session not yet persisted"}`))
-		},
-	})
-	c := newClient(t, srv)
-
-	_, err := c.AddSessionWorkspace(context.Background(),
-		core.AddSessionWorkspaceInput{UserID: "u1", SessionID: "s1", WorkspaceID: "w1"})
-	require.Error(t, err)
-
-	var statusErr *chapterhouse.StatusError
-	require.ErrorAs(t, err, &statusErr,
-		"caller-facing 409 must be a typed StatusError so the ghola HTTP layer can pass it through")
-	assert.Equal(t, http.StatusConflict, statusErr.StatusCode())
-}
-
 // ---------------------------------------------------------------------
 // semantic: manual consolidation trigger
 // ---------------------------------------------------------------------

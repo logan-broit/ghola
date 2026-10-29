@@ -42,7 +42,7 @@ func TestSessionResume_DaemonRestart(t *testing.T) {
 
 	// Force the encoding watermark past this event so it lives in
 	// episodic (Postgres), not just sietch (will be wiped on restart).
-	c.consolidate(sess.ID)
+	c.flush(sess.ID)
 
 	// Sanity: recall must see it right now.
 	c.recallAwait(user, marker, ev.ID, 5*time.Second)

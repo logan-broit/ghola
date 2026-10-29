@@ -81,11 +81,6 @@ type ChapterhouseClient interface {
 	QueryEpisodicMulti(ctx context.Context, q EpisodicMultiQuery) (EpisodicMultiResult, error)
 	ShareEpisodic(ctx context.Context, s ShareInput) (shareID string, err error)
 	ForgetEpisodic(ctx context.Context, userID string, eventIDs []string) (forgotten int, err error)
-	// AddSessionWorkspace tags an existing chapterhouse session into an
-	// additional workspace. Pre-consolidate the session row hasn't
-	// landed yet, so chapterhouse returns 409; the wire error surfaces
-	// as *chapterhouse.StatusError for the ghola HTTP layer to re-emit.
-	AddSessionWorkspace(ctx context.Context, in AddSessionWorkspaceInput) (added bool, err error)
 
 	QuerySemantic(ctx context.Context, q SemanticQuery) ([]RecallHit, error)
 

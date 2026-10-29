@@ -41,9 +41,6 @@ func (noopChapterhouse) ShareEpisodic(context.Context, core.ShareInput) (string,
 func (noopChapterhouse) ForgetEpisodic(context.Context, string, []string) (int, error) {
 	return 0, nil
 }
-func (noopChapterhouse) AddSessionWorkspace(context.Context, core.AddSessionWorkspaceInput) (bool, error) {
-	return true, nil
-}
 func (noopChapterhouse) QuerySemantic(context.Context, core.SemanticQuery) ([]core.RecallHit, error) {
 	return nil, nil
 }
@@ -148,8 +145,8 @@ func TestServer_EndToEndLoop(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &recallResp))
 	assert.NotEmpty(t, recallResp.Hits, "recall should see the just-recorded event")
 
-	// 4. /v1/consolidate — flush to the (no-op) chapterhouse.
-	resp, body = post(t, srv, "/v1/consolidate",
+	// 4. /v1/flush — flush to the (no-op) chapterhouse.
+	resp, body = post(t, srv, "/v1/flush",
 		map[string]string{"session_id": sessionID})
 	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
 
@@ -265,36 +262,6 @@ func TestServer_LoopbackGuardRejectsRemoteOrigin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, stdhttp.StatusForbidden, rec.Code)
-}
-
-// TestServer_ExpandSessionWorkspace_Happy pins the wire shape of
-// /v1/session_workspace: 200 OK + {"added": true} when the underlying
-// chapterhouse call succeeds.
-func TestServer_ExpandSessionWorkspace_Happy(t *testing.T) {
-	srv := newTestServer(t)
-
-	// First start a session (the noopChapterhouse stub returns
-	// (true, nil) regardless of state, so we don't need
-	// session-existence simulation).
-	cwd := "/test"
-	resp, body := post(t, srv, "/v1/session_start",
-		core.SessionStartInput{
-			UserID: testUserID,
-			Cwd:    &cwd,
-		})
-	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
-
-	resp, body = post(t, srv, "/v1/session_workspace", core.AddSessionWorkspaceInput{
-		UserID:      testUserID,
-		SessionID:   "sess-1",
-		WorkspaceID: "22222222-3333-4444-5555-666666666666",
-	})
-	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "body=%s", body)
-	var out struct {
-		Added bool `json:"added"`
-	}
-	require.NoError(t, json.Unmarshal(body, &out))
-	assert.True(t, out.Added)
 }
 
 // recordingChapterhouse captures the multi-ranking query args so the
@@ -528,35 +495,6 @@ func TestServer_Recall_SettleParamsOutOfRange400(t *testing.T) {
 		"out-of-range settle_params.lambda must return 400; body=%s", body)
 	assert.Contains(t, string(body), "lambda",
 		"error message must name the offending settle_params field")
-}
-
-// conflict409Chapterhouse is a test fake that satisfies
-// ChapterhouseClient and returns *StatusError{409} from
-// AddSessionWorkspace — proves the HTTP handler maps 409 from
-// chapterhouse to 409 to the caller.
-type conflict409Chapterhouse struct{ noopChapterhouse }
-
-func (conflict409Chapterhouse) AddSessionWorkspace(context.Context, core.AddSessionWorkspaceInput) (bool, error) {
-	return false, &chapterhouse.StatusError{
-		Status:  stdhttp.StatusConflict,
-		Path:    "/v1/episodic/session_workspace",
-		Message: "session not yet persisted",
-	}
-}
-
-// TestServer_ExpandSessionWorkspace_PassesThrough409 is load-bearing:
-// without 409 -> 409 mapping, an agent calling expand mid-conversation
-// would see a bare 500 and have no way to know "consolidate first" is
-// the fix.
-func TestServer_ExpandSessionWorkspace_PassesThrough409(t *testing.T) {
-	srv := newTestServerWithChapterhouse(t, conflict409Chapterhouse{})
-
-	resp, _ := post(t, srv, "/v1/session_workspace", core.AddSessionWorkspaceInput{
-		UserID:      testUserID,
-		SessionID:   "sess-x",
-		WorkspaceID: "11111111-2222-3333-4444-555555555555",
-	})
-	assert.Equal(t, stdhttp.StatusConflict, resp.StatusCode)
 }
 
 // ---------------------------------------------------------------------

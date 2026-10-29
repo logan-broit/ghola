@@ -6,7 +6,6 @@ import (
 	"errors"
 	stdhttp "net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -293,9 +292,6 @@ func (f *fakeChapterhouse) ForgetEpisodic(_ context.Context, uid string, ids []s
 	}{uid, ids})
 	return f.forgetCount, f.err
 }
-func (f *fakeChapterhouse) AddSessionWorkspace(_ context.Context, _ core.AddSessionWorkspaceInput) (bool, error) {
-	return true, f.err
-}
 func (f *fakeChapterhouse) QuerySemantic(ctx context.Context, q core.SemanticQuery) ([]core.RecallHit, error) {
 	f.semQueries = append(f.semQueries, q)
 	if f.semBlockUntilCtxDone {
@@ -503,15 +499,6 @@ func TestConsolidate_AllUnembedded_NoOp(t *testing.T) {
 	assert.Equal(t, 0, n)
 	assert.Empty(t, ch.ingests, "nothing embedded -> nothing ships")
 	assert.Empty(t, s.watermarks["sess"], "watermark must not advance")
-}
-
-func TestListSessions_DelegatesToSietch(t *testing.T) {
-	c, s, _, _ := newCore()
-	s.sessions = []core.Session{{ID: "a", UserID: "u1"}}
-
-	out, err := c.ListSessions(context.Background(), "u1")
-	require.NoError(t, err)
-	assert.Len(t, out, 1)
 }
 
 func TestRecord_EmbedsTextAndPersists(t *testing.T) {
@@ -789,29 +776,6 @@ func TestRecord_ExplicitSessionIDWinsOverCwd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "explicit", ev.SessionID)
 	assert.Empty(t, s.opened, "no implicit session creation when SessionID is set")
-}
-
-func TestBranch_RequiresParent(t *testing.T) {
-	c, _, _, _ := newCore()
-	_, err := c.Branch(context.Background(), core.RecordInput{
-		SessionID: "sess", UserID: "u1",
-		Event: core.Event{Type: "user", Text: strPtr("x")},
-	})
-	require.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "parent"))
-}
-
-func TestBranch_Happy(t *testing.T) {
-	c, s, _, _ := newCore()
-	parent := "parent-1"
-	ev, err := c.Branch(context.Background(), core.RecordInput{
-		SessionID: "sess", UserID: "u1", ParentID: &parent,
-		Event: core.Event{Type: "assistant", Text: strPtr("reply")},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, ev.ParentID)
-	assert.Equal(t, parent, *ev.ParentID)
-	assert.Len(t, s.events, 1)
 }
 
 func TestBookmark_RecordsLabel(t *testing.T) {
@@ -2137,30 +2101,6 @@ func TestShare_DelegatesToChapterhouse(t *testing.T) {
 	require.Len(t, ch.shares, 1)
 }
 
-func TestExpandSessionWorkspace_Happy(t *testing.T) {
-	c, _, _, _ := newCore()
-	// fakeChapterhouse's AddSessionWorkspace stub returns (true, nil)
-	// by default — verify ghola passes the inputs through.
-	added, err := c.ExpandSessionWorkspace(context.Background(), core.AddSessionWorkspaceInput{
-		UserID:      "u1",
-		SessionID:   "sess-1",
-		WorkspaceID: "11111111-2222-3333-4444-555555555555",
-	})
-	require.NoError(t, err)
-	assert.True(t, added)
-}
-
-func TestExpandSessionWorkspace_RejectsMissingFields(t *testing.T) {
-	c, _, _, _ := newCore()
-	_, err := c.ExpandSessionWorkspace(context.Background(), core.AddSessionWorkspaceInput{
-		UserID:    "u1",
-		SessionID: "sess-1",
-		// WorkspaceID empty
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "workspace_id")
-}
-
 // ---------------------------------------------------------------------
 // ConsolidateWorkspace — manual trigger for chapterhouse's episodic->
 // semantic consolidation batch. Distinct from Consolidate above
@@ -2276,9 +2216,6 @@ func TestInputValidation_MissingIDs(t *testing.T) {
 	require.Error(t, err)
 
 	require.Error(t, c.SessionEnd(ctx, ""))
-
-	_, err = c.ListSessions(ctx, "")
-	require.Error(t, err)
 
 	_, err = c.Record(ctx, core.RecordInput{UserID: "u1", Event: core.Event{Type: "user"}})
 	require.Error(t, err, "record without session_id")

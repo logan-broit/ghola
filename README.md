@@ -73,8 +73,7 @@ MCP tools surfaced (6 agent-facing): `record`, `recall`, `bookmark`,
 `session_id` is omitted the service derives a workspace from `cwd`
 and reuses or provisions a session inline (no `session_start`
 bookkeeping for the model). Lifecycle and admin operations
-(`session_start`, `session_end`, `list_sessions`, `branch`,
-`expand_session_workspace`, `share`, `consolidate`) stay reachable
+(`session_start`, `session_end`, `share`, `flush`) stay reachable
 over HTTP at `/v1/*` for hosts that drive memory programmatically;
 they're hidden from the model's tool catalog.
 

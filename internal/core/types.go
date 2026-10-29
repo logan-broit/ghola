@@ -2,7 +2,6 @@
 // local service exposes to agents. The API is:
 //
 //	record          append an event to the current session
-//	branch          fork a new child event from an existing parent
 //	bookmark        label an event for later "remember this point"
 //	navigate        move the session's current pointer
 //	recall          hybrid query fanning out across sietch (working)
@@ -11,12 +10,9 @@
 //	                attribution
 //	forget          mark events for deletion across tiers
 //	share           grant another user or the team visibility
-//	consolidate     force-run Pipeline A for the current session
-//	                (Phase 5 fills in the actual worker; 4.2 stubs
-//	                the hook)
+//	flush           ship one session's pending events to episodic now
 //	session_start   provision a new sietch file for a fresh session
 //	session_end     final Pipeline A flush + branch-coherence pass
-//	list_sessions   enumerate a user's episodic sessions
 //
 // The same Core type backs both protocol wrappings (HTTP/JSON in
 // cmd/ghola, MCP in cmd/ghola-mcp) — one behavioral surface, two
@@ -247,17 +243,6 @@ type ForgetInput struct {
 	SessionID string   `json:"session_id,omitempty"`
 	UserID    string   `json:"user_id"`
 	EventIDs  []string `json:"event_ids"`
-}
-
-// AddSessionWorkspaceInput tags an existing session into an additional
-// workspace. The session must already exist in chapterhouse (i.e.
-// consolidate has fired at least once); pre-consolidate calls return
-// 409 from the server and surface as *chapterhouse.StatusError to the
-// HTTP layer.
-type AddSessionWorkspaceInput struct {
-	UserID      string `json:"user_id"`
-	SessionID   string `json:"session_id"`
-	WorkspaceID string `json:"workspace_id"`
 }
 
 // ConsolidateWorkspaceInput is the request shape for

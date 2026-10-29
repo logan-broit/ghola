@@ -557,24 +557,6 @@ func (c *Client) ForgetEpisodic(ctx context.Context, userID string, eventIDs []s
 	return r.Forgotten, nil
 }
 
-// AddSessionWorkspace POSTs to /v1/episodic/session_workspace. The 409
-// pre-consolidate path is preserved by c.do's wrapping of non-2xx as
-// *StatusError — the ghola HTTP layer does errors.As to re-emit the
-// status to its caller (so MCP agents receive the "consolidate first"
-// guidance verbatim).
-func (c *Client) AddSessionWorkspace(ctx context.Context, in core.AddSessionWorkspaceInput) (bool, error) {
-	var r addSessionWorkspaceResp
-	body := addSessionWorkspaceReq{
-		UserID:      in.UserID,
-		SessionID:   in.SessionID,
-		WorkspaceID: in.WorkspaceID,
-	}
-	if err := c.do(ctx, "/v1/episodic/session_workspace", body, &r); err != nil {
-		return false, err
-	}
-	return r.Added, nil
-}
-
 // ConsolidateWorkspace POSTs to chapterhouse's
 // /v1/semantic/consolidate, the manual trigger for the episodic->
 // semantic consolidation batch (cluster closed sessions, enrich with

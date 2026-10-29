@@ -175,9 +175,9 @@ func (c *client) startSession(userID, agentKind string) sessionDTO {
 	return out.Session
 }
 
-func (c *client) consolidate(sessionID string) {
+func (c *client) flush(sessionID string) {
 	c.t.Helper()
-	c.post("/v1/consolidate", map[string]any{"session_id": sessionID}, nil)
+	c.post("/v1/flush", map[string]any{"session_id": sessionID}, nil)
 }
 
 // forget fans out a soft-delete across sietch + chapterhouse for the

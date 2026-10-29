@@ -42,9 +42,8 @@ at a single SHA, from one Go module (`go.mod` at the root).
 ## `internal/` — shared Go libraries
 
 - `internal/core/` — canonical memory operations (`record`, `recall`,
-  `branch`, `bookmark`, `navigate`, `share`, `consolidate`,
-  `session_start`, `session_end`, `list_sessions`, `forget`,
-  `expand_session_workspace`). Single source of truth for the ghola
+  `bookmark`, `navigate`, `share`, `flush`, `session_start`,
+  `session_end`, `forget`, `consolidate_workspace`). Single source of truth for the ghola
   local service.
 - `internal/sietch/` — per-session SQLite store. FTS5 + native float32
   embedding BLOBs (no sqlite-vec dep yet).

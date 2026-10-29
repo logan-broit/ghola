@@ -62,8 +62,7 @@ type toolSpec struct {
 
 // tools is the agent-facing MCP surface: six tools the model uses
 // turn-to-turn. The lifecycle / admin operations (session_start,
-// session_end, list_sessions, branch, expand_session_workspace,
-// share, consolidate) stay reachable over HTTP at /v1/* for hosts
+// session_end, share, flush) stay reachable over HTTP at /v1/* for hosts
 // that drive memory programmatically (pi-mono and friends) — they're
 // just hidden from the model's tool catalog so it doesn't have to
 // reason about session boundaries it has no good signal for.

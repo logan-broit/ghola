@@ -40,9 +40,6 @@ func (*recordingChapterhouse) ShareEpisodic(context.Context, core.ShareInput) (s
 func (*recordingChapterhouse) ForgetEpisodic(context.Context, string, []string) (int, error) {
 	return 0, nil
 }
-func (*recordingChapterhouse) AddSessionWorkspace(context.Context, core.AddSessionWorkspaceInput) (bool, error) {
-	return true, nil
-}
 func (*recordingChapterhouse) QuerySemantic(context.Context, core.SemanticQuery) ([]core.RecallHit, error) {
 	return nil, nil
 }

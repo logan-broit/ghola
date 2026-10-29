@@ -378,15 +378,6 @@ func (c *Core) SweepIdleSession(ctx context.Context, sessionID string) (bool, er
 	return true, nil
 }
 
-// ListSessions enumerates a user's sessions (sietch-visible slice
-// only for now — episodic listing lands with Pipeline B in Phase 8).
-func (c *Core) ListSessions(ctx context.Context, userID string) ([]Session, error) {
-	if userID == "" {
-		return nil, ErrMissingUserID
-	}
-	return c.Sietch.ListSessions(ctx, userID)
-}
-
 // Record appends an event to the current session. The embedding is
 // computed when absent.
 //
@@ -479,15 +470,6 @@ func (c *Core) BackfillEmbeddings(ctx context.Context, sessionID string) (int, e
 			return total, nil
 		}
 	}
-}
-
-// Branch starts a new child event from an existing parent and moves
-// the session's current pointer to the new node.
-func (c *Core) Branch(ctx context.Context, in RecordInput) (Event, error) {
-	if in.ParentID == nil || *in.ParentID == "" {
-		return Event{}, errors.New("parent_id required for branch")
-	}
-	return c.Record(ctx, in)
 }
 
 // Bookmark labels an event for later recall / review.
@@ -1358,26 +1340,6 @@ func (c *Core) Share(ctx context.Context, in ShareInput) (string, error) {
 		return "", errors.New("scope_id required")
 	}
 	return c.Chapterhouse.ShareEpisodic(ctx, in)
-}
-
-// ExpandSessionWorkspace tags an existing session into an additional
-// workspace. Used when conversation drift makes the session relevant
-// to a workspace beyond its primary at session_start. Pre-condition:
-// the session has already been consolidated into chapterhouse at
-// least once; otherwise the FK on session_workspaces.session_id
-// rejects the row and chapterhouse returns 409 (surfaced as
-// *chapterhouse.StatusError for the HTTP layer to re-emit).
-func (c *Core) ExpandSessionWorkspace(ctx context.Context, in AddSessionWorkspaceInput) (bool, error) {
-	if in.UserID == "" {
-		return false, ErrMissingUserID
-	}
-	if in.SessionID == "" {
-		return false, ErrMissingSessionID
-	}
-	if in.WorkspaceID == "" {
-		return false, errors.New("workspace_id required")
-	}
-	return c.Chapterhouse.AddSessionWorkspace(ctx, in)
 }
 
 // Consolidate flushes the pending events (after the watermark) to

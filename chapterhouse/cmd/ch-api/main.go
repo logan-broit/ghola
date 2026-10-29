@@ -192,7 +192,7 @@ func run() error {
 	// Manual consolidation trigger (POST /v1/semantic/consolidate) runs
 	// consolidation.RunWorkspace synchronously — the same code path the
 	// worker's nightly schedule calls (plan seam decision 1; distinct
-	// from ghola's own /v1/consolidate session-flush verb). Wired only
+	// from ghola's own /v1/flush session verb). Wired only
 	// when mentat is configured, matching the L1 reconciler gate above:
 	// clustering has nothing to do without mentat.
 	// The LLM client and digest embedder are both optional/nil-safe —
@@ -322,7 +322,6 @@ func buildRouter(
 			r.Post("/query", episodicHandler.Query)
 			r.Post("/share", episodicHandler.Share)
 			r.Post("/forget", episodicHandler.Forget)
-			r.Post("/session_workspace", episodicHandler.AddSessionWorkspace)
 		})
 
 		r.Route("/semantic", func(r chi.Router) {
@@ -334,7 +333,7 @@ func buildRouter(
 			r.Post("/query", semanticHandler.Query)
 			// Manual trigger for the episodic->semantic consolidation
 			// batch (cluster + enrich + label/digest). Distinct from
-			// ghola's own /v1/consolidate {session_id} session-flush
+			// ghola's own /v1/flush {session_id}
 			// verb — see internal/handler/semantic.go doc comment.
 			r.Post("/consolidate", semanticHandler.Consolidate)
 		})

@@ -16,8 +16,7 @@ info:
     Every recall path is workspace-scoped: requests must carry a
     `workspace_id`, and `episodic.session_workspaces` (N:N) determines
     which sessions each query sees. A session belongs to one workspace
-    at `session_start` (cwd-derived if not passed) and may be tagged
-    into additional workspaces via `/v1/episodic/session_workspace`.
+    at `session_start` (cwd-derived if not passed).
 
     All endpoints require `Authorization: Bearer <api-key>`.
 
@@ -196,43 +195,6 @@ paths:
                 $ref: "#/components/schemas/ForgetResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
 
-  /v1/episodic/session_workspace:
-    post:
-      tags: [episodic]
-      summary: Tag an existing session into an additional workspace
-      description: |
-        The Hybrid-1 expand-on-demand path. When a conversation drifts
-        into a topic outside its primary workspace, this endpoint adds
-        another `(session_id, workspace_id)` row so future workspace-
-        scoped recalls find the session under the new workspace too.
-
-        Idempotent — `ON CONFLICT DO NOTHING`. The response's `added`
-        field tells the caller whether a new row was written
-        (`true`) or the pair already existed (`false`).
-
-        Pre-condition: the session must already exist in
-        `episodic.sessions` (i.e. consolidate has fired at least once).
-        FK-guarded preconditions surface as `409 CONFLICT` with the
-        message body literally "session not yet persisted; consolidate
-        first" — agents can read it and know what to do.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AddSessionWorkspaceRequest"
-      responses:
-        "200":
-          description: Tag added (or already present)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AddSessionWorkspaceResponse"
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { $ref: "#/components/responses/Conflict" }
-
   /v1/semantic/query:
     post:
       tags: [semantic]
@@ -329,16 +291,6 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     Forbidden:
       description: Caller does not own the referenced resource
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    Conflict:
-      description: |
-        Precondition failed. For
-        `/v1/episodic/session_workspace`, this means the session
-        doesn't exist in `episodic.sessions` yet — the FK can't be
-        satisfied. The agent should call `/v1/episodic/ingest` (or
-        equivalently `consolidate` on the ghola side) first.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -534,29 +486,6 @@ components:
           type: array
           items: { $ref: "#/components/schemas/EpisodicMultiRankingHit" }
           description: "Present (possibly empty `[]`) iff `session_vector` was in the request's `rankings`."
-
-    AddSessionWorkspaceRequest:
-      type: object
-      required: [user_id, session_id, workspace_id]
-      properties:
-        user_id:      { $ref: "#/components/schemas/Uuid" }
-        session_id:
-          allOf: [{ $ref: "#/components/schemas/Uuid" }]
-          description: |
-            Required. Must reference an existing row in
-            `episodic.sessions`; pre-consolidate sessions cause a 409.
-        workspace_id: { $ref: "#/components/schemas/Uuid" }
-
-    AddSessionWorkspaceResponse:
-      type: object
-      required: [added]
-      properties:
-        added:
-          type: boolean
-          description: |
-            `true` if a new `session_workspaces` row was inserted.
-            `false` if an identical row already existed (idempotent
-            no-op via `ON CONFLICT DO NOTHING`).
 
     ShareRequest:
       type: object

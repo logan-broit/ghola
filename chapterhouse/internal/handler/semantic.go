@@ -193,8 +193,8 @@ func (h *SemanticHandler) Query(w http.ResponseWriter, r *http.Request) {
 //
 // Manual trigger for the episodic->semantic consolidation batch (cluster
 // closed sessions, enrich, optionally label/digest). Distinct from
-// ghola's own POST /v1/consolidate {session_id} + MCP `consolidate` verb,
-// which flush one session's pending sietch events to episodic — a
+// ghola's own POST /v1/flush {session_id},
+// which flushes one session's pending sietch events to episodic — a
 // different pipeline entirely. This endpoint and the chapterhouse
 // worker's nightly schedule both call consolidation.RunWorkspace, so
 // there is exactly one code path for the job (plan seam decision 1).

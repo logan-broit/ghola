@@ -102,16 +102,13 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/session_start", s.sessionStart)
 	s.mux.HandleFunc("POST /v1/session_end", s.sessionEnd)
-	s.mux.HandleFunc("POST /v1/list_sessions", s.listSessions)
 	s.mux.HandleFunc("POST /v1/record", s.record)
-	s.mux.HandleFunc("POST /v1/branch", s.branch)
 	s.mux.HandleFunc("POST /v1/bookmark", s.bookmark)
 	s.mux.HandleFunc("POST /v1/navigate", s.navigate)
 	s.mux.HandleFunc("POST /v1/recall", s.recall)
 	s.mux.HandleFunc("POST /v1/forget", s.forget)
 	s.mux.HandleFunc("POST /v1/share", s.share)
-	s.mux.HandleFunc("POST /v1/session_workspace", s.sessionWorkspace)
-	s.mux.HandleFunc("POST /v1/consolidate", s.consolidate)
+	s.mux.HandleFunc("POST /v1/flush", s.flush)
 	s.mux.HandleFunc("POST /v1/semantic/consolidate", s.consolidateWorkspace)
 	s.mux.HandleFunc("GET /health", s.health)
 }
@@ -273,26 +270,6 @@ func (s *Server) sessionEnd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		UserID string `json:"user_id"`
-	}
-	if err := decode(r, &req); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	if err := s.resolveUserID(&req.UserID); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	sessions, err := s.core.ListSessions(r.Context(), req.UserID)
-	if err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
-}
-
 func (s *Server) record(w http.ResponseWriter, r *http.Request) {
 	var in core.RecordInput
 	if err := decode(r, &in); err != nil {
@@ -320,24 +297,6 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request) {
 	// back. Zero it on the response copy — the full event (with
 	// embedding) lives in sietch and is returned by recall as needed.
 	ev.Embedding = nil
-	writeJSON(w, http.StatusOK, map[string]any{"event": ev})
-}
-
-func (s *Server) branch(w http.ResponseWriter, r *http.Request) {
-	var in core.RecordInput
-	if err := decode(r, &in); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	if err := s.resolveUserID(&in.UserID); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	ev, err := s.core.Branch(r.Context(), in)
-	if err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"event": ev})
 }
 
@@ -428,30 +387,9 @@ func (s *Server) share(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }
 
-// sessionWorkspace tags an existing session into an additional
-// workspace. The 409 from chapterhouse (session not yet consolidated)
-// surfaces here as 409 via the *StatusError pass-through in
-// handleErr — without that, agents would see opaque 500s and have no
-// way to know "consolidate first" is the fix.
-func (s *Server) sessionWorkspace(w http.ResponseWriter, r *http.Request) {
-	var in core.AddSessionWorkspaceInput
-	if err := decode(r, &in); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	if err := s.resolveUserID(&in.UserID); err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	added, err := s.core.ExpandSessionWorkspace(r.Context(), in)
-	if err != nil {
-		s.handleErr(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"added": added})
-}
-
-func (s *Server) consolidate(w http.ResponseWriter, r *http.Request) {
+// flush ships one session's pending sietch events to episodic now,
+// instead of waiting for the encoding worker. Used by the e2e tests.
+func (s *Server) flush(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string `json:"session_id"`
 	}
@@ -475,7 +413,7 @@ const consolidateWriteTimeout = 10 * time.Minute
 
 // consolidateWorkspace handles the manual trigger for chapterhouse's
 // episodic->semantic consolidation batch (cluster + enrich +
-// label/digest). Distinct from consolidate above, which flushes one
+// label/digest). Distinct from flush above, which ships one
 // session's pending sietch events to episodic — see
 // core.ConsolidateWorkspace's doc comment for the seam rationale.
 // Synchronous: chapterhouse runs the batch in-process, so this

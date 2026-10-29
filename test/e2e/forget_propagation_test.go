@@ -32,7 +32,7 @@ func TestForget_PropagatesAcrossTiers(t *testing.T) {
 	ev := c.recordText(sess.ID, user,
 		"Phase 11 Gate 4 probe — "+marker+" — this event should disappear after forget.")
 
-	c.consolidate(sess.ID)
+	c.flush(sess.ID)
 
 	// Pre-forget: recall must see the event.
 	pre := c.recallAwait(user, marker, ev.ID, 5*time.Second)
