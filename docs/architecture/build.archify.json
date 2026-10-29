@@ -6,7 +6,7 @@
     "output": "docs/architecture/build.html",
     "quality_profile": "showcase",
     "locale": "en",
-    "repository": { "url": "git@github.com:logan-broit/ghola.git", "provider": "github", "link_mode": "local-only", "revision": "282043c7617b74a2270ede5d86875d0765defb8e" }
+    "repository": { "url": "git@github.com:logan-broit/ghola.git", "provider": "github", "link_mode": "local-only", "revision": "30343ecf2d1edb70ef069454bffe0feae0817b03" }
   },
   "components": [
     { "id": "mod", "type": "backend", "label": "go module: ghola", "sublabel": "cmd/ + chapterhouse/cmd/", "pos": [40, 192], "size": [230, 72],
@@ -20,24 +20,24 @@
       "sources": [{ "path": "deploy/docker-compose/Dockerfile.python", "line": 1, "end_line": 14 }] },
 
     { "id": "s_ghola", "type": "backend", "label": "ghola :7421", "sublabel": "+ ghola-mcp on host", "pos": [810, 40], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 254, "end_line": 285 }] },
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 252, "end_line": 282 }] },
     { "id": "s_api", "type": "backend", "label": "chapterhouse :8080", "sublabel": "ch-api", "pos": [810, 120], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 183, "end_line": 225 }] },
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 181, "end_line": 223 }] },
     { "id": "s_init", "type": "backend", "label": "ch-init", "sublabel": "episodic + admin migrations", "pos": [810, 200], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 163, "end_line": 182 }] },
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 161, "end_line": 180 }] },
     { "id": "s_worker", "type": "backend", "label": "chapterhouse-worker", "sublabel": "ch-worker", "pos": [810, 280], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 226, "end_line": 253 }] },
-    { "id": "s_web", "type": "frontend", "label": "ch-web :8090", "sublabel": "admin console, profile web", "pos": [810, 360], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 286, "end_line": 299 }] },
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 224, "end_line": 251 }] },
+    { "id": "s_web", "type": "frontend", "label": "ch-admin", "sublabel": "CLI, run on demand", "pos": [810, 360], "size": [200, 56],
+      "sources": [{ "path": "chapterhouse/cmd/ch-admin/main.go", "line": 1, "end_line": 48 }] },
     { "id": "s_mentat", "type": "backend", "label": "mentat :8084", "sublabel": "CPU", "pos": [810, 470], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 89, "end_line": 114 }] },
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 87, "end_line": 112 }] },
     { "id": "s_truth", "type": "backend", "label": "truthsayer :8085", "sublabel": "GPU", "pos": [810, 558], "size": [200, 56],
-      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 115, "end_line": 141 }] }
+      "sources": [{ "path": "deploy/docker-compose/docker-compose.yml", "line": 113, "end_line": 139 }] }
   ],
   "boundaries": [
     { "kind": "region", "label": "source", "wraps": ["mod", "pysrc"], "pad": 16 },
     { "kind": "region", "label": "2 images", "wraps": ["img_go", "img_py"], "pad": 16 },
-    { "kind": "region", "label": "compose services, split by entrypoint", "wraps": ["s_ghola", "s_api", "s_init", "s_worker", "s_web", "s_mentat", "s_truth"], "pad": 16 }
+    { "kind": "region", "label": "binaries, picked by entrypoint", "wraps": ["s_ghola", "s_api", "s_init", "s_worker", "s_web", "s_mentat", "s_truth"], "pad": 16 }
   ],
   "connections": [
     { "from": "mod", "to": "img_go", "label": "go build ./cmd/...", "variant": "emphasis" },
@@ -46,7 +46,7 @@
     { "from": "img_go", "to": "s_api", "label": "ch-api" },
     { "from": "img_go", "to": "s_init", "label": "ch-init" },
     { "from": "img_go", "to": "s_worker", "label": "ch-worker" },
-    { "from": "img_go", "to": "s_web", "label": "ch-web", "variant": "dashed" },
+    { "from": "img_go", "to": "s_web", "label": "ch-admin", "variant": "dashed" },
     { "from": "img_py", "to": "s_mentat", "label": "uvicorn mentat" },
     { "from": "img_py", "to": "s_truth", "label": "uvicorn truthsayer" }
   ],
