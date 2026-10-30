@@ -170,6 +170,7 @@ def test_paper_main_all_empty_exits(tmp_path):
 def test_figures_written(tmp_path):
     """paper_main emits fig1-frontier.pdf and fig2-escalation.pdf: rc 0,
     files exist, nonzero size, and start with the PDF magic bytes."""
+    pytest.importorskip("matplotlib")  # figures need the optional [plot] extra
     out = tmp_path / "out"
     # selection family — extractive_relevance at budget 1000 and 2000
     _write_leaf(out, "extractive_relevance", 1000, 0, [("q1", 980, True), ("q2", 990, False)])

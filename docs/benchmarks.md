@@ -192,7 +192,8 @@ accuracy-vs-tokens trade; the best compressor sits furthest upper-left.
 
 n=120 (20/question-type, stratified subset of LongMemEval-S), reader+judge
 `claude-opus-4-8` via Claude Code, context from the `2026-05-17` retrieve run.
-Full methodology in [`docs/paper/`](paper/).
+Figures and the results table regenerate with `lme-qa-paper`
+(`bench/longmemeval/qa`, needs the `plot` extra).
 
 ![Rate-distortion frontier](assets/p5-rate-distortion-frontier.png)
 
