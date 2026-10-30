@@ -222,8 +222,8 @@ tokens regardless of payload). Sorted by mean rate, cheapest first.
 | lexical_relevance (BM25) | 2k | 1,994 | 82.7% | ±6.1 |
 | statistical_prune | 1k | 996 | 57.5% | ±8.9 |
 | statistical_prune | 2k | 1,996 | 66.7% | ±8.5 |
-| perplexity_prune (Qwen2.5-1.5B) | 1k | 995 | 46.7% | ±8.9 |
-| perplexity_prune (Qwen2.5-1.5B) | 2k | 1,995 | 56.7% | ±8.9 |
+| perplexity_prune (Qwen2.5-1.5B) | 1k | 994 | 52.5% | ±9.0 |
+| perplexity_prune (Qwen2.5-1.5B) | 2k | 1,992 | 60.0% | ±8.8 |
 | graph_community (jaccard) | 1k | 996 | 61.7% | ±8.7 |
 | graph_community (jaccard) | 2k | 1,996 | 56.7% | ±8.9 |
 | truncate_tokens | 1k | 1,000 | 25.0% | ±7.8 |
