@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -138,6 +139,11 @@ func Load() (*Config, error) {
 			Model:  envcfg.String("CONSOLIDATE_LLM_MODEL", "local-model"),
 			APIKey: envcfg.String("CONSOLIDATE_LLM_API_KEY", ""),
 		},
+	}
+
+	// Explicit empty disables the provider; only an unset URL uses the default.
+	if url, configured := os.LookupEnv("EMBEDDING_URL"); configured {
+		cfg.Embedding.URL = url
 	}
 
 	if err := cfg.validate(); err != nil {

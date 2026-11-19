@@ -11,6 +11,8 @@
 /.env
 /.env.local
 deploy/docker-compose/.env
+# Remote Podman may leave temporary build-secret staging files in the context.
+/podman-build-secret-*
 /coverage/
 /tmp/
 

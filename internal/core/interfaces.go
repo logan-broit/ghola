@@ -11,6 +11,9 @@ import (
 // HTTP server's request goroutines.
 type SietchStore interface {
 	OpenSession(ctx context.Context, s Session) error
+	// StartSessionOnce atomically creates a session and its creation receipt,
+	// or returns its current state on equivalent replay. It never reopens it.
+	StartSessionOnce(ctx context.Context, s Session, fingerprint string) (Session, error)
 	CloseSession(ctx context.Context, sessionID string) error
 	// MarkEnded stamps ended_at on the session row without closing the
 	// SQLite handle. SessionEnd calls this before Consolidate so the
@@ -25,6 +28,12 @@ type SietchStore interface {
 	GetSession(ctx context.Context, sessionID string) (Session, error)
 
 	RecordEvent(ctx context.Context, ev Event) (Event, error)
+	// ReplayEvent checks ownership and returns an existing receipt's current
+	// event before any embedding work. RecordEventOnce rechecks atomically.
+	ReplayEvent(ctx context.Context, sessionID, userID, sourceKey, fingerprint string) (Event, bool, error)
+	// RecordEventOnce assigns a chronological ID at append and commits the
+	// event, receipt, count and current pointer in one transaction.
+	RecordEventOnce(ctx context.Context, ev Event, sourceKey, fingerprint string) (Event, error)
 	SetBookmark(ctx context.Context, sessionID, eventID, label string) error
 
 	SetCurrent(ctx context.Context, sessionID, eventID string) error
@@ -62,7 +71,8 @@ type SietchStore interface {
 	// calls this only after the session is ended and fully consolidated,
 	// at which point the file is a redundant local cache of what
 	// chapterhouse already holds. Must be idempotent — removing an
-	// absent session is a no-op.
+	// absent session is a no-op. Receipt-bearing sessions return
+	// ErrReplayProtected: deleting them would erase replay identity.
 	RemoveSession(ctx context.Context, sessionID string) error
 }
 

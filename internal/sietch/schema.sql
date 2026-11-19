@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS events (
     state           TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','forgotten'))
 );
 
+-- Receipts outlive response loss and soft forgetting. Session creation uses
+-- operation='session_start', source_key='', event_id=NULL.
+CREATE TABLE IF NOT EXISTS ingest_receipts (
+    operation       TEXT NOT NULL CHECK (operation IN ('session_start', 'record')),
+    source_key      TEXT NOT NULL,
+    fingerprint     TEXT NOT NULL,
+    event_id        TEXT REFERENCES events(id),
+    PRIMARY KEY (operation, source_key)
+);
+
 CREATE INDEX IF NOT EXISTS events_parent    ON events(parent_id);
 CREATE INDEX IF NOT EXISTS events_bookmark  ON events(bookmark_label) WHERE bookmark_label IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_created   ON events(created_at);

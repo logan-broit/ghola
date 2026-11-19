@@ -3,17 +3,32 @@
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src
-RUN apk add --no-cache git
+# Optional approved CA bundle for proxy-inspected package downloads.
+RUN --mount=type=secret,id=corporate_ca \
+    if [ -s /run/secrets/corporate_ca ]; then export SSL_CERT_FILE=/run/secrets/corporate_ca; fi; \
+    apk add --no-cache git
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=secret,id=corporate_ca \
+    if [ -s /run/secrets/corporate_ca ]; then export SSL_CERT_FILE=/run/secrets/corporate_ca; fi; \
+    go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/ghola      ./cmd/ghola \
+RUN --mount=type=secret,id=corporate_ca \
+    if [ -s /run/secrets/corporate_ca ]; then export SSL_CERT_FILE=/run/secrets/corporate_ca; fi; \
+    CGO_ENABLED=0 go build -o /out/ghola      ./cmd/ghola \
  && CGO_ENABLED=0 go build -o /out/ghola-mcp  ./cmd/ghola-mcp
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata
+RUN --mount=type=secret,id=corporate_ca \
+    if [ -s /run/secrets/corporate_ca ]; then export SSL_CERT_FILE=/run/secrets/corporate_ca; fi; \
+    apk add --no-cache ca-certificates tzdata
 COPY --from=build /out/ghola      /usr/local/bin/ghola
 COPY --from=build /out/ghola-mcp  /usr/local/bin/ghola-mcp
+RUN addgroup -S -g 10001 ghola \
+ && adduser -S -D -H -u 10001 -G ghola ghola \
+ && mkdir -p /var/lib/ghola/sessions \
+ && chown -R 10001:10001 /var/lib/ghola
+ENV GHOLA_SESSIONS_DIR=/var/lib/ghola/sessions
+USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/ghola"]

@@ -40,7 +40,7 @@ const (
 // Config configures a Client. Zero-value fields fall back to defaults
 // (Timeout 30s, Retries 3, MaxBatch 64); Dimensions 0 means unknown.
 type Config struct {
-	BaseURL    string        // e.g. http://guild:8082
+	BaseURL    string        // e.g. http://guild:8082; empty disables embedding
 	Model      string        //
 	APIKey     string        // optional; sent as Bearer when set
 	Timeout    time.Duration // per-request; default 30s
@@ -126,6 +126,9 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 // returns vectors re-sorted into inputs order regardless of the
 // response's reported index ordering.
 func (c *Client) embedOnce(ctx context.Context, inputs []string) ([][]float32, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("embedding disabled: empty base URL")
+	}
 	body, err := json.Marshal(openaiEmbedRequest{Model: c.model, Input: inputs})
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)

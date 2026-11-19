@@ -15,6 +15,108 @@ native (Metal)                     docker compose (CPU)
                            internal
 ```
 
+## Start without models (Podman)
+
+Use this path when model downloads are unavailable. It starts Postgres, the
+migration runner, chapterhouse, its worker, mentat, and ghola. No Hugging Face
+access, embedder, reranker, or model weights are needed. Container images and
+normal Go/Python packages must still be downloadable. With a running Podman VM
+and `podman-compose` installed, run from the repository root:
+
+```bash
+podman compose -p ghola \
+  -f deploy/docker-compose/docker-compose.mac.yml \
+  -f deploy/docker-compose/docker-compose.no-models.yml up -d --build
+GHOLA_NO_MODELS=1 scripts/mac/smoke.sh
+```
+
+If a corporate proxy inspects package-download HTTPS, supply an existing,
+approved CA bundle as a build secret. For example, this laptop's bundle is at
+`~/.config/certs/combined-ca.pem`:
+
+```bash
+podman compose \
+  --podman-build-args="--secret=id=corporate_ca,src=$HOME/.config/certs/combined-ca.pem" \
+  -p ghola \
+  -f deploy/docker-compose/docker-compose.mac.yml \
+  -f deploy/docker-compose/docker-compose.no-models.yml up -d --build
+```
+
+The bundle is mounted only during build steps, not checked into Git or copied
+into the images. TLS verification remains enabled. This does not make blocked
+model hosts accessible; no model downloads are attempted in this mode.
+
+Ghola listens at `http://127.0.0.1:7421`; chapterhouse at `:8080` and mentat at
+`:8084`. Published ports remain loopback-only. An explicitly empty
+`EMBEDDING_URL` disables embedding requests; an unset variable still uses its
+normal default. `TRUTHSAYER_URL` is empty too, so reranking is disabled.
+
+Recording and current-session keyword recall work. Recall reports
+`degraded: ["embed"]`, which is expected in this mode. Unembedded text is kept
+in the persistent `ghola-sessions` SQLite volume, **not yet consolidated to
+Postgres**. Idle session expiry is disabled so cwd-scoped keyword recall keeps
+finding that text. Explicitly ending a session still removes it from implicit
+current-session recall; pass its session ID to search it until embeddings are
+available. Semantic search and semantic consolidation are not useful yet.
+
+To stop without deleting recorded data, run from the repository root:
+
+```bash
+podman compose -p ghola \
+  -f deploy/docker-compose/docker-compose.mac.yml \
+  -f deploy/docker-compose/docker-compose.no-models.yml down
+```
+
+To add models later, start and verify the native services described below
+(using approved model sources), then omit the no-models overlay while keeping
+project name `ghola`. The startup encoding worker will backfill embeddings and
+drain buffered events into Postgres. Keep the model at 1024 dimensions. Do not
+use `down -v`: that deletes both the buffered text and the database.
+
+```bash
+# From the repository root, after native :8082 and :8085 are ready:
+podman compose -p ghola -f deploy/docker-compose/docker-compose.mac.yml up -d
+scripts/mac/smoke.sh
+```
+
+## Non-root receiver and existing-volume upgrades
+
+The receiver image runs as UID/GID `10001:10001`. Both Compose manifests mount
+`ghola-sessions` at `/var/lib/ghola/sessions`, selected by
+`GHOLA_SESSIONS_DIR`. Under project `ghola`, the existing volume remains
+`ghola_ghola-sessions`; changing its container destination does not replace it.
+Rootless Podman alone does not make the application a non-root container user.
+
+Before upgrading a legacy root-owned volume, preserve the old image and
+configuration, stop only the receiver, and export a cold backup. Validate the
+archive, SQLite integrity, and record counts before changing ownership. Apply
+UID/GID `10001:10001` only to that verified volume, through `podman unshare` in
+the owning Podman VM/user namespace. Do not recursively chown the storage
+parent, use `down -v`, or replace the volume. Recreate only `ghola` with
+`--no-deps --no-build`, then check its UID, volume identity, loopback port,
+existing data, and other containers' IDs/start times.
+
+Inspect native container dependencies **before any recovery restart**. During
+the 2026-09-17 migration, restarting the old receiver after a backup-reader
+failure also restarted the completed `ch-init` container. It exited zero and
+the migration ledger confirmed no new migrations. The later `--no-deps`
+receiver recreation did not restart other services; the new receiver has no
+native Podman dependencies. Do not assume that starting one legacy container
+has no dependency side effects.
+
+The host Apple SQLite 3.51 CLI rejected a plain read-only open of the cold
+WAL-mode backup. An immutable URI read passed integrity checks on the same
+bytes, as did a writable copy. Use immutable reads only for verified cold,
+checkpointed copies without a nonempty WAL—not for live databases.
+
+After building the receiver image, this isolated check creates and removes
+only its own temporary container/volume. It checks non-root writes, replay,
+restart persistence, and complete Unicode text without touching deployed data:
+
+```bash
+node scripts/mac/check-receiver-image.mjs localhost/ghola/ghola:dev
+```
+
 ## 1. Prereqs (one-time)
 
 ```bash
@@ -93,7 +195,7 @@ docker compose -f docker-compose.mac.yml ps
 
 ```bash
 scripts/mac/smoke.sh
-# expect: SMOKE OK: non-degraded, marker retrievable
+# expect: SMOKE OK: marker retrievable; degraded=[]
 ```
 
 ## 6. The user id
@@ -128,3 +230,5 @@ docker compose -f docker-compose.mac.yml down -v    # also wipe the store (postg
 - **arm64 build issues** — the compose stack builds from `Dockerfile.chapterhouse`
   and `Dockerfile.ghola` (multi-arch). The `--platform=linux/amd64`-locked
   `_chapterhouse/ch-server/Dockerfile` is NOT used by this compose file.
+
+Attribution: Pi (no-model startup, non-root receiver migration, and smoke checks).

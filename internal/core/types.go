@@ -84,6 +84,9 @@ type Session struct {
 type RecordInput struct {
 	SessionID string `json:"session_id"`
 	UserID    string `json:"user_id"`
+	// SourceKey opts into replay within an explicit session. Event IDs and
+	// embeddings are server-owned on this path; freeze the input for retries.
+	SourceKey string `json:"source_key,omitempty"`
 	// Cwd is optional. When SessionID is empty, Record uses Cwd to
 	// derive a workspace via WorkspaceForCwd and either reuses the
 	// most-recent open session for (UserID, workspace) or provisions
@@ -203,12 +206,43 @@ type SettleParams struct {
 // consolidated yet (mid-tick, open session, or pre-migration) —
 // readers must fall back to Content in that case.
 type RecallHit struct {
-	Tier             string  `json:"tier"` // "working" | "episodic" | "semantic"
-	ID               string  `json:"id"`
-	Score            float64 `json:"score"`
-	Content          string  `json:"content"`
-	SessionID        *string `json:"session_id,omitempty"`
-	SessionChunkText string  `json:"session_chunk_text,omitempty"`
+	Tier             string            `json:"tier"` // "working" | "episodic" | "semantic"
+	ID               string            `json:"id"`
+	Score            float64           `json:"score"`
+	Content          string            `json:"content"`
+	SessionID        *string           `json:"session_id,omitempty"`
+	SessionChunkText string            `json:"session_chunk_text,omitempty"`
+	Provenance       *RecallProvenance `json:"provenance,omitempty"`
+}
+
+// RecallProvenance is an allowlisted producer assertion, not authenticated identity
+// or independent verification. Absent fields are unknown, not negative claims.
+// Currently only recognized Pi metadata from working events is projected.
+type RecallProvenance struct {
+	Producer     string            `json:"producer"`
+	Actor        string            `json:"actor,omitempty"`
+	Verification string            `json:"verification,omitempty"`
+	CapturedAt   string            `json:"captured_at,omitempty"`
+	Annotation   *bool             `json:"annotation,omitempty"`
+	Pi           *RecallPiSource   `json:"pi,omitempty"`
+	Repository   *RecallRepository `json:"repository,omitempty"`
+}
+
+// RecallPiSource references the original Pi journal without exposing journal paths.
+type RecallPiSource struct {
+	SessionID         string `json:"session_id,omitempty"`
+	EntryID           string `json:"entry_id,omitempty"`
+	ParentEntryID     string `json:"parent_entry_id,omitempty"`
+	PreviousEpisodeID string `json:"previous_episode_id,omitempty"`
+	JournalPersisted  *bool  `json:"journal_persisted,omitempty"`
+	Timestamp         string `json:"timestamp,omitempty"`
+	StopReason        string `json:"stop_reason,omitempty"`
+}
+
+// RecallRepository describes the producer's checkout, not every inspected file.
+type RecallRepository struct {
+	Revision string `json:"revision,omitempty"`
+	Dirty    *bool  `json:"dirty,omitempty"`
 }
 
 // RecallResult is the full response: merged list + per-tier counts
@@ -274,6 +308,8 @@ type ConsolidateWorkspaceInput struct {
 
 // SessionStartInput for `session_start`.
 type SessionStartInput struct {
+	// SessionID opts into durable creation replay. Omit for a fresh server ID.
+	SessionID    string  `json:"session_id,omitempty"`
 	UserID       string  `json:"user_id"`
 	WorkspaceID  string  `json:"workspace_id,omitempty"`
 	AgentKind    *string `json:"agent_kind,omitempty"`

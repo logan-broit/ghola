@@ -136,6 +136,56 @@ func (s *Store) OpenSession(ctx context.Context, sess core.Session) error {
 	return err
 }
 
+// StartSessionOnce keeps the receipt and creation in one write transaction.
+// INSERT is deliberately first: a deferred read-then-write transaction can
+// lose a concurrent creation race or fail its SQLite snapshot upgrade.
+func (s *Store) StartSessionOnce(ctx context.Context, sess core.Session, fingerprint string) (core.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	db, err := s.conn(sess.ID)
+	if err != nil {
+		return core.Session{}, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Session{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO session (id, user_id, started_at, workspace_id, cwd, git_branch, agent_kind, source_device)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		sess.ID, sess.UserID, sess.StartedAt.UnixMilli(), nullStringFromValue(sess.WorkspaceID),
+		nullString(sess.Cwd), nullString(sess.GitBranch), nullString(sess.AgentKind), nullString(sess.SourceDevice))
+	if err != nil {
+		return core.Session{}, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return core.Session{}, err
+	}
+	if n == 1 {
+		_, err = tx.ExecContext(ctx, `INSERT INTO ingest_receipts (operation, source_key, fingerprint)
+			VALUES ('session_start', '', ?)`, fingerprint)
+		if err != nil {
+			return core.Session{}, err
+		}
+	} else {
+		var previous string
+		err := tx.QueryRowContext(ctx, `SELECT fingerprint FROM ingest_receipts
+			WHERE operation = 'session_start' AND source_key = ''`).Scan(&previous)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && previous != fingerprint) {
+			return core.Session{}, core.ErrReplayConflict
+		}
+		if err != nil {
+			return core.Session{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Session{}, err
+	}
+	return sessionRow(ctx, db, sess.ID)
+}
+
 // MarkEnded stamps the session row's ended_at without closing the
 // SQLite handle. Split out from CloseSession so SessionEnd can record
 // the end timestamp before Consolidate runs — Consolidate ships the
@@ -207,12 +257,28 @@ func (s *Store) RemoveSession(ctx context.Context, sessionID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if db, ok := s.conns[sessionID]; ok {
-		if err := db.Close(); err != nil {
-			return fmt.Errorf("close %s: %w", sessionID, err)
-		}
-		delete(s.conns, sessionID)
+	if _, err := os.Stat(s.pathFor(sessionID)); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
 	}
+	db, err := s.conn(sessionID)
+	if err != nil {
+		return err
+	}
+	var receipts bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ingest_receipts)`).Scan(&receipts); err != nil {
+		return err
+	}
+	// ponytail: retain receipt-bearing files; archive-backed receipts are needed
+	// before reclaiming their event cache without allowing replay resurrection.
+	if receipts {
+		return core.ErrReplayProtected
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", sessionID, err)
+	}
+	delete(s.conns, sessionID)
 	base := s.pathFor(sessionID)
 	for _, p := range []string{base, base + "-wal", base + "-shm"} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -241,6 +307,22 @@ func (s *Store) RecordEvent(ctx context.Context, ev core.Event) (core.Event, err
 		return core.Event{}, err
 	}
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Event{}, err
+	}
+	defer tx.Rollback()
+	stored, err := insertEvent(ctx, tx, ev)
+	if err != nil {
+		return core.Event{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Event{}, err
+	}
+	return stored, nil
+}
+
+func insertEvent(ctx context.Context, tx *sql.Tx, ev core.Event) (core.Event, error) {
 	raw := []byte(ev.RawEvent)
 	if len(raw) == 0 {
 		raw = []byte("{}")
@@ -249,7 +331,7 @@ func (s *Store) RecordEvent(ctx context.Context, ev core.Event) (core.Event, err
 	tags, _ := json.Marshal(defaultStringSlice(ev.Tags))
 	embBlob := packFloat32(ev.Embedding)
 
-	_, err = db.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO events (
 			id, parent_id, session_id, user_id, request_id,
 			type, role, text, tool_name, tool_use_id,
@@ -276,7 +358,7 @@ func (s *Store) RecordEvent(ctx context.Context, ev core.Event) (core.Event, err
 		return core.Event{}, fmt.Errorf("insert event: %w", err)
 	}
 
-	if _, err := db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE session SET event_count = event_count + 1, last_event_at = ? WHERE id = ?`,
 		ev.CreatedAt.UnixMilli(), ev.SessionID,
 	); err != nil {
@@ -342,7 +424,7 @@ func (s *Store) SearchVector(ctx context.Context, sessionID string, emb []float3
 	}
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, COALESCE(text, ''), embedding
+		SELECT id, COALESCE(text, ''), embedding, `+recallProvenanceSQL+`
 		FROM events
 		WHERE embedding IS NOT NULL AND state = 'active'
 	`)
@@ -352,21 +434,21 @@ func (s *Store) SearchVector(ctx context.Context, sessionID string, emb []float3
 	defer rows.Close()
 
 	type candidate struct {
-		id, text string
-		sim      float64
+		id, text, raw string
+		sim           float64
 	}
 	var cands []candidate
 	for rows.Next() {
-		var id, text string
+		var id, text, raw string
 		var blob []byte
-		if err := rows.Scan(&id, &text, &blob); err != nil {
+		if err := rows.Scan(&id, &text, &blob, &raw); err != nil {
 			return nil, err
 		}
 		other := unpackFloat32(blob)
 		if len(other) != len(emb) {
 			continue
 		}
-		cands = append(cands, candidate{id, text, cosine(emb, other)})
+		cands = append(cands, candidate{id, text, raw, cosine(emb, other)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -381,11 +463,12 @@ func (s *Store) SearchVector(ctx context.Context, sessionID string, emb []float3
 	out := make([]core.RecallHit, 0, len(cands))
 	for _, c := range cands {
 		out = append(out, core.RecallHit{
-			Tier:      "working",
-			ID:        c.id,
-			Score:     c.sim,
-			Content:   c.text,
-			SessionID: &sid,
+			Tier:       "working",
+			ID:         c.id,
+			Score:      c.sim,
+			Content:    c.text,
+			SessionID:  &sid,
+			Provenance: recallProvenance(c.raw),
 		})
 	}
 	return out, nil
@@ -407,7 +490,7 @@ func (s *Store) SearchFTS(ctx context.Context, sessionID, text string, limit int
 	// downstream merge logic (higher = better) aligns with the vector
 	// pathway.
 	rows, err := db.QueryContext(ctx, `
-		SELECT e.id, COALESCE(e.text, ''), -bm25(events_fts)
+		SELECT e.id, COALESCE(e.text, ''), -bm25(events_fts), `+recallProvenanceSQL+`
 		FROM events_fts
 		JOIN events e ON e.rowid = events_fts.rowid
 		WHERE events_fts MATCH ? AND e.state = 'active'
@@ -422,13 +505,14 @@ func (s *Store) SearchFTS(ctx context.Context, sessionID, text string, limit int
 	sid := sessionID
 	var out []core.RecallHit
 	for rows.Next() {
-		var id, t string
+		var id, t, raw string
 		var score float64
-		if err := rows.Scan(&id, &t, &score); err != nil {
+		if err := rows.Scan(&id, &t, &score, &raw); err != nil {
 			return nil, err
 		}
 		out = append(out, core.RecallHit{
 			Tier: "working", ID: id, Score: score, Content: t, SessionID: &sid,
+			Provenance: recallProvenance(raw),
 		})
 	}
 	return out, rows.Err()
@@ -496,13 +580,17 @@ func (s *Store) readSessionRow(ctx context.Context, sessionID string) (core.Sess
 	if err != nil {
 		return core.Session{}, err
 	}
+	return sessionRow(ctx, db, sessionID)
+}
+
+func sessionRow(ctx context.Context, db *sql.DB, sessionID string) (core.Session, error) {
 	var (
-		id, uid string
-		started, ended, lastEvent sql.NullInt64
-		eventCount                int
+		id, uid                                                       string
+		started, ended, lastEvent                                     sql.NullInt64
+		eventCount                                                    int
 		summary, workspaceID, cwd, gitBranch, agentKind, sourceDevice sql.NullString
 	)
-	err = db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 		SELECT id, user_id, started_at, ended_at, last_event_at, event_count,
 		       summary, workspace_id, cwd, git_branch, agent_kind, source_device
 		FROM session WHERE id = ?
@@ -606,16 +694,8 @@ func (s *Store) PendingEvents(ctx context.Context, sessionID, afterEventID strin
 		return nil, err
 	}
 
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, parent_id, session_id, user_id, request_id,
-		       type, role, text, tool_name, tool_use_id,
-		       tool_input, tool_output, bookmark_label,
-		       cwd, git_branch, agent_id, is_sidechain, model,
-		       raw_event, embedding, entities, tags, source_device, created_at
-		FROM events
-		WHERE id > ? AND state = 'active'
-		ORDER BY id ASC
-	`, afterEventID)
+	rows, err := db.QueryContext(ctx, `SELECT `+eventColumns+` FROM events
+		WHERE id > ? AND state = 'active' ORDER BY id ASC`, afterEventID)
 	if err != nil {
 		return nil, err
 	}
@@ -623,51 +703,10 @@ func (s *Store) PendingEvents(ctx context.Context, sessionID, afterEventID strin
 
 	var out []core.Event
 	for rows.Next() {
-		var ev core.Event
-		var (
-			parentID, requestID, role, text, toolName, toolUseID,
-			bookmarkLabel, cwd, gitBranch, agentID, model, sourceDevice sql.NullString
-			toolInput, toolOutput, rawEvent                             sql.NullString
-			entities, tags                                              string
-			emb                                                         []byte
-			isSidechain                                                 int
-			createdAtMs                                                 int64
-		)
-		if err := rows.Scan(
-			&ev.ID, &parentID, &ev.SessionID, &ev.UserID, &requestID,
-			&ev.Type, &role, &text, &toolName, &toolUseID,
-			&toolInput, &toolOutput, &bookmarkLabel,
-			&cwd, &gitBranch, &agentID, &isSidechain, &model,
-			&rawEvent, &emb, &entities, &tags, &sourceDevice, &createdAtMs,
-		); err != nil {
+		ev, err := scanEvent(rows)
+		if err != nil {
 			return nil, err
 		}
-		ev.ParentID = stringPtr(parentID)
-		ev.RequestID = stringPtr(requestID)
-		ev.Role = stringPtr(role)
-		ev.Text = stringPtr(text)
-		ev.ToolName = stringPtr(toolName)
-		ev.ToolUseID = stringPtr(toolUseID)
-		if toolInput.Valid {
-			ev.ToolInput = json.RawMessage(toolInput.String)
-		}
-		if toolOutput.Valid {
-			ev.ToolOutput = json.RawMessage(toolOutput.String)
-		}
-		ev.BookmarkLabel = stringPtr(bookmarkLabel)
-		ev.Cwd = stringPtr(cwd)
-		ev.GitBranch = stringPtr(gitBranch)
-		ev.AgentID = stringPtr(agentID)
-		ev.IsSidechain = isSidechain != 0
-		ev.Model = stringPtr(model)
-		if rawEvent.Valid {
-			ev.RawEvent = json.RawMessage(rawEvent.String)
-		}
-		ev.Embedding = unpackFloat32(emb)
-		_ = json.Unmarshal([]byte(entities), &ev.Entities)
-		_ = json.Unmarshal([]byte(tags), &ev.Tags)
-		ev.SourceDevice = stringPtr(sourceDevice)
-		ev.CreatedAt = time.UnixMilli(createdAtMs).UTC()
 		out = append(out, ev)
 	}
 	return out, rows.Err()

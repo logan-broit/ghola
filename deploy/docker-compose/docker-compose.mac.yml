@@ -157,7 +157,7 @@ services:
     ports:
       - "127.0.0.1:${GHOLA_PORT:-7421}:7421"
     volumes:
-      - ghola-sessions:/root/.ghola/sessions
+      - ghola-sessions:/var/lib/ghola/sessions
 
 volumes:
   postgres-data:

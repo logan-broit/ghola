@@ -156,7 +156,7 @@ func (s *Server) recover(next http.Handler) http.Handler {
 
 func decode(r *http.Request, v any) error {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		return err
+		return fmt.Errorf("%w: invalid request body: %w", core.ErrValidation, err)
 	}
 	return nil
 }
@@ -211,8 +211,8 @@ func (s *Server) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	// Classify in priority order: chapterhouse 4xx propagates verbatim
-	// (caller corrects the input), then core.ErrValidation -> 400, else
-	// 500. errors.Is replaces the prior strings.Contains heuristic that
+	// (caller corrects the input), replay conflict -> 409, absent session ->
+	// 404, validation -> 400, otherwise 500. errors.Is replaces the prior strings.Contains heuristic that
 	// silently misclassified any internal error containing "must" or
 	// "required" as a 400.
 	status := http.StatusInternalServerError
@@ -220,6 +220,10 @@ func (s *Server) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.As(err, &se) && se.Status >= 400 && se.Status < 500:
 		status = se.Status
+	case errors.Is(err, core.ErrReplayConflict):
+		status = http.StatusConflict
+	case errors.Is(err, core.ErrSessionNotFound):
+		status = http.StatusNotFound
 	case errors.Is(err, core.ErrValidation):
 		status = http.StatusBadRequest
 	}
@@ -237,7 +241,10 @@ func (s *Server) handleErr(w http.ResponseWriter, r *http.Request, err error) {
 // ---------------------------------------------------------------------
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "ok",
+		"capabilities": map[string]int{"session_replay": 1, "record_replay": 1},
+	})
 }
 
 func (s *Server) sessionStart(w http.ResponseWriter, r *http.Request) {

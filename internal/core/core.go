@@ -1,7 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -172,6 +176,32 @@ func ValidateEventType(t string) error {
 // GCSession treats it as an orphan to remove.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrReplayConflict means an identity is already bound to different input.
+var ErrReplayConflict = errors.New("replay conflict")
+
+// ErrReplayProtected prevents GC from discarding durable replay receipts.
+var ErrReplayProtected = errors.New("session has replay receipts")
+
+func replayFingerprint(input any) (string, error) {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid replay payload: %w", ErrValidation, err)
+	}
+	// Normalize object order/whitespace in RawMessage fields without rounding
+	// large integers through float64. Array order and numeric spelling matter.
+	var canonical any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&canonical); err != nil {
+		return "", fmt.Errorf("%w: invalid replay JSON: %w", ErrValidation, err)
+	}
+	data, err = json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
 // SessionStart provisions a new sietch file + inserts the session row.
 func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session, error) {
 	if in.UserID == "" {
@@ -198,8 +228,19 @@ func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session,
 		return Session{}, ErrMissingWorkspaceOrCwd
 	}
 
+	id := in.SessionID
+	if id == "" {
+		id = NewID()
+	} else {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			return Session{}, fmt.Errorf("%w: session_id must be a valid UUID", ErrValidation)
+		}
+		id = parsed.String()
+		in.SessionID = id
+	}
 	s := Session{
-		ID:           NewID(),
+		ID:           id,
 		UserID:       in.UserID,
 		StartedAt:    c.Now(),
 		WorkspaceID:  wsID.String(),
@@ -207,6 +248,14 @@ func (c *Core) SessionStart(ctx context.Context, in SessionStartInput) (Session,
 		Cwd:          in.Cwd,
 		GitBranch:    in.GitBranch,
 		SourceDevice: in.SourceDevice,
+	}
+	if in.SessionID != "" {
+		in.WorkspaceID = s.WorkspaceID
+		fingerprint, err := replayFingerprint(in)
+		if err != nil {
+			return Session{}, err
+		}
+		return c.Sietch.StartSessionOnce(ctx, s, fingerprint)
 	}
 	if err := c.Sietch.OpenSession(ctx, s); err != nil {
 		return Session{}, fmt.Errorf("open session: %w", err)
@@ -401,6 +450,26 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 	if in.UserID == "" {
 		return Event{}, ErrMissingUserID
 	}
+	if in.SourceKey != "" {
+		if len(in.SourceKey) > 512 || strings.TrimSpace(in.SourceKey) == "" ||
+			strings.ContainsRune(in.SourceKey, '\x00') || !utf8.ValidString(in.SourceKey) {
+			return Event{}, fmt.Errorf("%w: source_key must be nonblank UTF-8, at most 512 bytes, without NUL", ErrValidation)
+		}
+		if in.SessionID == "" {
+			return Event{}, ErrMissingSessionID
+		}
+		sid, err := uuid.Parse(in.SessionID)
+		if err != nil {
+			return Event{}, fmt.Errorf("%w: session_id must be a valid UUID", ErrValidation)
+		}
+		in.SessionID = sid.String()
+		if in.Event.ID != "" || len(in.Event.Embedding) != 0 {
+			return Event{}, fmt.Errorf("%w: source_key requires server-assigned event ID and embedding", ErrValidation)
+		}
+		if err := ValidateEventType(in.Event.Type); err != nil {
+			return Event{}, err
+		}
+	}
 	if in.SessionID == "" {
 		sid, err := c.resolveImplicitSession(ctx, in)
 		if err != nil {
@@ -410,13 +479,27 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 	}
 
 	ev := in.Event
-	if ev.ID == "" {
-		ev.ID = NewID()
-	}
 	ev.SessionID = in.SessionID
 	ev.UserID = in.UserID
 	if ev.ParentID == nil && in.ParentID != nil {
 		ev.ParentID = in.ParentID
+	}
+	var fingerprint string
+	if in.SourceKey != "" {
+		if len(ev.RawEvent) == 0 {
+			ev.RawEvent = json.RawMessage(`{}`)
+		}
+		var err error
+		fingerprint, err = replayFingerprint(ev)
+		if err != nil {
+			return Event{}, err
+		}
+		stored, found, err := c.Sietch.ReplayEvent(ctx, ev.SessionID, ev.UserID, in.SourceKey, fingerprint)
+		if err != nil || found {
+			return stored, err
+		}
+	} else if ev.ID == "" {
+		ev.ID = NewID()
 	}
 	if ev.CreatedAt.IsZero() {
 		ev.CreatedAt = c.Now()
@@ -437,6 +520,9 @@ func (c *Core) Record(ctx context.Context, in RecordInput) (Event, error) {
 		}
 	}
 
+	if in.SourceKey != "" {
+		return c.Sietch.RecordEventOnce(ctx, ev, in.SourceKey, fingerprint)
+	}
 	stored, err := c.Sietch.RecordEvent(ctx, ev)
 	if err != nil {
 		return Event{}, fmt.Errorf("record (session=%q): %w", ev.SessionID, err)
@@ -860,7 +946,9 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 		})
 	}
 
-	if in.IncludeSemant {
+	// Semantic recall requires a query vector; unlike FTS it cannot run
+	// when embedding is disabled or unavailable.
+	if in.IncludeSemant && len(emb) > 0 {
 		attempted++
 		run(func() {
 			tctx, cancel := context.WithTimeout(ctx, c.TierTimeout)
@@ -1026,6 +1114,16 @@ func (c *Core) Recall(ctx context.Context, in RecallInput) (RecallResult, error)
 			continue
 		}
 		best.Score = sd.Score
+		// Carry working-event provenance only across the same event AND session.
+		// Session summaries and semantic mnemes do not inherit event assertions.
+		switch best.Tier {
+		case "working", "episodic", "keyword", "primitives":
+			local, ok := sietchByKey[sd.ID]
+			if ok && best.Provenance == nil && local.SessionID != nil && best.SessionID != nil &&
+				*local.SessionID != "" && *local.SessionID == *best.SessionID {
+				best.Provenance = local.Provenance
+			}
+		}
 		// Surface the session-scoped chunk text on the exemplar so the
 		// output hit carries it (downstream HTTP/MCP clients see it)
 		// AND so rerankAndFuse can read it without a parallel param.
@@ -1513,6 +1611,9 @@ func (c *Core) GCSession(ctx context.Context, sessionID string) (bool, error) {
 		// Schema-only orphan (file recreated by create-on-open after
 		// GC): nothing to consolidate, nothing to keep — remove it.
 		if rmErr := c.Sietch.RemoveSession(ctx, sessionID); rmErr != nil {
+			if errors.Is(rmErr, ErrReplayProtected) {
+				return false, nil
+			}
 			return false, fmt.Errorf("gc remove orphan (session=%q): %w", sessionID, rmErr)
 		}
 		return true, nil
@@ -1542,6 +1643,9 @@ func (c *Core) GCSession(ctx context.Context, sessionID string) (bool, error) {
 		return false, nil
 	}
 	if err := c.Sietch.RemoveSession(ctx, sessionID); err != nil {
+		if errors.Is(err, ErrReplayProtected) {
+			return false, nil
+		}
 		return false, fmt.Errorf("gc remove (session=%q): %w", sessionID, err)
 	}
 	return true, nil

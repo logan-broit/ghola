@@ -87,6 +87,9 @@ func (f *fakeSietch) OpenSession(_ context.Context, s core.Session) error {
 	f.sessionRows[s.ID] = s
 	return nil
 }
+func (f *fakeSietch) StartSessionOnce(context.Context, core.Session, string) (core.Session, error) {
+	return core.Session{}, errors.New("replay tests require real sietch storage")
+}
 func (f *fakeSietch) CloseSession(_ context.Context, id string) error {
 	f.closed = append(f.closed, id)
 	return nil
@@ -112,6 +115,12 @@ func (f *fakeSietch) GetSession(_ context.Context, id string) (core.Session, err
 func (f *fakeSietch) RecordEvent(_ context.Context, ev core.Event) (core.Event, error) {
 	f.events = append(f.events, ev)
 	return ev, nil
+}
+func (f *fakeSietch) ReplayEvent(context.Context, string, string, string, string) (core.Event, bool, error) {
+	return core.Event{}, false, errors.New("replay tests require real sietch storage")
+}
+func (f *fakeSietch) RecordEventOnce(context.Context, core.Event, string, string) (core.Event, error) {
+	return core.Event{}, errors.New("replay tests require real sietch storage")
 }
 func (f *fakeSietch) SetBookmark(_ context.Context, sid, eid, label string) error {
 	f.bookmarks = append(f.bookmarks, struct{ SessionID, EventID, Label string }{sid, eid, label})
@@ -2031,6 +2040,7 @@ func TestRecall_EmbedFailure_DegradesToLexical(t *testing.T) {
 	c, _, ch, emb := newCore()
 	emb.err = errors.New("guild down")
 	ch.kwResp = []core.RecallHit{{Tier: "keyword", Score: 0.5, ID: "k1"}}
+	ch.semErr = errors.New("query_embedding is required")
 
 	out, err := c.Recall(context.Background(), core.RecallInput{
 		UserID:    "u1",
@@ -2038,7 +2048,10 @@ func TestRecall_EmbedFailure_DegradesToLexical(t *testing.T) {
 		QueryText: "kubernetes",
 	})
 	require.NoError(t, err, "embedder downtime must not fail the whole recall")
-	assert.Contains(t, out.Degraded, "embed")
+	assert.Equal(t, []string{"embed"}, out.Degraded)
+	assert.Empty(t, ch.semQueries, "semantic requires an embedding; do not send an invalid request")
+	require.Len(t, out.Hits, 1)
+	assert.Equal(t, "k1", out.Hits[0].ID)
 	require.Len(t, ch.multiQueries, 1)
 	assert.Empty(t, ch.multiQueries[0].QueryEmbedding,
 		"multi call must run with no embedding when embed failed")

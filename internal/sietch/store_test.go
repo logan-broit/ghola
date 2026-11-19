@@ -2,6 +2,7 @@ package sietch_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -46,6 +47,80 @@ func mkEvent(sess core.Session, text string, emb []float32) core.Event {
 		Embedding: emb,
 		CreatedAt: time.Now().UTC(),
 	}
+}
+
+func TestReplay_LegacyDatabaseUpgrade(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := sietch.Open(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(ctx, sess))
+	original, err := s.RecordEvent(ctx, mkEvent(sess, "legacy transcript", nil))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	// The pre-replay schema differs only by the absence of this table.
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(root, sess.ID+".sqlite"))
+	require.NoError(t, err)
+	_, err = db.Exec(`DROP TABLE ingest_receipts`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	pending, err := s.PendingEvents(ctx, sess.ID, "")
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, original.ID, pending[0].ID)
+	require.Equal(t, *original.Text, *pending[0].Text)
+	ev := mkEvent(sess, "new transcript", nil)
+	ev.ID = ""
+	first, err := s.RecordEventOnce(ctx, ev, "pi:upgrade", "fixture-hash")
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	second, found, err := s.ReplayEvent(ctx, sess.ID, sess.UserID, "pi:upgrade", "fixture-hash")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, first, second)
+	stored, err := s.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Equal(t, 2, stored.EventCount)
+	require.ErrorIs(t, s.RemoveSession(ctx, sess.ID), core.ErrReplayProtected)
+}
+
+func TestReplay_LateFailureRollsBackAppendAndReceipt(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := sietch.Open(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	sess := mkSession("u1")
+	require.NoError(t, s.OpenSession(ctx, sess))
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(root, sess.ID+".sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.Exec(`CREATE TRIGGER fail_cursor BEFORE UPDATE OF current_event_id ON session
+		BEGIN SELECT RAISE(ABORT, 'fixture cursor failure'); END`)
+	require.NoError(t, err)
+	ev := mkEvent(sess, "atomic transcript", nil)
+	ev.ID = ""
+	_, err = s.RecordEventOnce(ctx, ev, "pi:atomic", "fixture-hash")
+	require.ErrorContains(t, err, "fixture cursor failure")
+	stored, err := s.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Zero(t, stored.EventCount)
+	_, found, err := s.ReplayEvent(ctx, sess.ID, sess.UserID, "pi:atomic", "fixture-hash")
+	require.NoError(t, err)
+	require.False(t, found)
+	hits, err := s.SearchFTS(ctx, sess.ID, "atomic", 10)
+	require.NoError(t, err)
+	require.Empty(t, hits)
+	_, err = db.Exec(`DROP TRIGGER fail_cursor`)
+	require.NoError(t, err)
+	_, err = s.RecordEventOnce(ctx, ev, "pi:atomic", "fixture-hash")
+	require.NoError(t, err)
+	stored, err = s.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, stored.EventCount)
 }
 
 func TestOpenSession_Idempotent(t *testing.T) {

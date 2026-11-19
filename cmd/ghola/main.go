@@ -11,7 +11,7 @@
 //	GHOLA_LOOPBACK_ONLY       reject non-loopback       (true)
 //	CHAPTERHOUSE_URL          chapterhouse API base     (http://localhost:8080)
 //	CHAPTERHOUSE_API_KEY      per-user Bearer key       (required in prod)
-//	EMBEDDING_URL             embeddings service base   (http://localhost:8082)
+//	EMBEDDING_URL             embeddings service base   (http://localhost:8082; explicit empty disables)
 //	EMBEDDING_MODEL           embedding model name      (qwen3-embedding)
 //	TRUTHSAYER_URL            reranker service base     (empty disables rerank)
 //	RERANK_TOPK               candidate pool sent to reranker (50)
@@ -78,7 +78,10 @@ func run() error {
 		return errors.New("CHAPTERHOUSE_API_KEY is required; set it or pass CHAPTERHOUSE_REQUIRE_KEY=false for local dev against an open server")
 	}
 
-	embedBase := envcfg.String("EMBEDDING_URL", "http://localhost:8082")
+	embedBase, embedConfigured := os.LookupEnv("EMBEDDING_URL")
+	if !embedConfigured {
+		embedBase = "http://localhost:8082"
+	}
 	embedModel := envcfg.String("EMBEDDING_MODEL", "qwen3-embedding")
 
 	truthsayerBase := os.Getenv("TRUTHSAYER_URL")

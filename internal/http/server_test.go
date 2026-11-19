@@ -241,6 +241,100 @@ func TestServer_UserID_FallsBackToDefault(t *testing.T) {
 		"session should carry the resolved default user")
 }
 
+func TestServer_SessionReplayWireContract(t *testing.T) {
+	srv := newTestServer(t)
+	t.Cleanup(srv.Close)
+	id := core.NewID()
+	in := map[string]string{
+		"session_id": id, "user_id": testUserID,
+		"workspace_id": "00000000-0000-4000-8000-000000000021",
+	}
+	for range 2 {
+		resp, body := post(t, srv, "/v1/session_start", in)
+		require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "%s", body)
+		var result struct {
+			Session core.Session `json:"session"`
+		}
+		require.NoError(t, json.Unmarshal(body, &result))
+		require.Equal(t, id, result.Session.ID)
+	}
+	in["workspace_id"] = "00000000-0000-4000-8000-000000000022"
+	resp, body := post(t, srv, "/v1/session_start", in)
+	require.Equal(t, stdhttp.StatusConflict, resp.StatusCode, "%s", body)
+	var apiErr map[string]any
+	require.NoError(t, json.Unmarshal(body, &apiErr))
+	require.Equal(t, "CONFLICT", apiErr["code"])
+	in["session_id"] = "../outside"
+	resp, body = post(t, srv, "/v1/session_start", in)
+	require.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode, "%s", body)
+}
+
+func TestServer_RecordReplayWireContract(t *testing.T) {
+	srv := newTestServer(t)
+	t.Cleanup(srv.Close)
+	sid := core.NewID()
+	resp, body := post(t, srv, "/v1/session_start", map[string]string{
+		"session_id": sid, "user_id": testUserID,
+		"workspace_id": "00000000-0000-4000-8000-000000000021",
+	})
+	require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "%s", body)
+	in := map[string]any{
+		"session_id": sid, "user_id": testUserID, "source_key": "pi:wire",
+		"event": map[string]any{"type": "assistant", "text": "wire fixture"},
+	}
+	var id string
+	for range 2 {
+		resp, body = post(t, srv, "/v1/record", in)
+		require.Equal(t, stdhttp.StatusOK, resp.StatusCode, "%s", body)
+		var result struct {
+			Event core.Event `json:"event"`
+		}
+		require.NoError(t, json.Unmarshal(body, &result))
+		if id == "" {
+			id = result.Event.ID
+		}
+		require.Equal(t, id, result.Event.ID)
+	}
+	in["event"] = map[string]any{"type": "assistant", "text": "conflicting fixture"}
+	resp, body = post(t, srv, "/v1/record", in)
+	require.Equal(t, stdhttp.StatusConflict, resp.StatusCode, "%s", body)
+	var apiErr map[string]any
+	require.NoError(t, json.Unmarshal(body, &apiErr))
+	require.Equal(t, "CONFLICT", apiErr["code"])
+}
+
+func TestServer_ReplayFieldTypesAreClientErrors(t *testing.T) {
+	srv := newTestServer(t)
+	t.Cleanup(srv.Close)
+	for path, body := range map[string]any{
+		"/v1/session_start": map[string]any{"session_id": 17},
+		"/v1/record":        map[string]any{"source_key": true},
+	} {
+		resp, payload := post(t, srv, path, body)
+		require.Equal(t, stdhttp.StatusBadRequest, resp.StatusCode, "%s", payload)
+	}
+}
+
+func TestServer_ReplayCapabilities(t *testing.T) {
+	srv := newTestServer(t)
+	t.Cleanup(srv.Close)
+	resp, err := srv.Client().Get(srv.URL + "/health")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	var body struct {
+		Capabilities map[string]int `json:"capabilities"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, 1, body.Capabilities["session_replay"])
+	require.Equal(t, 1, body.Capabilities["record_replay"])
+	_, listed := post(t, srv, "/v1/list_sessions", map[string]string{"user_id": testUserID})
+	var sessions struct {
+		Sessions []core.Session `json:"sessions"`
+	}
+	require.NoError(t, json.Unmarshal(listed, &sessions))
+	require.Empty(t, sessions.Sessions, "capability discovery must not create probe memories")
+}
+
 func TestServer_Health(t *testing.T) {
 	srv := newTestServer(t)
 	resp, err := srv.Client().Get(srv.URL + "/health")

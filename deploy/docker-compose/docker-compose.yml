@@ -277,7 +277,7 @@ services:
       # Persist the sietch working tier across container recreates.
       # Without it the per-session SQLite files (the working memory
       # not yet consolidated to chapterhouse) die on every redeploy.
-      - ghola-sessions:/root/.ghola/sessions
+      - ghola-sessions:/var/lib/ghola/sessions
 
 volumes:
   postgres-data:

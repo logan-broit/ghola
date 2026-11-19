@@ -14,6 +14,21 @@ import (
 	"github.com/logan-broit/ghola/pkg/embedding"
 )
 
+func TestEmptyURLDisablesEmbedding(t *testing.T) {
+	c := embedding.New(embedding.Config{})
+	for _, batch := range []bool{false, true} {
+		var err error
+		if batch {
+			_, err = c.EmbedBatch(context.Background(), []string{"hello"})
+		} else {
+			_, err = c.Embed(context.Background(), "hello")
+		}
+		if err == nil || err.Error() != "embedding disabled: empty base URL" {
+			t.Fatalf("batch=%v: got %v, want explicit disabled error", batch, err)
+		}
+	}
+}
+
 // fillVec returns an n-element vector filled with v — a deterministic
 // stand-in for an upstream response body.
 func fillVec(n int, v float32) []float32 {

@@ -1,0 +1,13 @@
+# Overlay on docker-compose.mac.yml. No model downloads or inference services.
+# Keep the same Compose project name when enabling models later: volumes persist.
+services:
+  chapterhouse:
+    environment:
+      EMBEDDING_URL: ""
+  ghola:
+    environment:
+      EMBEDDING_URL: ""
+      TRUTHSAYER_URL: ""
+      # Unembedded events stay in SQLite until backfill can safely drain them.
+      # Keep sessions open so cwd-scoped keyword recall can still find that text.
+      GHOLA_SESSION_IDLE_HOURS: "0"
